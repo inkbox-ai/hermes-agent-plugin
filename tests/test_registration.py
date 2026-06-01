@@ -1,0 +1,72 @@
+import importlib.util
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_entry_module():
+    module_name = "hermes_agent_plugin_test_entry"
+    sys.modules.pop(module_name, None)
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        ROOT / "__init__.py",
+        submodule_search_locations=[str(ROOT)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class DummyContext:
+    def __init__(self):
+        self.platforms = []
+        self.tools = []
+        self.cli_commands = []
+        self.commands = []
+        self.skills = []
+
+    def register_platform(self, **kwargs):
+        self.platforms.append(kwargs)
+
+    def register_tool(self, *args, **kwargs):
+        self.tools.append((args, kwargs))
+
+    def register_cli_command(self, **kwargs):
+        self.cli_commands.append(kwargs)
+
+    def register_command(self, *args, **kwargs):
+        self.commands.append((args, kwargs))
+
+    def register_skill(self, *args, **kwargs):
+        self.skills.append((args, kwargs))
+
+
+def test_registers_inkbox_platform_tools_commands_and_skills():
+    entry = _load_entry_module()
+    ctx = DummyContext()
+
+    entry.register(ctx)
+
+    assert len(ctx.platforms) == 1
+    platform = ctx.platforms[0]
+    assert platform["name"] == "inkbox"
+    assert callable(platform["adapter_factory"])
+    assert callable(platform["setup_fn"])
+    assert callable(platform["standalone_sender_fn"])
+    assert platform["required_env"] == ["INKBOX_API_KEY", "INKBOX_IDENTITY"]
+
+    tool_names = {args[0] for args, _kwargs in ctx.tools}
+    assert tool_names == {
+        "inkbox_whoami",
+        "inkbox_send_email",
+        "inkbox_send_sms",
+        "inkbox_place_call",
+    }
+
+    assert ctx.cli_commands[0]["name"] == "inkbox"
+    assert ctx.commands[0][0][0] == "inkbox"
+    assert {args[0] for args, _kwargs in ctx.skills}

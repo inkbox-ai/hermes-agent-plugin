@@ -1,0 +1,57 @@
+name: inkbox
+label: Inkbox
+kind: platform
+version: 0.1.0
+description: Inkbox email, SMS/MMS, and voice platform plugin for Hermes Agent.
+author: Inkbox
+requires_env:
+  - name: INKBOX_API_KEY
+    description: "Inkbox API key. Agent-scoped keys are recommended."
+    prompt: "Inkbox API key"
+    secret: true
+  - name: INKBOX_IDENTITY
+    description: "Inkbox agent identity handle."
+    prompt: "Inkbox identity handle"
+    secret: false
+optional_env:
+  - name: INKBOX_SIGNING_KEY
+    description: "Webhook signing key for inbound email, SMS, and calls."
+    prompt: "Inkbox signing key"
+    secret: true
+  - name: INKBOX_BASE_URL
+    description: "Inkbox API base URL. Defaults to https://inkbox.ai."
+    prompt: "Inkbox base URL"
+    secret: false
+  - name: INKBOX_PUBLIC_URL
+    description: "Public Hermes gateway URL. Omit to use an Inkbox tunnel."
+    prompt: "Public URL"
+    secret: false
+  - name: INKBOX_TUNNEL_NAME
+    description: "Optional Inkbox tunnel name override."
+    prompt: "Tunnel name"
+    secret: false
+  - name: INKBOX_HOME_CHANNEL
+    description: "Default Inkbox chat/contact id for cron or notification delivery."
+    prompt: "Home channel"
+    secret: false
+  - name: INKBOX_ALLOWED_USERS
+    description: "Comma-separated local allowlist. Usually leave empty and use Inkbox contact rules."
+    prompt: "Allowed users"
+    secret: false
+  - name: INKBOX_ALLOW_ALL_USERS
+    description: "Allow all senders admitted by Inkbox contact rules."
+    prompt: "Allow all users"
+    secret: false
+  - name: INKBOX_REALTIME_API_KEY
+    description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted."
+    prompt: "Realtime API key"
+    secret: true
+  - name: INKBOX_REALTIME_MODEL
+    description: "Realtime voice model. Defaults to gpt-realtime-2."
+    prompt: "Realtime model"
+    secret: false
+provides_tools:
+  - inkbox_whoami
+  - inkbox_send_email
+  - inkbox_send_sms
+  - inkbox_place_call
