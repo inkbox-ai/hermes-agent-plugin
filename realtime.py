@@ -144,8 +144,23 @@ class RealtimeCallMeta:
     direction: str  # "inbound" or "outbound"
     agent_identity_email: Optional[str] = None
     agent_identity_phone: Optional[str] = None
+    # True only when a real Inkbox contact resolved. When false, contact_name
+    # may be a raw phone number / "unknown" and must NOT be treated as known.
+    contact_known: bool = False
+    # Full resolved contact record so the model knows who it's talking to
+    # without a mid-call lookup.
+    contact_emails: List[str] = field(default_factory=list)
+    contact_phones: List[str] = field(default_factory=list)
+    contact_company: Optional[str] = None
+    contact_notes: Optional[str] = None
     outbound_purpose: Optional[str] = None
     outbound_opening: Optional[str] = None
+    # Richer outbound-call context loaded from the call-context file. These
+    # are the keys the legacy text-mode call handler reads, so realtime calls
+    # keep the same "why we called" continuity.
+    outbound_reason: Optional[str] = None
+    outbound_scheduled_by: Optional[str] = None
+    outbound_conversation_summary: Optional[str] = None
 
 
 @dataclass
@@ -184,6 +199,10 @@ class _BridgeState:
     post_call_actions: List[Dict[str, str]] = field(default_factory=list)
     last_response_id: Optional[str] = None
     closed: bool = False
+    greeting_triggered: bool = False
+    # Inkbox-assigned stream id from the `start` event; echoed on outbound
+    # media / audio_done frames.
+    stream_id: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,16 +230,38 @@ def build_realtime_instructions(
     if meta.agent_identity_phone:
         lines.append(f"Your phone number: {meta.agent_identity_phone}.")
     if meta.remote_phone_number:
-        lines.append(f"Caller phone number: {meta.remote_phone_number}.")
-    if meta.contact_name and meta.contact_name not in ("unknown", ""):
+        lines.append(f"Caller is calling from: {meta.remote_phone_number}.")
+    if meta.contact_known and meta.contact_name and meta.contact_name not in ("unknown", ""):
+        lines.append(
+            "You already know who this is — do NOT look them up or ask for "
+            "details you already have below.",
+        )
         lines.append(f"Caller name: {meta.contact_name}.")
+        if meta.contact_emails:
+            lines.append(f"Caller email(s): {', '.join(meta.contact_emails)}.")
+        if meta.contact_phones:
+            lines.append(f"Caller phone(s) on file: {', '.join(meta.contact_phones)}.")
+        if meta.contact_company:
+            lines.append(f"Caller company: {meta.contact_company}.")
+        if meta.contact_notes:
+            lines.append(f"Notes about the caller: {meta.contact_notes}")
     else:
         lines.append(
-            "No matching contact record is loaded; use the phone number or a neutral greeting.",
+            "No matching contact record is loaded — you do NOT know who this is. "
+            "Greet them neutrally; you may look them up by phone number if needed.",
         )
     if meta.direction == "outbound":
         if meta.outbound_purpose:
             lines.append(f"This is an outbound call you placed. Purpose: {meta.outbound_purpose}")
+        if meta.outbound_reason:
+            lines.append(f"Reason for the call: {meta.outbound_reason}")
+        if meta.outbound_scheduled_by:
+            lines.append(f"This call was scheduled by: {meta.outbound_scheduled_by}")
+        if meta.outbound_conversation_summary:
+            lines.append(
+                f"Summary of the prior conversation that led to this call:\n"
+                f"{meta.outbound_conversation_summary}",
+            )
         if meta.outbound_opening:
             lines.append(
                 f"Preferred opening message (say this naturally as your first turn): "
@@ -246,6 +287,41 @@ def build_realtime_instructions(
     return "\n".join(lines)
 
 
+def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
+    """Build the instruction for the proactive opening line.
+
+    Realtime calls must not start with silence. Inbound calls get a short
+    friendly greeting. Outbound calls lead with the configured opening/purpose
+    so the callee immediately knows why we called.
+    """
+    first_name = ""
+    if meta.contact_known and meta.contact_name and meta.contact_name not in ("unknown", ""):
+        first_name = meta.contact_name.split()[0]
+
+    if meta.direction == "outbound":
+        if meta.outbound_opening:
+            return (
+                "Open the call by saying this naturally as the very first thing, "
+                "with no greeting before it:\n" + meta.outbound_opening
+            )
+        if meta.outbound_purpose:
+            return (
+                "Open the call by greeting the person and immediately explaining "
+                f"why you are calling: {meta.outbound_purpose}"
+            )
+        return (
+            "Open the call by greeting the person and explaining why you are "
+            "calling. Be specific and concise."
+        )
+
+    who = first_name if first_name else "there"
+    return (
+        f"Greet the caller now as the very first thing you say. Say something "
+        f"like 'Hi {who}, this is your Hermes agent — how can I help?' Keep it to "
+        f"one short sentence and then wait for them to respond."
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Bridge
 # ─────────────────────────────────────────────────────────────────────────────
@@ -267,6 +343,15 @@ PostCallActionsCallback = Callable[
     Awaitable[None],
 ]
 
+# Called when the realtime call WebSocket has ended, regardless of whether the
+# model explicitly registered post-call actions. This mirrors the legacy
+# Inkbox STT/TTS path's [call_ended] reflection so commitments made during a
+# realtime call can still be followed up safely.
+CallEndedCallback = Callable[
+    [RealtimeCallMeta, List[Tuple[str, str]]],
+    Awaitable[None],
+]
+
 
 async def run_inkbox_realtime_bridge(
     *,
@@ -275,6 +360,7 @@ async def run_inkbox_realtime_bridge(
     meta: RealtimeCallMeta,
     on_agent_consult: AgentConsultCallback,
     on_post_call_actions: PostCallActionsCallback,
+    on_call_ended: CallEndedCallback,
 ) -> None:
     """Run the bridge for the duration of one call.
 
@@ -289,7 +375,7 @@ async def run_inkbox_realtime_bridge(
         logger.error("[Inkbox realtime] aiohttp not available; cannot open Realtime API WS")
         return
     if not config.has_credential:
-        logger.error("[Inkbox realtime] No OpenAI credential configured; refusing to bridge")
+        logger.error("[Inkbox realtime] No OpenAI credential (api_key or oauth_token); refusing to bridge")
         return
 
     state = _BridgeState()
@@ -300,7 +386,14 @@ async def run_inkbox_realtime_bridge(
     try:
         try:
             bearer = await _resolve_realtime_bearer(session, config)
-            headers = {"Authorization": f"Bearer {bearer}"}
+        except Exception as exc:
+            logger.error("[Inkbox realtime] Could not resolve OpenAI bearer: %s", exc)
+            return
+        if not bearer:
+            return
+
+        headers = {"Authorization": f"Bearer {bearer}"}
+        try:
             openai_ws = await session.ws_connect(url, headers=headers, heartbeat=30)
         except Exception as exc:
             logger.error("[Inkbox realtime] Failed to connect to OpenAI Realtime: %s", exc)
@@ -310,7 +403,7 @@ async def run_inkbox_realtime_bridge(
             await _send_session_update(openai_ws, config, meta)
             # Two concurrent pumps:
             inkbox_task = asyncio.create_task(
-                _inkbox_to_openai_pump(inkbox_ws, openai_ws, state),
+                _inkbox_to_openai_pump(inkbox_ws, openai_ws, state, meta),
                 name=f"realtime-inkbox-pump-{meta.call_id}",
             )
             openai_task = asyncio.create_task(
@@ -346,18 +439,28 @@ async def run_inkbox_realtime_bridge(
             except Exception:
                 pass
 
-        # Dispatch any queued post-call actions outside the call WS lifecycle.
-        if state.post_call_actions:
-            try:
-                await on_post_call_actions(
-                    meta, state.post_call_actions, list(state.transcript),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[Inkbox realtime] Post-call action dispatch failed: %s", exc,
-                )
+        await _dispatch_post_call(state, meta, on_post_call_actions, on_call_ended)
     finally:
         await session.close()
+
+
+async def _dispatch_post_call(
+    state: _BridgeState,
+    meta: RealtimeCallMeta,
+    on_post_call_actions: "PostCallActionsCallback",
+    on_call_ended: "CallEndedCallback",
+) -> None:
+    """Dispatch exactly one follow-up turn after a call ends."""
+    if state.post_call_actions:
+        try:
+            await on_post_call_actions(meta, state.post_call_actions, list(state.transcript))
+        except Exception as exc:
+            logger.warning("[Inkbox realtime] Post-call action dispatch failed: %s", exc)
+    else:
+        try:
+            await on_call_ended(meta, list(state.transcript))
+        except Exception as exc:
+            logger.warning("[Inkbox realtime] Call-ended dispatch failed: %s", exc)
 
 
 async def _resolve_realtime_bearer(session: Any, config: RealtimeConfig) -> str:
@@ -388,6 +491,26 @@ async def _resolve_realtime_bearer(session: Any, config: RealtimeConfig) -> str:
     if not secret:
         raise RuntimeError("client_secrets response had no value")
     return str(secret)
+
+
+async def _maybe_send_greeting(
+    openai_ws: Any, state: _BridgeState, meta: RealtimeCallMeta,
+) -> None:
+    """Fire the proactive opening line once, so calls don't start with silence."""
+    if state.greeting_triggered:
+        return
+    state.greeting_triggered = True
+    try:
+        await openai_ws.send_str(json.dumps({
+            "type": "response.create",
+            "response": {"instructions": build_realtime_greeting(meta)},
+        }))
+        logger.info(
+            "[Inkbox realtime] greeting sent for call_id=%s direction=%s",
+            meta.call_id, meta.direction,
+        )
+    except Exception as exc:
+        logger.debug("[Inkbox realtime] greeting send failed: %s", exc)
 
 
 async def _send_session_update(
@@ -436,15 +559,14 @@ async def _send_session_update(
 
 
 async def _inkbox_to_openai_pump(
-    inkbox_ws: Any, openai_ws: Any, state: _BridgeState,
+    inkbox_ws: Any, openai_ws: Any, state: _BridgeState, meta: RealtimeCallMeta,
 ) -> None:
-    """Forward caller audio frames from Inkbox to the OpenAI Realtime session.
+    """Forward caller audio from Inkbox to OpenAI; fire the opening greeting.
 
-    Inkbox sends each audio frame as a JSON message of the form
-    ``{"event": "media", "media": {"payload": "<base64-mulaw>"}}`` over the
-    accepted WebSocket. We unwrap and re-emit as
-    ``input_audio_buffer.append`` events. With server-side VAD enabled, the
-    realtime model auto-detects speech boundaries.
+    Inkbox sends frames as ``{"event": "media", "media": {"payload": "<b64>"}}``.
+    We re-emit as ``input_audio_buffer.append``; server-side VAD handles turns.
+    The proactive greeting fires once on the ``start`` event, or on first media
+    if no ``start`` is sent.
     """
     async for msg in inkbox_ws:
         if state.closed:
@@ -455,7 +577,12 @@ async def _inkbox_to_openai_pump(
             except (TypeError, ValueError):
                 continue
             event = (frame.get("event") or "").lower()
-            if event == "media":
+            if event == "start":
+                state.stream_id = frame.get("stream_id") or state.stream_id
+                await _maybe_send_greeting(openai_ws, state, meta)
+            elif event == "media":
+                if not state.greeting_triggered:
+                    await _maybe_send_greeting(openai_ws, state, meta)
                 payload_b64 = (frame.get("media") or {}).get("payload")
                 if payload_b64:
                     await openai_ws.send_str(json.dumps({
@@ -465,8 +592,6 @@ async def _inkbox_to_openai_pump(
             elif event in {"stop", "closed", "hangup"}:
                 logger.info("[Inkbox realtime] Inkbox WS signaled %s", event)
                 return
-            # Other Inkbox event types ("start", "mark", ...) are ignored —
-            # they're book-keeping for the Inkbox side, not for the model.
         elif msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
             return
 
@@ -481,12 +606,30 @@ async def _openai_to_inkbox_pump(
     on_agent_consult: AgentConsultCallback,
 ) -> None:
     """Forward audio + handle tool calls from OpenAI back to Inkbox."""
-    # Accumulator for streaming function call arguments. The Realtime API
-    # delivers args as a sequence of `response.function_call_arguments.delta`
-    # events terminated by `response.function_call_arguments.done`; we collect
-    # by call_id then dispatch on done.
-    pending_calls: Dict[str, Dict[str, str]] = {}
-    dispatched_tool_items: set[str] = set()
+    # Function-call accumulation keyed by item_id: {call_id, name, args}.
+    # The name is reliably present on ``response.output_item.added``; args
+    # stream via ``...arguments.delta`` and finalize on ``...arguments.done``.
+    # We also accept the completed function_call item on
+    # ``response.output_item.done`` / ``conversation.item.done`` as a fallback,
+    # and dedupe by call_id so a call is dispatched at most once.
+    fn_calls: Dict[str, Dict[str, str]] = {}
+    dispatched: set = set()
+
+    async def _finalize_fn_call(entry: Dict[str, str]) -> None:
+        cid = (entry or {}).get("call_id") or ""
+        if not cid or cid in dispatched:
+            return
+        dispatched.add(cid)
+        await _dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id=cid,
+            name=entry.get("name") or "",
+            arguments_json=entry.get("args") or "{}",
+            state=state,
+            config=config,
+            meta=meta,
+            on_agent_consult=on_agent_consult,
+        )
 
     async for msg in openai_ws:
         if state.closed:
@@ -503,31 +646,48 @@ async def _openai_to_inkbox_pump(
             continue
         ftype = frame.get("type", "")
 
-        if ftype in {
-            "conversation.output_audio.delta",
-            "response.audio.delta",
-            "response.output_audio.delta",
-        }:
-            # Audio bytes are already μ-law base64. Forward as an Inkbox media
-            # frame. Streaming is handled by the realtime model's pacing; we
-            # don't need our own jitter buffer for telephony @ 8 kHz.
-            delta_b64 = frame.get("delta") or frame.get("data") or ""
+        # GA emits ``response.output_audio.delta``; beta ``response.audio.delta``.
+        if ftype in ("response.output_audio.delta", "response.audio.delta"):
+            # Already μ-law base64. Forward as an outbound Inkbox media frame,
+            # echoing the stream_id and tagging the track per the Inkbox media
+            # protocol.
+            delta_b64 = frame.get("delta") or ""
             if delta_b64:
+                out = {
+                    "event": "media",
+                    "media": {"payload": delta_b64, "track": "outbound"},
+                }
+                if state.stream_id:
+                    out["stream_id"] = state.stream_id
                 try:
-                    await inkbox_ws.send_str(json.dumps({
-                        "event": "media",
-                        "media": {"payload": delta_b64},
-                    }))
+                    await inkbox_ws.send_str(json.dumps(out))
                 except Exception as exc:
                     logger.debug("[Inkbox realtime] Inkbox WS send failed: %s", exc)
                     return
 
-        elif ftype in {
-            "response.output_text.done",
-            "response.audio_transcript.done",
+        # Outbound audio for a response finished — tell Inkbox to flush/play.
+        elif ftype in ("response.output_audio.done", "response.audio.done"):
+            done = {"event": "audio_done"}
+            if state.stream_id:
+                done["stream_id"] = state.stream_id
+            try:
+                await inkbox_ws.send_str(json.dumps(done))
+            except Exception:
+                pass
+
+        # Caller started speaking (barge-in) — drop any queued outbound audio.
+        elif ftype == "input_audio_buffer.speech_started":
+            try:
+                await inkbox_ws.send_str(json.dumps({"event": "clear"}))
+            except Exception:
+                pass
+
+        # GA: response.output_audio_transcript.done; beta: response.audio_transcript.done
+        elif ftype in (
             "response.output_audio_transcript.done",
-        }:
-            text = (frame.get("transcript") or frame.get("text") or "").strip()
+            "response.audio_transcript.done",
+        ):
+            text = (frame.get("transcript") or "").strip()
             if text:
                 state.transcript.append(("agent", text))
 
@@ -536,78 +696,45 @@ async def _openai_to_inkbox_pump(
             if text:
                 state.transcript.append(("caller", text))
 
+        # Function-call item announced — capture name/call_id by item_id.
+        elif ftype == "response.output_item.added":
+            item = frame.get("item") or {}
+            if item.get("type") == "function_call":
+                iid = item.get("id") or frame.get("item_id") or ""
+                if iid:
+                    fn_calls[iid] = {
+                        "call_id": item.get("call_id") or "",
+                        "name": item.get("name") or "",
+                        "args": item.get("arguments") or "",
+                    }
+
         elif ftype == "response.function_call_arguments.delta":
-            item_id = frame.get("item_id") or frame.get("call_id") or ""
-            delta = frame.get("delta") or ""
-            if item_id:
-                pending = pending_calls.setdefault(
-                    item_id,
-                    {"name": "", "call_id": "", "args": ""},
-                )
-                pending["args"] += delta
-                if frame.get("name"):
-                    pending["name"] = str(frame.get("name"))
-                if frame.get("call_id"):
-                    pending["call_id"] = str(frame.get("call_id"))
+            key = frame.get("item_id") or frame.get("call_id") or ""
+            entry = fn_calls.setdefault(key, {"call_id": "", "name": "", "args": ""})
+            if not entry.get("call_id") and frame.get("call_id"):
+                entry["call_id"] = frame["call_id"]
+            entry["args"] = (entry.get("args") or "") + (frame.get("delta") or "")
 
         elif ftype == "response.function_call_arguments.done":
-            item_id = str(frame.get("item_id") or frame.get("call_id") or "")
-            if item_id and item_id in dispatched_tool_items:
-                continue
-            buffered = pending_calls.pop(item_id, {})
-            call_id = str(frame.get("call_id") or buffered.get("call_id") or item_id)
-            name = str(frame.get("name") or buffered.get("name") or "")
-            args_json = (
-                frame.get("arguments")
-                or buffered.get("args")
-                or "{}"
-            )
-            if item_id:
-                dispatched_tool_items.add(item_id)
-            await _dispatch_tool_call(
-                openai_ws=openai_ws,
-                call_id=call_id,
-                name=name,
-                arguments_json=args_json,
-                state=state,
-                config=config,
-                meta=meta,
-                on_agent_consult=on_agent_consult,
-            )
+            key = frame.get("item_id") or frame.get("call_id") or ""
+            entry = fn_calls.get(key) or fn_calls.get(frame.get("call_id") or "") or {}
+            if frame.get("call_id"):
+                entry["call_id"] = frame["call_id"]
+            if frame.get("name"):
+                entry["name"] = frame["name"]
+            if frame.get("arguments"):
+                entry["args"] = frame["arguments"]
+            await _finalize_fn_call(entry)
 
-        elif ftype == "conversation.item.done":
+        # Fallback: a completed function_call item we haven't dispatched yet.
+        elif ftype in ("response.output_item.done", "conversation.item.done"):
             item = frame.get("item") or {}
-            if not isinstance(item, dict) or item.get("type") != "function_call":
-                continue
-            item_id = str(
-                item.get("id")
-                or frame.get("item_id")
-                or item.get("call_id")
-                or frame.get("call_id")
-                or ""
-            )
-            if item_id and item_id in dispatched_tool_items:
-                continue
-            call_id = str(
-                item.get("call_id")
-                or frame.get("call_id")
-                or item.get("id")
-                or item_id
-            )
-            name = str(item.get("name") or frame.get("name") or "")
-            args_json = str(item.get("arguments") or frame.get("arguments") or "{}")
-            if item_id:
-                dispatched_tool_items.add(item_id)
-            await _dispatch_tool_call(
-                openai_ws=openai_ws,
-                call_id=call_id,
-                name=name,
-                arguments_json=args_json,
-                state=state,
-                config=config,
-                meta=meta,
-                on_agent_consult=on_agent_consult,
-            )
+            if item.get("type") == "function_call":
+                await _finalize_fn_call({
+                    "call_id": item.get("call_id") or "",
+                    "name": item.get("name") or "",
+                    "args": item.get("arguments") or "",
+                })
 
         elif ftype == "response.done":
             resp = frame.get("response") or {}
@@ -619,8 +746,8 @@ async def _openai_to_inkbox_pump(
             err = frame.get("error") or frame
             logger.warning("[Inkbox realtime] OpenAI error event: %s", err)
 
-        # All other event types (session.created, session.updated,
-        # rate_limits.updated, response.output_item.added, …) are ignored.
+        # Other event types (session.created, session.updated,
+        # rate_limits.updated, …) are ignored.
 
 
 async def _dispatch_tool_call(
@@ -674,10 +801,13 @@ async def _dispatch_tool_call(
         # the model says "one moment" while the agent thinks. The final tool
         # result is what the model uses to compose the actual spoken answer.
         try:
+            # Override instructions for just this turn so the model says a
+            # short filler line while the agent runs. No modalities field —
+            # it inherits the session's output_modalities (GA rejects
+            # output_modalities inside response.create).
             await openai_ws.send_str(json.dumps({
                 "type": "response.create",
                 "response": {
-                    "output_modalities": ["audio"],
                     "instructions": (
                         "Say only 'One moment.' Do not mention waiting for "
                         "context or checking a lookup."
@@ -745,6 +875,9 @@ async def _submit_tool_result(
                 "output": json.dumps(output),
             },
         }))
+        # Bare response.create — let the session's configured output
+        # modalities + audio settings apply. Passing a beta-style
+        # ``modalities`` field here would be rejected by GA models.
         await openai_ws.send_str(json.dumps({
             "type": "response.create",
         }))

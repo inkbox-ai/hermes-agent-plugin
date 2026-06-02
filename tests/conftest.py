@@ -39,8 +39,8 @@ if "gateway.config" not in sys.modules:
 
     @dataclass
     class MessageEvent:
-        chat_id: str
-        text: str
+        chat_id: str = ""
+        text: str = ""
         message_type: MessageType = MessageType.TEXT
         user_id: str | None = None
         thread_id: str | None = None
@@ -48,6 +48,21 @@ if "gateway.config" not in sys.modules:
         attachments: list[Any] = field(default_factory=list)
         metadata: dict[str, Any] = field(default_factory=dict)
         auto_skill: str | None = None
+        source: Any = None
+        raw_message: dict[str, Any] | None = None
+        reply_to_message_id: str | None = None
+        chat_name: str | None = None
+        user_name: str | None = None
+        platform: Any = None
+        message_text: str = ""
+        timestamp: float | None = None
+        raw_event: dict[str, Any] | None = None
+
+        def __post_init__(self):
+            if not self.text and self.message_text:
+                self.text = self.message_text
+            if self.raw_message is None and self.raw_event is not None:
+                self.raw_message = self.raw_event
 
     @dataclass
     class SendResult:
@@ -60,6 +75,9 @@ if "gateway.config" not in sys.modules:
         def __init__(self, config, platform):
             self.config = config
             self.platform = platform
+
+        def build_source(self, **kwargs):
+            return types.SimpleNamespace(**kwargs)
 
     base_mod.BasePlatformAdapter = BasePlatformAdapter
     base_mod.MessageEvent = MessageEvent
