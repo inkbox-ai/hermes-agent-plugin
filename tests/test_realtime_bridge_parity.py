@@ -13,13 +13,17 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin import realtime as realtime_mod
 from inkbox_plugin.realtime import (
+    DELETE_POST_CALL_ACTION_TOOL_NAME,
+    EDIT_POST_CALL_ACTION_TOOL_NAME,
     POST_CALL_ACTION_TOOL_NAME,
     RealtimeCallMeta,
     RealtimeConfig,
     _BridgeState,
+    _dispatch_tool_call,
     _dispatch_post_call,
     _maybe_send_greeting,
     _openai_to_inkbox_pump,
+    _send_session_update,
     build_realtime_greeting,
     build_realtime_instructions,
 )
@@ -103,6 +107,28 @@ def test_instructions_include_full_contact_and_outbound_context():
     assert "Follow up on the overdue invoice" in text
     assert "billing workflow" in text
     assert "Customer promised to pay by Friday." in text
+
+
+def test_session_update_exposes_post_call_edit_and_delete_tools():
+    ws = _FakeWS()
+
+    asyncio.run(_send_session_update(
+        ws,
+        RealtimeConfig(enabled=True, api_key="sk-test"),
+        _meta(),
+    ))
+
+    tool_names = [tool["name"] for tool in ws.sent[0]["session"]["tools"]]
+    assert tool_names == [
+        "hermes_agent_consult",
+        POST_CALL_ACTION_TOOL_NAME,
+        EDIT_POST_CALL_ACTION_TOOL_NAME,
+        DELETE_POST_CALL_ACTION_TOOL_NAME,
+    ]
+
+    instructions = ws.sent[0]["session"]["instructions"]
+    assert EDIT_POST_CALL_ACTION_TOOL_NAME in instructions
+    assert DELETE_POST_CALL_ACTION_TOOL_NAME in instructions
 
 
 def test_unknown_contact_greeting_does_not_use_raw_phone_as_name():
@@ -211,6 +237,64 @@ def test_ga_function_call_events_dispatch_once_with_buffered_name():
     ))
 
     assert state.post_call_actions == [{"action": "Email Dima", "details": ""}]
+
+
+def test_edit_and_delete_post_call_actions_by_index():
+    state = _BridgeState()
+    state.post_call_actions = [
+        {"action": "Email Dima", "details": ""},
+        {"action": "Text Alex", "details": "old wording"},
+    ]
+    openai_ws = _FakeWS()
+
+    async def _noop(*_args, **_kwargs):
+        return ""
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="edit-call",
+        name=EDIT_POST_CALL_ACTION_TOOL_NAME,
+        arguments_json=json.dumps({
+            "action_index": 2,
+            "action": "Send SMS to Alex",
+            "details": "new wording",
+        }),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+
+    assert state.post_call_actions[1] == {
+        "action": "Send SMS to Alex",
+        "details": "new wording",
+    }
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="delete-call",
+        name=DELETE_POST_CALL_ACTION_TOOL_NAME,
+        arguments_json=json.dumps({"action_index": 1}),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+
+    assert state.post_call_actions == [{
+        "action": "Send SMS to Alex",
+        "details": "new wording",
+    }]
+
+    outputs = [
+        json.loads(frame["item"]["output"])
+        for frame in openai_ws.sent
+        if frame["type"] == "conversation.item.create"
+    ]
+    assert outputs[0]["status"] == "updated"
+    assert outputs[0]["action_index"] == 2
+    assert outputs[1]["status"] == "deleted"
+    assert outputs[1]["action_count"] == 1
 
 
 def test_post_call_dispatch_runs_exactly_one_path():

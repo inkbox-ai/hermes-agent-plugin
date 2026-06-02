@@ -56,6 +56,8 @@ INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 AGENT_CONSULT_TOOL_NAME = "hermes_agent_consult"
 POST_CALL_ACTION_TOOL_NAME = "register_post_call_action"
+EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action"
+DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action"
 
 # How long to wait for the agent_consult tool to complete before giving up and
 # returning an error tool result. The realtime model is sitting idle while this
@@ -124,6 +126,62 @@ def _post_call_action_tool_schema() -> Dict[str, Any]:
                 },
             },
             "required": ["action"],
+        },
+    }
+
+
+def _edit_post_call_action_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": EDIT_POST_CALL_ACTION_TOOL_NAME,
+        "description": (
+            "Edit work previously registered for after this phone call ends. "
+            "Use the one-based action_index returned by register_post_call_action "
+            "when the caller changes the recipient, channel, wording, or scope."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_index": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "One-based index of the queued post-call action to edit.",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Replacement plain-English task. Omit to keep the current task.",
+                },
+                "details": {
+                    "type": "string",
+                    "description": (
+                        "Replacement optional draft text, hints, or constraints. "
+                        "Pass an empty string to clear details."
+                    ),
+                },
+            },
+            "required": ["action_index"],
+        },
+    }
+
+
+def _delete_post_call_action_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": DELETE_POST_CALL_ACTION_TOOL_NAME,
+        "description": (
+            "Delete work previously registered for after this phone call ends. "
+            "Use this when the caller cancels a queued follow-up."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_index": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "One-based index of the queued post-call action to delete.",
+                },
+            },
+            "required": ["action_index"],
         },
     }
 
@@ -277,6 +335,9 @@ def build_realtime_instructions(
         f"If the caller asks for work to happen after the call, call "
         f"{POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for "
         f"after the call; do not claim it has already been completed.",
+        f"If the caller changes or cancels previously queued after-call work, call "
+        f"{EDIT_POST_CALL_ACTION_TOOL_NAME} or {DELETE_POST_CALL_ACTION_TOOL_NAME} "
+        f"using the action index returned when the work was queued.",
         f"Call {AGENT_CONSULT_TOOL_NAME} only when the caller asks for current "
         f"external data, session history, a calendar lookup, or other work that "
         f"requires the full Hermes agent. Do not call it for greetings, identity, "
@@ -551,6 +612,8 @@ async def _send_session_update(
             "tools": [
                 _agent_consult_tool_schema(),
                 _post_call_action_tool_schema(),
+                _edit_post_call_action_tool_schema(),
+                _delete_post_call_action_tool_schema(),
             ],
             "tool_choice": "auto",
         },
@@ -780,10 +843,83 @@ async def _dispatch_tool_call(
         })
         await _submit_tool_result(openai_ws, call_id, {
             "status": "queued",
+            "action_index": len(state.post_call_actions),
             "action_count": len(state.post_call_actions),
             "message": (
                 "Action queued for after the call. Tell the caller the action "
                 "is queued; do not claim it is already done."
+            ),
+        })
+        return
+
+    if name == EDIT_POST_CALL_ACTION_TOOL_NAME:
+        raw_index = args.get("action_index")
+        try:
+            action_index = int(raw_index)
+        except (TypeError, ValueError):
+            action_index = 0
+        if action_index < 1 or action_index > len(state.post_call_actions):
+            await _submit_tool_result(openai_ws, call_id, {
+                "error": "invalid action_index",
+                "action_count": len(state.post_call_actions),
+            })
+            return
+
+        has_action = "action" in args
+        has_details = "details" in args
+        if not has_action and not has_details:
+            await _submit_tool_result(openai_ws, call_id, {
+                "error": "missing action or details argument",
+            })
+            return
+
+        queued = state.post_call_actions[action_index - 1]
+        if has_action:
+            new_action = (args.get("action") or "").strip()
+            if not new_action:
+                await _submit_tool_result(openai_ws, call_id, {
+                    "error": "action cannot be empty",
+                })
+                return
+            queued["action"] = new_action
+        if has_details:
+            queued["details"] = (args.get("details") or "").strip()
+
+        await _submit_tool_result(openai_ws, call_id, {
+            "status": "updated",
+            "action_index": action_index,
+            "action_count": len(state.post_call_actions),
+            "action": queued,
+            "message": (
+                "Queued after-call action updated. If the caller needs to know, "
+                "confirm briefly that the queued work was changed."
+            ),
+        })
+        return
+
+    if name == DELETE_POST_CALL_ACTION_TOOL_NAME:
+        raw_index = args.get("action_index")
+        try:
+            action_index = int(raw_index)
+        except (TypeError, ValueError):
+            action_index = 0
+        if action_index < 1 or action_index > len(state.post_call_actions):
+            await _submit_tool_result(openai_ws, call_id, {
+                "error": "invalid action_index",
+                "action_count": len(state.post_call_actions),
+            })
+            return
+
+        deleted = state.post_call_actions.pop(action_index - 1)
+        await _submit_tool_result(openai_ws, call_id, {
+            "status": "deleted",
+            "deleted_action": deleted,
+            "action_index": action_index,
+            "action_count": len(state.post_call_actions),
+            "remaining_actions": list(state.post_call_actions),
+            "message": (
+                "Queued after-call action deleted. If the caller needs to know, "
+                "confirm briefly that it was canceled."
             ),
         })
         return
