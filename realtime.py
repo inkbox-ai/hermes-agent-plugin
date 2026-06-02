@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import time
@@ -58,6 +59,7 @@ AGENT_CONSULT_TOOL_NAME = "hermes_agent_consult"
 POST_CALL_ACTION_TOOL_NAME = "register_post_call_action"
 EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action"
 DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action"
+HANG_UP_CALL_TOOL_NAME = "hang_up_call"
 
 # How long to wait for the agent_consult tool to complete before giving up and
 # returning an error tool result. The realtime model is sitting idle while this
@@ -182,6 +184,28 @@ def _delete_post_call_action_tool_schema() -> Dict[str, Any]:
                 },
             },
             "required": ["action_index"],
+        },
+    }
+
+
+def _hang_up_call_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": HANG_UP_CALL_TOOL_NAME,
+        "description": (
+            "End the live phone call. Use this only after the caller asks to "
+            "hang up, says goodbye, or the conversation is clearly complete. "
+            "If a final goodbye is needed, say it before calling this tool."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Optional short reason for ending the call.",
+                },
+            },
+            "required": [],
         },
     }
 
@@ -338,6 +362,9 @@ def build_realtime_instructions(
         f"If the caller changes or cancels previously queued after-call work, call "
         f"{EDIT_POST_CALL_ACTION_TOOL_NAME} or {DELETE_POST_CALL_ACTION_TOOL_NAME} "
         f"using the action index returned when the work was queued.",
+        f"If the caller asks to hang up, says goodbye, or the conversation is "
+        f"clearly complete, call {HANG_UP_CALL_TOOL_NAME}. Say any needed final "
+        f"goodbye before calling it.",
         f"Call {AGENT_CONSULT_TOOL_NAME} only when the caller asks for current "
         f"external data, session history, a calendar lookup, or other work that "
         f"requires the full Hermes agent. Do not call it for greetings, identity, "
@@ -614,6 +641,7 @@ async def _send_session_update(
                 _post_call_action_tool_schema(),
                 _edit_post_call_action_tool_schema(),
                 _delete_post_call_action_tool_schema(),
+                _hang_up_call_tool_schema(),
             ],
             "tool_choice": "auto",
         },
@@ -692,6 +720,7 @@ async def _openai_to_inkbox_pump(
             config=config,
             meta=meta,
             on_agent_consult=on_agent_consult,
+            inkbox_ws=inkbox_ws,
         )
 
     async for msg in openai_ws:
@@ -823,6 +852,7 @@ async def _dispatch_tool_call(
     config: RealtimeConfig,
     meta: RealtimeCallMeta,
     on_agent_consult: AgentConsultCallback,
+    inkbox_ws: Any = None,
 ) -> None:
     """Handle a function-call event from the realtime model."""
     try:
@@ -924,6 +954,39 @@ async def _dispatch_tool_call(
         })
         return
 
+    if name == HANG_UP_CALL_TOOL_NAME:
+        if inkbox_ws is None:
+            await _submit_tool_result(openai_ws, call_id, {
+                "error": "hangup unavailable without Inkbox websocket",
+            })
+            return
+
+        reason = (args.get("reason") or "").strip()
+        hangup_frame: Dict[str, Any] = {"event": "hangup"}
+        if reason:
+            hangup_frame["reason"] = reason
+        if state.stream_id:
+            hangup_frame["stream_id"] = state.stream_id
+
+        await _submit_tool_result(
+            openai_ws,
+            call_id,
+            {
+                "status": "hangup_requested",
+                "reason": reason,
+                "message": "The call is ending now.",
+            },
+            create_response=False,
+        )
+        try:
+            await inkbox_ws.send_str(json.dumps(hangup_frame))
+        except Exception as exc:
+            logger.debug("[Inkbox realtime] hangup frame send failed: %s", exc)
+        state.closed = True
+        await _maybe_close_ws(inkbox_ws)
+        await _maybe_close_ws(openai_ws)
+        return
+
     if name == AGENT_CONSULT_TOOL_NAME:
         query = (args.get("query") or "").strip()
         if not query:
@@ -994,7 +1057,11 @@ async def _dispatch_tool_call(
 
 
 async def _submit_tool_result(
-    openai_ws: Any, call_id: str, output: Dict[str, Any],
+    openai_ws: Any,
+    call_id: str,
+    output: Dict[str, Any],
+    *,
+    create_response: bool = True,
 ) -> None:
     """Submit a function call output and trigger a model response.
 
@@ -1011,6 +1078,8 @@ async def _submit_tool_result(
                 "output": json.dumps(output),
             },
         }))
+        if not create_response:
+            return
         # Bare response.create — let the session's configured output
         # modalities + audio settings apply. Passing a beta-style
         # ``modalities`` field here would be rejected by GA models.
@@ -1019,3 +1088,15 @@ async def _submit_tool_result(
         }))
     except Exception as exc:
         logger.debug("[Inkbox realtime] submit_tool_result failed: %s", exc)
+
+
+async def _maybe_close_ws(ws: Any) -> None:
+    close = getattr(ws, "close", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass

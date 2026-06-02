@@ -15,6 +15,7 @@ from inkbox_plugin import realtime as realtime_mod
 from inkbox_plugin.realtime import (
     DELETE_POST_CALL_ACTION_TOOL_NAME,
     EDIT_POST_CALL_ACTION_TOOL_NAME,
+    HANG_UP_CALL_TOOL_NAME,
     POST_CALL_ACTION_TOOL_NAME,
     RealtimeCallMeta,
     RealtimeConfig,
@@ -58,9 +59,13 @@ def _meta(**overrides):
 class _FakeWS:
     def __init__(self):
         self.sent = []
+        self.closed = False
 
     async def send_str(self, payload):
         self.sent.append(json.loads(payload))
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeMsg:
@@ -124,11 +129,13 @@ def test_session_update_exposes_post_call_edit_and_delete_tools():
         POST_CALL_ACTION_TOOL_NAME,
         EDIT_POST_CALL_ACTION_TOOL_NAME,
         DELETE_POST_CALL_ACTION_TOOL_NAME,
+        HANG_UP_CALL_TOOL_NAME,
     ]
 
     instructions = ws.sent[0]["session"]["instructions"]
     assert EDIT_POST_CALL_ACTION_TOOL_NAME in instructions
     assert DELETE_POST_CALL_ACTION_TOOL_NAME in instructions
+    assert HANG_UP_CALL_TOOL_NAME in instructions
 
 
 def test_unknown_contact_greeting_does_not_use_raw_phone_as_name():
@@ -295,6 +302,44 @@ def test_edit_and_delete_post_call_actions_by_index():
     assert outputs[0]["action_index"] == 2
     assert outputs[1]["status"] == "deleted"
     assert outputs[1]["action_count"] == 1
+
+
+def test_hangup_tool_sends_hangup_frame_and_closes_sockets():
+    state = _BridgeState()
+    state.stream_id = "stream-123"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _noop(*_args, **_kwargs):
+        return ""
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="hangup-call",
+        name=HANG_UP_CALL_TOOL_NAME,
+        arguments_json=json.dumps({"reason": "caller said goodbye"}),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+        inkbox_ws=inkbox_ws,
+    ))
+
+    tool_results = [
+        frame for frame in openai_ws.sent
+        if frame["type"] == "conversation.item.create"
+    ]
+    assert len(tool_results) == 1
+    assert json.loads(tool_results[0]["item"]["output"])["status"] == "hangup_requested"
+    assert not any(frame["type"] == "response.create" for frame in openai_ws.sent)
+    assert inkbox_ws.sent == [{
+        "event": "hangup",
+        "reason": "caller said goodbye",
+        "stream_id": "stream-123",
+    }]
+    assert state.closed is True
+    assert inkbox_ws.closed is True
+    assert openai_ws.closed is True
 
 
 def test_post_call_dispatch_runs_exactly_one_path():
