@@ -457,6 +457,24 @@ _ADMIN_NOTICE_SUBSTRINGS: Tuple[str, ...] = (
     "Self-improvement review:",
 )
 
+# Hermes gateway tool-progress messages are shaped like:
+#   "⏰ cronjob: \"create\""
+#   "📨 send_message..."
+#   "⚙️ mcp.tool(['arg'])\n{...}"
+# The forked gateway can skip them before dispatch via supports_progress_updates,
+# but older/fresh installs may still route them through edit_message().  Keep a
+# final body-shape filter here so live calls never speak UI/tool chrome.
+_TOOL_PROGRESS_GLYPHS: Tuple[str, ...] = (
+    "⚙️", "⚙", "⏰", "📨", "✉️", "✉", "✍️", "✍",
+    "💻", "🔎", "🔍", "📖", "📄", "📝", "📚", "📋",
+    "🐍", "🌐", "🧠", "🛠", "🔧", "🔊", "👁️", "👁",
+    "🎨", "🎬", "🏠", "🐦", "👥", "➕", "▶", "✔",
+    "⏸", "💓", "💬", "🔗",
+)
+_TOOL_PROGRESS_TAIL_RE = re.compile(
+    r"\s+[A-Za-z_][A-Za-z0-9_.-]*(?:\s*\(|\s*:|\.{3})(?:\s|$)",
+)
+
 # Internal producers (status_callback, interim assistant chatter, the
 # "Still working" notifier, the trajectory compressor…) tag their outbound
 # sends with ``metadata['notice_type']`` so the adapter can drop them
@@ -521,6 +539,9 @@ def _is_hermes_admin_notice(
     head = (content or "").lstrip().lstrip("﻿")
     if head.startswith(_ADMIN_NOTICE_PREFIXES):
         return True
+    for glyph in _TOOL_PROGRESS_GLYPHS:
+        if head.startswith(glyph) and _TOOL_PROGRESS_TAIL_RE.match(head[len(glyph):]):
+            return True
     return any(s in head for s in _ADMIN_NOTICE_SUBSTRINGS)
 
 
@@ -1651,6 +1672,7 @@ class InkboxAdapter(BasePlatformAdapter):
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Stream incremental deltas to an open call. No-op for mail/SMS."""
         ws = self._active_call_ws.get(chat_id)
@@ -1659,7 +1681,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # Same admin-notice guard as send() — runtime banners are even more
         # offensive when read aloud over a live call than when delivered as
         # text to email/SMS.
-        if _is_hermes_admin_notice(content):
+        if _is_hermes_admin_notice(content, metadata):
             return SendResult(success=True, message_id="suppressed-admin-notice")
         try:
             # Match the bridge's two-frame protocol — Inkbox's TTS pipeline
