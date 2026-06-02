@@ -1,8 +1,9 @@
 """Inkbox ↔ OpenAI Realtime API voice bridge.
 
-When ``inkbox.realtime.enabled`` is true and an OpenAI API key is configured,
-the call WebSocket handler in :mod:`gateway.platforms.inkbox` delegates inbound
-calls to :func:`run_inkbox_realtime_bridge` instead of using Inkbox-side STT/TTS.
+When ``inkbox.realtime.enabled`` is true and an OpenAI API key or Codex OAuth
+token is configured, the call WebSocket handler in :mod:`gateway.platforms.inkbox`
+delegates inbound calls to :func:`run_inkbox_realtime_bridge` instead of using
+Inkbox-side STT/TTS.
 
 The bridge:
 
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover — aiohttp is a core dep on this fork
 logger = logging.getLogger(__name__)
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
+REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 DEFAULT_MODEL = "gpt-realtime-2"
 DEFAULT_VOICE = "cedar"
 AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
@@ -156,12 +158,17 @@ class RealtimeConfig:
 
     enabled: bool = False
     api_key: str = ""
+    oauth_token: str = ""
     model: str = DEFAULT_MODEL
     voice: str = DEFAULT_VOICE
     additional_instructions: str = ""
     consult_timeout_s: float = DEFAULT_CONSULT_TIMEOUT_S
     # ``api.openai.com`` by default; override for Azure / proxies.
     base_url: str = REALTIME_URL
+
+    @property
+    def has_credential(self) -> bool:
+        return bool(self.api_key or self.oauth_token)
 
 
 @dataclass
@@ -281,20 +288,19 @@ async def run_inkbox_realtime_bridge(
     if aiohttp is None:
         logger.error("[Inkbox realtime] aiohttp not available; cannot open Realtime API WS")
         return
-    if not config.api_key:
-        logger.error("[Inkbox realtime] No OpenAI API key configured; refusing to bridge")
+    if not config.has_credential:
+        logger.error("[Inkbox realtime] No OpenAI credential configured; refusing to bridge")
         return
 
     state = _BridgeState()
     separator = "&" if "?" in config.base_url else "?"
     url = f"{config.base_url}{separator}{urlencode({'model': config.model})}"
-    headers = {
-        "Authorization": f"Bearer {config.api_key}",
-    }
 
     session = aiohttp.ClientSession()
     try:
         try:
+            bearer = await _resolve_realtime_bearer(session, config)
+            headers = {"Authorization": f"Bearer {bearer}"}
             openai_ws = await session.ws_connect(url, headers=headers, heartbeat=30)
         except Exception as exc:
             logger.error("[Inkbox realtime] Failed to connect to OpenAI Realtime: %s", exc)
@@ -352,6 +358,36 @@ async def run_inkbox_realtime_bridge(
                 )
     finally:
         await session.close()
+
+
+async def _resolve_realtime_bearer(session: Any, config: RealtimeConfig) -> str:
+    """Return the bearer token to use on the OpenAI Realtime WebSocket."""
+    if config.api_key:
+        return config.api_key
+
+    body = {
+        "session": {
+            "type": "realtime",
+            "model": config.model,
+            "audio": {"output": {"voice": config.voice}},
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {config.oauth_token}",
+        "Content-Type": "application/json",
+    }
+    async with session.post(REALTIME_CLIENT_SECRETS_URL, headers=headers, json=body) as resp:
+        if resp.status >= 400:
+            detail = (await resp.text())[:200]
+            raise RuntimeError(f"client_secrets HTTP {resp.status}: {detail}")
+        data = await resp.json()
+
+    secret = data.get("value")
+    if not secret and isinstance(data.get("client_secret"), dict):
+        secret = data["client_secret"].get("value")
+    if not secret:
+        raise RuntimeError("client_secrets response had no value")
+    return str(secret)
 
 
 async def _send_session_update(

@@ -62,6 +62,11 @@ INKBOX_REALTIME_MODEL=gpt-realtime-2
 INKBOX_REALTIME_VOICE=cedar
 ```
 
+Realtime calls use `realtime.api_key`, `INKBOX_REALTIME_API_KEY`, or
+`OPENAI_API_KEY` directly when present. If no API key is configured, the plugin
+falls back to Hermes' Codex OAuth token and exchanges it for an ephemeral
+OpenAI Realtime client secret.
+
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
 
 ## CLI
