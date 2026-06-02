@@ -66,6 +66,11 @@ HANG_UP_CALL_TOOL_NAME = "hang_up_call"
 # runs; longer values risk dead air, shorter values cut off legitimate work.
 DEFAULT_CONSULT_TIMEOUT_S = 60.0
 
+# A hang_up_call is a two-step confirm: the first call arms the hangup and asks
+# the model to say goodbye; a second call within this window actually ends the
+# call. Past the window, a lone call re-arms (treated as a fresh first attempt).
+HANGUP_CONFIRM_WINDOW_S = 60.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool schema definitions
@@ -193,9 +198,11 @@ def _hang_up_call_tool_schema() -> Dict[str, Any]:
         "type": "function",
         "name": HANG_UP_CALL_TOOL_NAME,
         "description": (
-            "End the live phone call. Use this only after the caller asks to "
-            "hang up, says goodbye, or the conversation is clearly complete. "
-            "If a final goodbye is needed, say it before calling this tool."
+            "End the live phone call. This is a TWO-STEP tool: the first call "
+            "does NOT hang up — it prompts you to say a short goodbye. After "
+            "you have said goodbye, call hang_up_call a second time to actually "
+            "end the call. Use it only when the caller asks to hang up, says "
+            "goodbye, or the conversation is clearly complete."
         ),
         "parameters": {
             "type": "object",
@@ -285,6 +292,9 @@ class _BridgeState:
     # Inkbox-assigned stream id from the `start` event; echoed on outbound
     # media / audio_done frames.
     stream_id: Optional[str] = None
+    # Monotonic timestamp of the first hang_up_call ("armed"). A second call
+    # within HANGUP_CONFIRM_WINDOW_S fires the real hangup. None = not yet armed.
+    hangup_armed_at: Optional[float] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -961,6 +971,24 @@ async def _dispatch_tool_call(
             })
             return
 
+        now = time.monotonic()
+        armed = state.hangup_armed_at
+        # First attempt (or a stale arm past the window) → arm the hangup and
+        # have the model say goodbye instead of dropping the line mid-farewell.
+        if armed is None or (now - armed) > HANGUP_CONFIRM_WINDOW_S:
+            state.hangup_armed_at = now
+            # Default create_response=True so the model speaks the goodbye.
+            await _submit_tool_result(openai_ws, call_id, {
+                "status": "confirm_goodbye",
+                "message": (
+                    "Don't hang up yet. Say a brief, natural goodbye to the "
+                    "caller now, then call hang_up_call once more to actually "
+                    "end the call."
+                ),
+            })
+            return
+
+        # Second attempt within the window → perform the real hangup.
         reason = (args.get("reason") or "").strip()
         hangup_frame: Dict[str, Any] = {"event": "hangup"}
         if reason:

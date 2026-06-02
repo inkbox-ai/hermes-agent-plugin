@@ -304,15 +304,12 @@ def test_edit_and_delete_post_call_actions_by_index():
     assert outputs[1]["action_count"] == 1
 
 
-def test_hangup_tool_sends_hangup_frame_and_closes_sockets():
-    state = _BridgeState()
-    state.stream_id = "stream-123"
-    openai_ws = _FakeWS()
-    inkbox_ws = _FakeWS()
+async def _noop_consult(*_args, **_kwargs):
+    return ""
 
-    async def _noop(*_args, **_kwargs):
-        return ""
 
+def _dispatch_hangup(state, openai_ws, inkbox_ws):
+    """Run one hang_up_call dispatch against the given state/sockets."""
     asyncio.run(_dispatch_tool_call(
         openai_ws=openai_ws,
         call_id="hangup-call",
@@ -321,17 +318,54 @@ def test_hangup_tool_sends_hangup_frame_and_closes_sockets():
         state=state,
         config=RealtimeConfig(enabled=True, api_key="sk-test"),
         meta=_meta(),
-        on_agent_consult=_noop,
+        on_agent_consult=_noop_consult,
         inkbox_ws=inkbox_ws,
     ))
+
+
+def test_hangup_first_call_arms_and_requests_goodbye():
+    # First hang_up_call must NOT drop the line — it arms the hangup and asks
+    # the model to say goodbye, keeping both sockets open.
+    state = _BridgeState()
+    state.stream_id = "stream-123"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    _dispatch_hangup(state, openai_ws, inkbox_ws)
 
     tool_results = [
         frame for frame in openai_ws.sent
         if frame["type"] == "conversation.item.create"
     ]
     assert len(tool_results) == 1
-    assert json.loads(tool_results[0]["item"]["output"])["status"] == "hangup_requested"
-    assert not any(frame["type"] == "response.create" for frame in openai_ws.sent)
+    assert json.loads(tool_results[0]["item"]["output"])["status"] == "confirm_goodbye"
+    # Default create_response=True so the model speaks the goodbye.
+    assert any(frame["type"] == "response.create" for frame in openai_ws.sent)
+    # Armed, but nothing torn down yet.
+    assert state.hangup_armed_at is not None
+    assert inkbox_ws.sent == []
+    assert state.closed is False
+    assert inkbox_ws.closed is False
+    assert openai_ws.closed is False
+
+
+def test_hangup_second_call_sends_frame_and_closes_sockets():
+    # Second hang_up_call within the confirm window performs the real hangup.
+    state = _BridgeState()
+    state.stream_id = "stream-123"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    _dispatch_hangup(state, openai_ws, inkbox_ws)  # arm
+    _dispatch_hangup(state, openai_ws, inkbox_ws)  # confirm → real hangup
+
+    tool_results = [
+        frame for frame in openai_ws.sent
+        if frame["type"] == "conversation.item.create"
+    ]
+    # One result per call; the second is the actual hangup.
+    assert len(tool_results) == 2
+    assert json.loads(tool_results[-1]["item"]["output"])["status"] == "hangup_requested"
     assert inkbox_ws.sent == [{
         "event": "hangup",
         "reason": "caller said goodbye",
