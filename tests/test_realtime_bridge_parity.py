@@ -349,12 +349,18 @@ def test_hangup_first_call_arms_and_requests_goodbye():
     assert openai_ws.closed is False
 
 
-def test_hangup_second_call_sends_frame_and_closes_sockets():
+def test_hangup_second_call_sleeps_then_sends_frame_and_closes_sockets(monkeypatch):
     # Second hang_up_call within the confirm window performs the real hangup.
     state = _BridgeState()
     state.stream_id = "stream-123"
     openai_ws = _FakeWS()
     inkbox_ws = _FakeWS()
+    sleeps = []
+
+    async def _fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _fake_sleep)
 
     _dispatch_hangup(state, openai_ws, inkbox_ws)  # arm
     _dispatch_hangup(state, openai_ws, inkbox_ws)  # confirm → real hangup
@@ -371,6 +377,7 @@ def test_hangup_second_call_sends_frame_and_closes_sockets():
         "reason": "caller said goodbye",
         "stream_id": "stream-123",
     }]
+    assert sleeps == [realtime_mod.HANGUP_CLOSE_DELAY_S]
     assert state.closed is True
     assert inkbox_ws.closed is True
     assert openai_ws.closed is True

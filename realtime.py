@@ -71,6 +71,11 @@ DEFAULT_CONSULT_TIMEOUT_S = 60.0
 # call. Past the window, a lone call re-arms (treated as a fresh first attempt).
 HANGUP_CONFIRM_WINDOW_S = 60.0
 
+# After the confirmed hang_up_call, keep the phone leg open briefly before
+# sending Inkbox the actual hangup frame. This gives already-forwarded goodbye
+# audio time to play out instead of being clipped by immediate teardown.
+HANGUP_CLOSE_DELAY_S = 2.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool schema definitions
@@ -1007,6 +1012,7 @@ async def _dispatch_tool_call(
             create_response=False,
         )
         try:
+            await asyncio.sleep(HANGUP_CLOSE_DELAY_S)
             await inkbox_ws.send_str(json.dumps(hangup_frame))
         except Exception as exc:
             logger.debug("[Inkbox realtime] hangup frame send failed: %s", exc)
