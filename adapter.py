@@ -419,6 +419,8 @@ _ADMIN_NOTICE_PREFIXES: Tuple[str, ...] = (
     "🐍",  # exec / python
     "🌐",  # web fetch
     "🧠",  # thinking / reasoning
+    "⚙️",  # default Hermes tool-progress glyph
+    "⚙",  # default Hermes tool-progress glyph without variation selector
     "🛠",  # tool generic
     "🔧",  # tool generic alt
     # Save/cache/persistence glyph — covers the background self-improvement
@@ -1590,16 +1592,16 @@ class InkboxAdapter(BasePlatformAdapter):
             True when the gateway should attempt to render tool-progress
             bubbles for this chat, False to skip them entirely.
 
-        Voice calls stream incremental TTS through ``edit_message`` so
-        ongoing progress is essentially free.  SMS gets a single batched
-        bubble per turn (the gateway's edit-failure handler drops the
-        rest).  Email chats opt out entirely — sending a separate email
-        per tool call ("🖥️ browser_console...") is a UX disaster, and the
-        agent's final reply still lands as one email at turn end.
+        Voice calls opt out: tool names and argument previews are UI
+        chrome, not speech.  SMS gets a single batched bubble per turn
+        (the gateway's edit-failure handler drops the rest).  Email chats
+        opt out entirely — sending a separate email per tool call
+        ("🖥️ browser_console...") is a UX disaster, and the agent's final
+        reply still lands as one email at turn end.
         """
-        # Active voice call → edit_message streams deltas; allow progress.
+        # Active voice call -> keep tool-progress UI out of TTS.
         if chat_id in self._active_call_ws:
-            return True
+            return False
         modality = self._last_inbound_modality.get(str(chat_id), "")
         if modality == "email":
             return False

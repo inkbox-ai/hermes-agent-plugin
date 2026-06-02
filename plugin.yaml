@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.1.2
+version: 0.1.3
 description: Inkbox email, SMS/MMS, and voice platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
