@@ -14,12 +14,16 @@ It adds:
 ## Install Locally
 
 ```bash
-pip install inkbox aiohttp
 hermes plugins install inkbox-ai/hermes-agent-plugin --enable
 hermes inkbox setup
 hermes inkbox doctor
 hermes gateway run
 ```
+
+`hermes inkbox setup` installs or upgrades `inkbox>=0.4.6` and `aiohttp>=3.9`
+inside the Hermes Python environment when needed. Do not use a plain `pip`
+command unless the wizard prints it; plain `pip` may point at pyenv, Homebrew,
+or another Python instead of Hermes.
 
 For local development before pushing, clone or symlink this directory to:
 

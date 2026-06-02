@@ -143,7 +143,10 @@ def register(ctx) -> None:
         validate_config=_validate_config,
         is_connected=_is_connected,
         required_env=["INKBOX_API_KEY", "INKBOX_IDENTITY"],
-        install_hint="Install the SDK in the Hermes environment: pip install inkbox aiohttp",
+        install_hint=(
+            "Run `hermes inkbox setup`; it installs or upgrades the Inkbox SDK "
+            "inside the Hermes Python environment when needed."
+        ),
         setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,
         apply_yaml_config_fn=_apply_yaml_config,

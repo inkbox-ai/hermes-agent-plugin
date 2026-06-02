@@ -1,10 +1,11 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.1.0
+version: 0.1.1
 description: Inkbox email, SMS/MMS, and voice platform plugin for Hermes Agent.
 author: Inkbox
-requires_env:
+requires_env: []
+optional_env:
   - name: INKBOX_API_KEY
     description: "Inkbox API key. Agent-scoped keys are recommended."
     prompt: "Inkbox API key"
@@ -13,7 +14,6 @@ requires_env:
     description: "Inkbox agent identity handle."
     prompt: "Inkbox identity handle"
     secret: false
-optional_env:
   - name: INKBOX_SIGNING_KEY
     description: "Webhook signing key for inbound email, SMS, and calls."
     prompt: "Inkbox signing key"
