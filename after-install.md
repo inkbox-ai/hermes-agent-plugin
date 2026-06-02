@@ -10,4 +10,5 @@ hermes gateway run
 
 The setup wizard stores Inkbox values in `~/.hermes/.env`. If the Inkbox SDK
 is missing, it installs it into the Hermes Python environment, not your shell's
-default `pip`.
+default `pip`. When `uv` is available, the wizard uses `uv pip install
+--python ...` so the Hermes venv does not need `pip` preinstalled.

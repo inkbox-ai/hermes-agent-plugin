@@ -21,9 +21,11 @@ hermes gateway run
 ```
 
 `hermes inkbox setup` installs or upgrades `inkbox>=0.4.6` and `aiohttp>=3.9`
-inside the Hermes Python environment when needed. Do not use a plain `pip`
-command unless the wizard prints it; plain `pip` may point at pyenv, Homebrew,
-or another Python instead of Hermes.
+inside the Hermes Python environment when needed. It prefers `uv pip install
+--python ...` when `uv` is available, so the Hermes venv does not need to have
+`pip` preinstalled. Do not use a plain `pip` command unless the wizard prints
+it; plain `pip` may point at pyenv, Homebrew, or another Python instead of
+Hermes.
 
 For local development before pushing, clone or symlink this directory to:
 

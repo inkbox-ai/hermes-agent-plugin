@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -162,12 +163,37 @@ def _env(name: str) -> str:
         return os.getenv(name, "")
 
 
-def _install_command() -> list[str]:
-    return [sys.executable, "-m", "pip", "install", *INKBOX_REQUIREMENTS]
+def _install_commands() -> list[list[list[str]]]:
+    plans: list[list[list[str]]] = []
+    uv = shutil.which("uv")
+    if uv:
+        plans.append([[uv, "pip", "install", "--python", sys.executable, *INKBOX_REQUIREMENTS]])
+    plans.append([[sys.executable, "-m", "pip", "install", *INKBOX_REQUIREMENTS]])
+    plans.append(
+        [
+            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            [sys.executable, "-m", "pip", "install", *INKBOX_REQUIREMENTS],
+        ]
+    )
+    return plans
 
 
 def _install_command_text() -> str:
-    return shlex.join(_install_command())
+    return " && ".join(shlex.join(command) for command in _install_commands()[0])
+
+
+def _run_install_plan() -> bool:
+    last_exc: Exception | None = None
+    for plan in _install_commands():
+        try:
+            for command in plan:
+                subprocess.check_call(command)
+            return True
+        except Exception as exc:
+            last_exc = exc
+    if last_exc is not None:
+        print_error(f"Install failed: {last_exc}")
+    return False
 
 
 def _purge_inkbox_modules() -> None:
@@ -216,10 +242,7 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
     if not prompt_yes_no("Install/upgrade Inkbox SDK in this Hermes environment now?", True):
         return None
 
-    try:
-        subprocess.check_call(_install_command())
-    except Exception as install_exc:
-        print_error(f"Install failed: {install_exc}")
+    if not _run_install_plan():
         print_info("Run this command manually, then rerun setup:")
         print_info(f"  {_install_command_text()}")
         return None
