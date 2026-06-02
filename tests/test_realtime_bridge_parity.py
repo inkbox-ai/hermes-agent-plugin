@@ -413,3 +413,26 @@ def test_adapter_realtime_call_ended_enqueues_reflection():
     assert "[call_ended]" in events[0].text
     assert "Can you email me after this call?" in events[0].text
     assert events[0].raw_message["event"] == "realtime_call_ended"
+    assert events[0].auto_skill == "inkbox:inkbox-call-review"
+
+
+def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
+    adapter = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    events = []
+
+    async def _enqueue(event):
+        events.append(event)
+
+    adapter._enqueue = _enqueue
+
+    asyncio.run(adapter._realtime_post_call_actions(
+        _meta(),
+        [{"action": "Email Dima after the call", "details": "Keep it short."}],
+        [("caller", "Can you email me after this call?")],
+    ))
+
+    assert len(events) == 1
+    assert "voice_post_call_actions" in events[0].text
+    assert "Email Dima after the call" in events[0].text
+    assert events[0].raw_message["event"] == "realtime_post_call_actions"
+    assert getattr(events[0], "auto_skill", None) is None

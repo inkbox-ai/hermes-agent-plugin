@@ -2737,7 +2737,7 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_message={"event": "realtime_call_ended", "transcript": transcript},
             message_id=f"call:{meta.call_id}:ended",
             reply_to_message_id=meta.call_id,
-            auto_skill="inkbox",
+            auto_skill="inkbox:inkbox-call-review",
         )
         try:
             await self._enqueue(event)
@@ -2809,7 +2809,6 @@ class InkboxAdapter(BasePlatformAdapter):
             },
             message_id=f"call:{meta.call_id}:post-call-actions",
             reply_to_message_id=meta.call_id,
-            auto_skill="inkbox",
         )
         try:
             await self._enqueue(event)
