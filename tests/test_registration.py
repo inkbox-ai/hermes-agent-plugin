@@ -64,6 +64,12 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_whoami",
         "inkbox_send_email",
         "inkbox_send_sms",
+        "inkbox_list_text_conversations",
+        "inkbox_get_text_conversation",
+        "inkbox_list_texts",
+        "inkbox_get_text",
+        "inkbox_mark_text_read",
+        "inkbox_mark_text_conversation_read",
         "inkbox_place_call",
     }
 

@@ -7,7 +7,7 @@ import os
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
@@ -35,6 +35,55 @@ def _client_and_identity():
         raise RuntimeError("INKBOX_IDENTITY is not set")
     client = Inkbox(api_key=cfg.api_key, base_url=cfg.base_url)
     return cfg, client, client.get_identity(cfg.identity)
+
+
+def _normalize_recipients(value: Any) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        return [trimmed] if trimmed else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _identity_method(identity: Any, snake_name: str, camel_name: Optional[str] = None):
+    method = getattr(identity, snake_name, None)
+    if callable(method):
+        return method
+    if camel_name:
+        method = getattr(identity, camel_name, None)
+        if callable(method):
+            return method
+    raise RuntimeError(f"Inkbox SDK identity has no {snake_name} method")
+
+
+def _call_with_kwargs_or_payload(method, payload: Dict[str, Any], camel_payload: Optional[Dict[str, Any]] = None):
+    try:
+        return method(**payload)
+    except TypeError:
+        return method(camel_payload or payload)
+
+
+def _call_with_key_and_options(method, key: str, options: Dict[str, Any], camel_options: Optional[Dict[str, Any]] = None):
+    try:
+        return method(key, **options)
+    except TypeError:
+        try:
+            return method(key, camel_options or options)
+        except TypeError:
+            return method(key)
+
+
+def _text_conversation_key(args: dict) -> Tuple[str, str, Optional[str]]:
+    conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
+    remote_phone = str(args.get("remotePhoneNumber") or args.get("remote_phone_number") or "").strip()
+    if bool(conversation_id) == bool(remote_phone):
+        return "", "", "Specify exactly one of `conversationId` or `remotePhoneNumber`."
+    if conversation_id:
+        return conversation_id, f"conversation {conversation_id}", None
+    return remote_phone, f"conversation with {remote_phone}", None
 
 
 def _append_query_param(raw_url: str, key: str, value: str) -> str:
@@ -123,34 +172,158 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
         if len(text) > 1600:
             return _json({"error": "SMS text exceeds Inkbox 1600 character limit", "char_count": len(text)})
 
-        to = args.get("to")
-        conversation_id = args.get("conversation_id") or args.get("conversationId")
-        if bool(to) == bool(conversation_id):
-            return _json({"error": "Specify exactly one of `to` or `conversation_id`."})
+        conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
+        to_list = _normalize_recipients(args.get("to"))
+        has_to = to_list is not None and len(to_list) > 0
+        has_conversation = bool(conversation_id)
+        if has_to == has_conversation:
+            return _json({"error": "Specify exactly one of `to` or `conversationId`."})
+        if to_list is not None and len(to_list) == 0:
+            return _json({"error": "`to` must include at least one recipient."})
+        if to_list and len(to_list) > 8:
+            return _json({"error": "Inkbox group texts support at most 8 recipients."})
 
         payload: dict[str, Any] = {"text": text}
+        camel_payload: dict[str, Any] = {"text": text}
         if conversation_id:
             payload["conversation_id"] = str(conversation_id).strip()
+            camel_payload["conversationId"] = str(conversation_id).strip()
         else:
-            if isinstance(to, list):
-                payload["to"] = [str(x).strip() for x in to if str(x).strip()]
-            else:
-                payload["to"] = str(to).strip()
-        media_urls = args.get("media_urls") or args.get("mediaUrls")
+            payload["to"] = to_list[0] if to_list and len(to_list) == 1 else to_list
+            camel_payload["to"] = payload["to"]
+        media_urls = args.get("mediaUrls") or args.get("media_urls")
         if media_urls:
             payload["media_urls"] = media_urls
+            camel_payload["mediaUrls"] = media_urls
 
-        def _send():
-            try:
-                return identity.send_text(**payload)
-            except TypeError:
-                return identity.send_text(payload)
-
-        msg = _send()
+        msg = _call_with_kwargs_or_payload(
+            _identity_method(identity, "send_text", "sendText"),
+            payload,
+            camel_payload,
+        )
         return _json({
             "ok": True,
             "message_id": str(getattr(msg, "id", "")),
+            "conversation_id": conversation_id or object_summary(
+                getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
+            ),
+            "to": None if conversation_id else payload.get("to"),
             "status": object_summary(getattr(msg, "delivery_status", None) or getattr(msg, "status", None)),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_text_conversations(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        payload = {
+            "limit": int(args.get("limit") or 25),
+            "offset": int(args.get("offset") or 0),
+            "include_groups": args.get("includeGroups") if "includeGroups" in args else args.get("include_groups", True),
+        }
+        camel_payload = {
+            "limit": payload["limit"],
+            "offset": payload["offset"],
+            "includeGroups": payload["include_groups"],
+        }
+        convos = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_text_conversations", "listTextConversations"),
+            payload,
+            camel_payload,
+        )
+        return _json({"ok": True, "count": len(convos or []), "conversations": object_summary(convos or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_text_conversation(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        key, label, error = _text_conversation_key(args)
+        if error:
+            return _json({"error": error})
+        options = {"limit": int(args.get("limit") or 50), "offset": int(args.get("offset") or 0)}
+        msgs = _call_with_key_and_options(
+            _identity_method(identity, "get_text_conversation", "getTextConversation"),
+            key,
+            options,
+            options,
+        )
+        return _json({"ok": True, "conversation": label, "count": len(msgs or []), "texts": object_summary(msgs or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_texts(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        payload = {"limit": int(args.get("limit") or 25), "offset": int(args.get("offset") or 0)}
+        if "isRead" in args or "is_read" in args:
+            payload["is_read"] = args.get("isRead") if "isRead" in args else args.get("is_read")
+        camel_payload = dict(payload)
+        if "is_read" in camel_payload:
+            camel_payload["isRead"] = camel_payload.pop("is_read")
+        texts = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_texts", "listTexts"),
+            payload,
+            camel_payload,
+        )
+        return _json({"ok": True, "count": len(texts or []), "texts": object_summary(texts or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_text(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        text_id = str(args.get("textId") or args.get("text_id") or "").strip()
+        if not text_id:
+            return _json({"error": "`textId` is required"})
+        text = _identity_method(identity, "get_text", "getText")(text_id)
+        return _json({"ok": True, "text": object_summary(text)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_mark_text_read(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        text_id = str(args.get("textId") or args.get("text_id") or "").strip()
+        if not text_id:
+            return _json({"error": "`textId` is required"})
+        _identity_method(identity, "mark_text_read", "markTextRead")(text_id)
+        return _json({"ok": True, "text_id": text_id, "status": "marked_read"})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_mark_text_conversation_read(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        key, label, error = _text_conversation_key(args)
+        if error:
+            return _json({"error": error})
+        result = _identity_method(
+            identity,
+            "mark_text_conversation_read",
+            "markTextConversationRead",
+        )(key)
+        updated = (
+            getattr(result, "updated_count", None)
+            or getattr(result, "updatedCount", None)
+        )
+        return _json({
+            "ok": True,
+            "conversation": label,
+            "updated_count": object_summary(updated),
+            "result": object_summary(result),
         })
     except Exception as exc:
         return _json({"error": str(exc)})
@@ -231,16 +404,95 @@ SEND_EMAIL_SCHEMA = {
 
 SEND_SMS_SCHEMA = {
     "name": "inkbox_send_sms",
-    "description": "Send an SMS/MMS from the configured Inkbox identity phone number.",
+    "description": "Send a text from the configured Inkbox identity phone number. Use conversationId to reply into an existing 1:1 or group conversation, or to for one E.164 recipient or a 2-8 recipient group MMS.",
     "parameters": {
         "type": "object",
         "properties": {
-            "to": {"description": "One E.164 recipient or a list for group MMS.", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
-            "conversation_id": {"type": "string", "description": "Existing Inkbox text conversation id. Mutually exclusive with `to`."},
+            "to": {
+                "description": "One E.164 recipient or a list of 1-8 recipients. Two or more sends a group MMS.",
+                "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "maxItems": 8}],
+            },
+            "conversationId": {"type": "string", "description": "Existing Inkbox text conversation UUID from inkbox_list_text_conversations. Preferred for replies and group chats. Mutually exclusive with `to`."},
             "text": {"type": "string", "description": "Message body, max 1600 chars."},
-            "media_urls": {"type": "array", "items": {"type": "string"}, "description": "Optional public MMS media URLs."},
+            "mediaUrls": {"type": "array", "items": {"type": "string"}, "maxItems": 10, "description": "Optional public MMS media URLs."},
         },
         "required": ["text"],
+    },
+}
+
+LIST_TEXT_CONVERSATIONS_SCHEMA = {
+    "name": "inkbox_list_text_conversations",
+    "description": "List text conversation summaries for the configured Inkbox identity phone number. Includes group chats by default and returns conversation IDs for replies.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "includeGroups": {"type": "boolean", "default": True, "description": "Include group conversations."},
+        },
+    },
+}
+
+GET_TEXT_CONVERSATION_SCHEMA = {
+    "name": "inkbox_get_text_conversation",
+    "description": "Fetch messages in a specific text conversation. Use conversationId for canonical rows and group chats; remotePhoneNumber is the legacy 1:1 fallback.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conversationId": {"type": "string", "description": "Inkbox text conversation UUID from inkbox_list_text_conversations."},
+            "remotePhoneNumber": {"type": "string", "description": "Legacy 1:1 remote E.164 phone number identifying the conversation."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+}
+
+LIST_TEXTS_SCHEMA = {
+    "name": "inkbox_list_texts",
+    "description": "List individual SMS/MMS messages. Prefer inkbox_list_text_conversations for triage; this is low-level access.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "isRead": {"type": "boolean", "description": "Filter by read state."},
+        },
+    },
+}
+
+GET_TEXT_SCHEMA = {
+    "name": "inkbox_get_text",
+    "description": "Fetch a single SMS/MMS message by text message UUID.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "textId": {"type": "string", "description": "UUID of the text message."},
+        },
+        "required": ["textId"],
+    },
+}
+
+MARK_TEXT_READ_SCHEMA = {
+    "name": "inkbox_mark_text_read",
+    "description": "Mark a single SMS/MMS message as read.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "textId": {"type": "string", "description": "UUID of the text message."},
+        },
+        "required": ["textId"],
+    },
+}
+
+MARK_TEXT_CONVERSATION_READ_SCHEMA = {
+    "name": "inkbox_mark_text_conversation_read",
+    "description": "Mark every message in a text conversation as read. Use conversationId for canonical rows and group chats; remotePhoneNumber is the legacy 1:1 fallback.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conversationId": {"type": "string", "description": "Inkbox text conversation UUID from inkbox_list_text_conversations."},
+            "remotePhoneNumber": {"type": "string", "description": "Legacy 1:1 remote E.164 phone number identifying the conversation."},
+        },
     },
 }
 
@@ -265,4 +517,10 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)
     ctx.register_tool("inkbox_send_email", "inkbox", SEND_EMAIL_SCHEMA, inkbox_send_email, check_fn=_configured)
     ctx.register_tool("inkbox_send_sms", "inkbox", SEND_SMS_SCHEMA, inkbox_send_sms, check_fn=_configured)
+    ctx.register_tool("inkbox_list_text_conversations", "inkbox", LIST_TEXT_CONVERSATIONS_SCHEMA, inkbox_list_text_conversations, check_fn=_configured)
+    ctx.register_tool("inkbox_get_text_conversation", "inkbox", GET_TEXT_CONVERSATION_SCHEMA, inkbox_get_text_conversation, check_fn=_configured)
+    ctx.register_tool("inkbox_list_texts", "inkbox", LIST_TEXTS_SCHEMA, inkbox_list_texts, check_fn=_configured)
+    ctx.register_tool("inkbox_get_text", "inkbox", GET_TEXT_SCHEMA, inkbox_get_text, check_fn=_configured)
+    ctx.register_tool("inkbox_mark_text_read", "inkbox", MARK_TEXT_READ_SCHEMA, inkbox_mark_text_read, check_fn=_configured)
+    ctx.register_tool("inkbox_mark_text_conversation_read", "inkbox", MARK_TEXT_CONVERSATION_READ_SCHEMA, inkbox_mark_text_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)

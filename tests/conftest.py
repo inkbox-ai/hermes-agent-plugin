@@ -46,6 +46,8 @@ if "gateway.config" not in sys.modules:
         thread_id: str | None = None
         message_id: str | None = None
         attachments: list[Any] = field(default_factory=list)
+        media_urls: list[str] = field(default_factory=list)
+        media_types: list[str] = field(default_factory=list)
         metadata: dict[str, Any] = field(default_factory=dict)
         auto_skill: str | None = None
         source: Any = None
@@ -67,8 +69,9 @@ if "gateway.config" not in sys.modules:
     @dataclass
     class SendResult:
         success: bool
-        message_id: str = ""
-        error: str = ""
+        message_id: str | None = None
+        error: str | None = None
+        raw_response: Any = None
         retryable: bool = False
 
     class BasePlatformAdapter:

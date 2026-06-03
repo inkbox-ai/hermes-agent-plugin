@@ -55,7 +55,8 @@ Outbound
 --------
 ``send()`` is mode-aware via ``metadata['mode']``:
   - ``email`` → ``identity.send_email(to=..., subject=..., body_text=...)``
-  - ``sms``   → ``identity.send_text(to=..., text=...)``
+  - ``sms``   → ``identity.send_text(conversation_id=..., text=...)``
+                for replies, falling back to ``to=...`` for legacy/new sends
   - ``voice`` → push a ``text`` frame onto the contact's active call
     WebSocket so Inkbox-managed TTS speaks it to the caller.
 
@@ -202,6 +203,72 @@ def _read_previous_webhook_url() -> Optional[str]:
 
     url = data.get("webhook_url")
     return url if isinstance(url, str) and url else None
+
+
+def _sms_conversation_target(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    without_provider = re.sub(r"^(inkbox:)", "", text, flags=re.IGNORECASE)
+    match = re.match(
+        r"^(?:sms:conversation:|text:conversation:|phone:conversation:|conversation:|thread:)(.+)$",
+        without_provider,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip() or None
+    match = re.match(r"^(?:sms:|text:|phone:)(.+)$", without_provider, flags=re.IGNORECASE)
+    if match:
+        candidate = match.group(1).strip()
+        return candidate if candidate and not candidate.startswith("+") else None
+    return None
+
+
+def _sms_state_key(chat_id: Any, thread_id: Any = None) -> str:
+    chat = str(chat_id or "").strip()
+    thread = str(thread_id or "").strip()
+    return f"{chat}|{thread}" if thread else chat
+
+
+def _field(obj: Any, *names: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        for name in names:
+            if name in obj:
+                return obj.get(name)
+        return None
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+def _list_field(obj: Any, *names: str) -> list[Any]:
+    value = _field(obj, *names)
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _string_list_field(obj: Any, *names: str) -> list[str]:
+    return [str(item).strip() for item in _list_field(obj, *names) if str(item).strip()]
+
+
+def _webhook_list(data: Dict[str, Any], *names: str) -> list[Any]:
+    for name in names:
+        value = data.get(name)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+    return []
+
+
+def _conversation_summary_is_group(summary: Any) -> bool:
+    return bool(_field(summary, "isGroup", "is_group", "is_group_conversation"))
 
 
 def _pool_codex_oauth_token() -> str:
@@ -729,7 +796,6 @@ def _sms_too_long_failure(content: str, *, max_chars: int = SMS_MAX_LENGTH) -> S
         error=_format_inkbox_sms_error(fields),
         raw_response={"platform": "inkbox", "mode": "sms", **fields},
         retryable=False,
-        fallback_allowed=False,
     )
 
 
@@ -804,7 +870,6 @@ def _sms_send_failure(exc: Exception, *, to_number: str) -> SendResult:
         error=_format_inkbox_sms_error(fields),
         raw_response={"platform": "inkbox", "mode": "sms", **fields},
         retryable=bool(fields.get("retryable")),
-        fallback_allowed=False,
     )
 
 
@@ -1042,6 +1107,11 @@ class InkboxAdapter(BasePlatformAdapter):
         # In-Reply-To header so replies thread into the original conversation
         # in the recipient's mail client.
         self._last_inbound_email: Dict[str, Dict[str, str]] = {}
+        # chat_id → metadata of the most-recent inbound SMS for that chat.
+        # Used by send()'s SMS branch to reply by Inkbox conversation id
+        # instead of reconstructing a phone-number send. This is required for
+        # group MMS and keeps 1:1 replies on the canonical server thread.
+        self._last_inbound_sms: Dict[str, Dict[str, str]] = {}
         # chat_id → modality of the most-recent inbound message ('email',
         # 'sms', or 'voice').  Critical when chat_id is a Contact UUID (no
         # `+` or `@` to disambiguate) — without this, send() defaults the
@@ -1536,8 +1606,25 @@ class InkboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"get_identity failed: {exc}")
 
         if mode == "sms":
-            to_number = str(meta.get("to_phone") or chat_id).strip()
-            if not to_number.startswith("+"):
+            thread_id = str(meta.get("thread_id") or "").strip()
+            sms_meta = (
+                self._last_inbound_sms.get(_sms_state_key(chat_id, thread_id))
+                or self._last_inbound_sms.get(str(chat_id), {})
+            )
+            conversation_id = str(
+                meta.get("conversation_id")
+                or meta.get("conversationId")
+                or _sms_conversation_target(thread_id)
+                or sms_meta.get("conversation_id")
+                or ""
+            ).strip()
+            to_number = str(
+                meta.get("to_phone")
+                or meta.get("toPhone")
+                or sms_meta.get("remote_phone_number")
+                or chat_id
+            ).strip()
+            if not conversation_id and not to_number.startswith("+"):
                 # chat_id is a contact UUID (or unknown shape) — look up the
                 # primary phone number on the contact record.
                 to_number = await asyncio.to_thread(self._lookup_contact_phone, chat_id)
@@ -1547,11 +1634,26 @@ class InkboxAdapter(BasePlatformAdapter):
                         error=f"No phone number on contact {chat_id}",
                     )
             try:
-                msg = await asyncio.to_thread(identity.send_text, to=to_number, text=content)
+                if conversation_id:
+                    try:
+                        msg = await asyncio.to_thread(
+                            identity.send_text,
+                            conversation_id=conversation_id,
+                            text=content,
+                        )
+                    except TypeError:
+                        msg = await asyncio.to_thread(
+                            identity.send_text,
+                            {"conversationId": conversation_id, "text": content},
+                        )
+                    target_label = f"conversation:{conversation_id}"
+                else:
+                    msg = await asyncio.to_thread(identity.send_text, to=to_number, text=content)
+                    target_label = to_number
                 raw_response = _text_message_metadata(msg, mode="sms")
                 logger.info(
                     "[Inkbox] SMS queued to %s: id=%s delivery_status=%s",
-                    redact_phone(to_number),
+                    target_label if conversation_id else redact_phone(to_number),
                     raw_response.get("message_id") or "",
                     raw_response.get("delivery_status") or raw_response.get("status") or "",
                 )
@@ -1561,7 +1663,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     raw_response=raw_response,
                 )
             except Exception as exc:
-                return _sms_send_failure(exc, to_number=to_number)
+                return _sms_send_failure(exc, to_number=conversation_id or to_number)
 
         if mode == "email":
             to_addr = (meta.get("to_email") or "").strip()
@@ -1877,6 +1979,38 @@ class InkboxAdapter(BasePlatformAdapter):
     def _sms_text_batch_chars(batch: Dict[str, Any]) -> int:
         return sum(len(str(fragment.get("text") or "")) for fragment in batch["fragments"])
 
+    async def _lookup_text_conversation_summary(self, conversation_id: str) -> Any:
+        if not conversation_id or self._inkbox is None:
+            return None
+
+        def _lookup():
+            identity = self._inkbox.get_identity(self._identity_handle)
+            method = getattr(identity, "list_text_conversations", None)
+            if callable(method):
+                try:
+                    convos = method(limit=200, offset=0, include_groups=True)
+                except TypeError:
+                    convos = method({"limit": 200, "offset": 0, "includeGroups": True})
+            else:
+                method = getattr(identity, "listTextConversations", None)
+                if not callable(method):
+                    return None
+                convos = method({"limit": 200, "offset": 0, "includeGroups": True})
+            for entry in convos or []:
+                if str(_field(entry, "id", "conversation_id", "conversationId") or "") == conversation_id:
+                    return entry
+            return None
+
+        try:
+            return await asyncio.to_thread(_lookup)
+        except Exception as exc:
+            logger.debug(
+                "[Inkbox] text conversation summary lookup failed for %s: %s",
+                conversation_id,
+                exc,
+            )
+            return None
+
     def _build_sms_text_event(
         self,
         *,
@@ -1892,19 +2026,49 @@ class InkboxAdapter(BasePlatformAdapter):
         message_type: MessageType = MessageType.TEXT,
         media_urls: Optional[list[str]] = None,
         media_types: Optional[list[str]] = None,
+        conversation_id: Optional[str] = None,
+        is_group: bool = False,
+        local_phone: Optional[str] = None,
+        participants: Optional[list[str]] = None,
     ) -> MessageEvent:
+        thread_id = f"sms:{conversation_id}" if conversation_id else None
+        chat_name = (
+            f"Inkbox SMS group {conversation_id or remote}"
+            if is_group
+            else contact_name or remote
+        )
         source = self.build_source(
             chat_id=str(chat_id),
-            chat_name=contact_name or remote,
+            chat_name=chat_name,
             chat_type="dm",
             user_id=str(chat_id),
             user_name=contact_name or remote,
             user_id_alt=remote,
+            thread_id=thread_id,
             message_id=text_id,
         )
         if text is None:
             contact_block = self._contact_marker(contact)
-            text = f"[inkbox:sms from={remote} | {contact_block}]\n{body}"
+            if is_group:
+                marker_parts = [
+                    f"[inkbox:group_sms conversation_id={conversation_id or 'unknown'}",
+                    f"from={remote}",
+                    f"local={local_phone}" if local_phone else None,
+                    f"participants={','.join(participants or [])}" if participants else None,
+                    "reply_mode=conversation_id",
+                    f"| {contact_block}]",
+                ]
+                marker = " ".join(part for part in marker_parts if part)
+                group_policy = "\n".join([
+                    "Group SMS response policy: you receive every message in this group so you can track context.",
+                    "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
+                    "Treat ordinary group chatter as context only.",
+                    "If no visible reply is warranted, return exactly [SILENT].",
+                ])
+                text = "\n".join(part for part in [marker, group_policy, body] if part)
+            else:
+                conversation_part = f" conversation_id={conversation_id}" if conversation_id else ""
+                text = f"[inkbox:sms from={remote}{conversation_part} | {contact_block}]\n{body}"
         return MessageEvent(
             text=text,
             message_type=message_type,
@@ -1921,7 +2085,12 @@ class InkboxAdapter(BasePlatformAdapter):
         if event.message_type != MessageType.TEXT:
             return None
         text = (event.text or "").lstrip()
-        if text.startswith("[inkbox:sms ") or text.startswith("[inkbox:sms_burst "):
+        if (
+            text.startswith("[inkbox:sms ")
+            or text.startswith("[inkbox:sms_burst ")
+            or text.startswith("[inkbox:group_sms ")
+            or text.startswith("[inkbox:group_sms_burst ")
+        ):
             return {"mode": "queue", "merge_text": True}
         return None
 
@@ -2009,15 +2178,26 @@ class InkboxAdapter(BasePlatformAdapter):
         else:
             first_at = fragments[0]["timestamp"]
             last_at = fragments[-1]["timestamp"]
-            burst_marker = batch["marker"].replace(
-                "[inkbox:sms ",
-                (
-                    f"[inkbox:sms_burst messages={len(fragments)} "
-                    f"first_at={_format_inkbox_timestamp(first_at)} "
-                    f"last_at={_format_inkbox_timestamp(last_at)} "
-                ),
-                1,
-            )
+            if str(batch["marker"]).startswith("[inkbox:group_sms "):
+                burst_marker = batch["marker"].replace(
+                    "[inkbox:group_sms ",
+                    (
+                        f"[inkbox:group_sms_burst messages={len(fragments)} "
+                        f"first_at={_format_inkbox_timestamp(first_at)} "
+                        f"last_at={_format_inkbox_timestamp(last_at)} "
+                    ),
+                    1,
+                )
+            else:
+                burst_marker = batch["marker"].replace(
+                    "[inkbox:sms ",
+                    (
+                        f"[inkbox:sms_burst messages={len(fragments)} "
+                        f"first_at={_format_inkbox_timestamp(first_at)} "
+                        f"last_at={_format_inkbox_timestamp(last_at)} "
+                    ),
+                    1,
+                )
             lines = [burst_marker]
             for fragment in fragments:
                 delta = _format_sms_delta(first_at, fragment["timestamp"])
@@ -2034,6 +2214,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _on_text_received(self, envelope: Dict[str, Any]) -> "web.Response":
         text_msg = (envelope.get("data") or {}).get("text_message") or {}
+        data = envelope.get("data") or {}
         text_id = str(text_msg.get("id") or "").strip()
         if text_id and self._is_duplicate(f"text:{text_id}"):
             return web.Response(status=200, text="duplicate")
@@ -2043,6 +2224,35 @@ class InkboxAdapter(BasePlatformAdapter):
         remote = (text_msg.get("remote_phone_number") or "").strip()
         if not remote:
             return web.Response(status=200, text="ok")
+        conversation_id = str(
+            text_msg.get("conversation_id") or text_msg.get("conversationId") or ""
+        ).strip()
+        local_phone = str(
+            text_msg.get("local_phone_number") or text_msg.get("localPhoneNumber") or ""
+        ).strip()
+        conversation_summary = await self._lookup_text_conversation_summary(conversation_id)
+        participants = []
+        for entry in (
+            _string_list_field(conversation_summary, "participants")
+            + _string_list_field(text_msg, "participants")
+        ):
+            if entry not in participants:
+                participants.append(entry)
+        webhook_contacts = _webhook_list(data, "contacts", "contact_list")
+        webhook_agent_identities = _webhook_list(
+            data,
+            "agent_identities",
+            "agentIdentities",
+            "identity_agents",
+            "agentIdentities",
+        )
+        is_group = (
+            _conversation_summary_is_group(conversation_summary)
+            or bool(_field(text_msg, "isGroup", "is_group"))
+            or len(participants) > 1
+            or len(webhook_contacts) > 1
+            or len(webhook_agent_identities) > 1
+        )
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
         chat_id = (contact["id"] if contact else remote)
@@ -2064,6 +2274,15 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="ok")
 
         self._last_inbound_modality[str(chat_id)] = "sms"
+        sms_state = {
+            "conversation_id": conversation_id,
+            "remote_phone_number": remote,
+            "text_id": text_id,
+            "conversation_kind": "group" if is_group else "direct",
+        }
+        self._last_inbound_sms[str(chat_id)] = sms_state
+        if conversation_id:
+            self._last_inbound_sms[_sms_state_key(chat_id, f"sms:{conversation_id}")] = sms_state
 
         if raw_body.lstrip().startswith("/"):
             event = self._build_sms_text_event(
@@ -2079,6 +2298,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 message_type=MessageType.COMMAND,
                 media_urls=media_urls,
                 media_types=media_types,
+                conversation_id=conversation_id,
+                is_group=is_group,
+                local_phone=local_phone,
+                participants=participants,
             )
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
@@ -2094,6 +2317,10 @@ class InkboxAdapter(BasePlatformAdapter):
             timestamp=timestamp,
             media_urls=media_urls,
             media_types=media_types,
+            conversation_id=conversation_id,
+            is_group=is_group,
+            local_phone=local_phone,
+            participants=participants,
         )
         await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
@@ -2982,7 +3209,7 @@ async def send_inkbox_direct(
     )
     chosen_mode = (mode or "").lower().strip()
     if not chosen_mode:
-        chosen_mode = "sms" if str(chat_id).startswith("+") else "email"
+        chosen_mode = "sms" if str(chat_id).startswith("+") or _sms_conversation_target(chat_id) else "email"
     if chosen_mode == "sms" and len(message or "") > SMS_MAX_LENGTH:
         return _sms_too_long_failure_dict(message)
 
@@ -2991,6 +3218,29 @@ async def send_inkbox_direct(
             identity = client.get_identity(handle)
 
             if chosen_mode == "sms":
+                conversation_id = _sms_conversation_target(chat_id)
+                if conversation_id:
+                    try:
+                        msg = identity.send_text(conversation_id=conversation_id, text=message)
+                    except TypeError:
+                        msg = identity.send_text({"conversationId": conversation_id, "text": message})
+                    except Exception as exc:
+                        logger.error(
+                            "[Inkbox] Direct SMS send failed to conversation %s",
+                            conversation_id,
+                        )
+                        return _sms_send_failure_dict(exc)
+                    return {
+                        "success": True,
+                        "platform": "inkbox",
+                        "chat_id": chat_id,
+                        "message_id": str(getattr(msg, "id", "")),
+                        "mode": "sms",
+                        "conversation_id": conversation_id,
+                        "delivery_status": _plain_value(
+                            getattr(msg, "delivery_status", None),
+                        ),
+                    }
                 target = chat_id
                 if not str(target).startswith("+"):
                     contact = client.contacts.get(chat_id)

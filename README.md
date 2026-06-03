@@ -2,7 +2,7 @@
 
 [Inkbox](https://inkbox.ai) platform plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives a Hermes agent its own Inkbox identity: mailbox, phone number, SMS/MMS, voice calls, contact rules, an Inkbox tunnel, realtime phone calls, and bundled Inkbox skills without forking Hermes.
 
-Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, inbound email/SMS/voice, OpenAI Realtime phone calls, post-call actions, and package-included skills are implemented. The direct Hermes tool surface is intentionally small: `inkbox_whoami`, `inkbox_send_email`, `inkbox_send_sms`, and `inkbox_place_call`.
+Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS conversations, inbound email/SMS/voice, OpenAI Realtime phone calls, post-call actions, SMS conversation tools, and package-included skills are implemented.
 
 ## Prerequisites
 
@@ -175,9 +175,10 @@ After the gateway starts:
 1. Run `hermes inkbox doctor`.
 2. Text `START` to the agent's Inkbox phone number from every phone the agent should text.
 3. Send the agent an SMS and verify it replies in the same SMS thread.
-4. Send the agent an email and verify it replies from its Inkbox mailbox.
-5. Call the agent phone number and ask for its handle, email, and phone.
-6. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
+4. Add the agent to a group SMS/MMS conversation and verify it stays silent for unrelated chatter, then replies in the same conversation when addressed.
+5. Send the agent an email and verify it replies from its Inkbox mailbox.
+6. Call the agent phone number and ask for its handle, email, and phone.
+7. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
 
 ## Config Reference
 
@@ -206,6 +207,12 @@ Hermes direct tools:
 - `inkbox_whoami`
 - `inkbox_send_email`
 - `inkbox_send_sms`
+- `inkbox_list_text_conversations`
+- `inkbox_get_text_conversation`
+- `inkbox_list_texts`
+- `inkbox_get_text`
+- `inkbox_mark_text_read`
+- `inkbox_mark_text_conversation_read`
 - `inkbox_place_call`
 
 Realtime-only call tools:
