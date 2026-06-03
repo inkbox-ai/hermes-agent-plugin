@@ -71,6 +71,7 @@ def test_detect_openai_realtime_key_prefers_plugin_specific_env(monkeypatch):
         "INKBOX_REALTIME_API_KEY": "sk-realtime",
     }
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: ("credential_pool:openai-api", "sk-pool"))
     monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
 
     assert setup_wizard._detect_openai_realtime_key() == ("INKBOX_REALTIME_API_KEY", "sk-realtime")
@@ -82,6 +83,7 @@ def test_detect_openai_realtime_key_prefers_config(monkeypatch):
         "INKBOX_REALTIME_API_KEY": "sk-realtime",
     }
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "sk-config")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: ("credential_pool:openai-api", "sk-pool"))
     monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
 
     assert setup_wizard._detect_openai_realtime_key() == (
@@ -90,12 +92,21 @@ def test_detect_openai_realtime_key_prefers_config(monkeypatch):
     )
 
 
+def test_detect_openai_realtime_key_uses_hermes_openai_api_credentials(monkeypatch):
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: ("credential_pool:openai-api", "sk-pool"))
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+
+    assert setup_wizard._detect_openai_realtime_key() == ("credential_pool:openai-api", "sk-pool")
+
+
 def test_configure_realtime_calls_existing_key_success(monkeypatch):
     identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
     saved = []
     tested = []
 
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: None)
     monkeypatch.setattr(setup_wizard, "_env", lambda name: "sk-existing" if name == "OPENAI_API_KEY" else "")
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
@@ -113,11 +124,40 @@ def test_configure_realtime_calls_existing_key_success(monkeypatch):
     assert ("INKBOX_REALTIME_API_KEY", "sk-existing") in saved
 
 
+def test_configure_realtime_calls_reuses_hermes_openai_api_credentials(monkeypatch):
+    identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
+    saved = []
+    tested = []
+
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: ("credential_pool:openai-api", "sk-pool"))
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompted for key")),
+    )
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(
+        setup_wizard,
+        "_test_openai_realtime_api_key",
+        lambda key, model: tested.append((key, model)) or (True, "ok"),
+    )
+
+    setup_wizard._configure_realtime_calls(identity)
+
+    assert tested == [("sk-pool", "gpt-realtime-2")]
+    assert ("INKBOX_REALTIME_ENABLED", "true") in saved
+    assert ("INKBOX_REALTIME_API_KEY", "sk-pool") in saved
+
+
 def test_configure_realtime_calls_prompts_for_missing_key(monkeypatch):
     identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
     saved = []
 
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: None)
     monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: "sk-pasted")
@@ -136,6 +176,7 @@ def test_configure_realtime_calls_validation_failure_disables(monkeypatch):
     answers = iter([True, False])
 
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: None)
     monkeypatch.setattr(setup_wizard, "_env", lambda name: "sk-bad" if name == "OPENAI_API_KEY" else "")
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
@@ -167,6 +208,7 @@ def test_configure_realtime_calls_retries_after_validation_failure(monkeypatch):
         return False, "invalid_api_key: Incorrect API key provided"
 
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_hermes_openai_api_key", lambda: None)
     monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: next(keys))

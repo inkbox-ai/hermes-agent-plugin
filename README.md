@@ -121,7 +121,8 @@ Calls auto-detect OpenAI Realtime credentials. The plugin checks, in order:
 
 1. `platforms.inkbox.realtime.api_key` in Hermes config.
 2. `INKBOX_REALTIME_API_KEY`.
-3. `OPENAI_API_KEY`.
+3. Hermes `openai-api` credentials, including `credential_pool.openai-api`.
+4. `OPENAI_API_KEY`.
 
 The setup wizard offers Realtime after a phone number is available. When an OpenAI API key is available and realtime is enabled, the wizard validates Realtime access before saving the plugin-specific key. If no realtime API key is available, validation fails, or realtime is disabled, calls use Inkbox STT/TTS. Hermes/Codex OAuth is not used for GA Realtime calls.
 

@@ -182,14 +182,34 @@ def _config_realtime_api_key() -> str:
     return str(api_key or "").strip()
 
 
+def _hermes_openai_api_key() -> tuple[str, str] | None:
+    try:
+        from hermes_cli.auth import has_usable_secret, resolve_api_key_provider_credentials
+
+        creds = resolve_api_key_provider_credentials("openai-api")
+    except Exception:
+        return None
+
+    api_key = str(creds.get("api_key") or "").strip()
+    if not api_key or not has_usable_secret(api_key):
+        return None
+    source = str(creds.get("source") or "openai-api").strip() or "openai-api"
+    return source, api_key
+
+
 def _detect_openai_realtime_key() -> tuple[str, str] | None:
     config_key = _config_realtime_api_key()
     if config_key:
         return "platforms.inkbox.realtime.api_key", config_key
-    for name in ("INKBOX_REALTIME_API_KEY", "OPENAI_API_KEY"):
-        value = _env(name).strip()
-        if value:
-            return name, value
+    realtime_key = _env("INKBOX_REALTIME_API_KEY").strip()
+    if realtime_key:
+        return "INKBOX_REALTIME_API_KEY", realtime_key
+    hermes_key = _hermes_openai_api_key()
+    if hermes_key is not None:
+        return hermes_key
+    openai_key = _env("OPENAI_API_KEY").strip()
+    if openai_key:
+        return "OPENAI_API_KEY", openai_key
     return None
 
 
@@ -335,6 +355,10 @@ def _redact_key_source(name: str) -> str:
         return "INKBOX_REALTIME_API_KEY"
     if name == "OPENAI_API_KEY":
         return "OPENAI_API_KEY"
+    if name == "credential_pool:openai-api":
+        return "Hermes credential pool (openai-api)"
+    if name == "openai-api":
+        return "Hermes OpenAI API credentials"
     return "the configured OpenAI API key"
 
 
