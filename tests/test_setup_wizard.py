@@ -63,3 +63,96 @@ def test_plugin_install_does_not_prompt_for_inkbox_env():
     assert "requires_env: []" in text
     assert "name: INKBOX_API_KEY" in text
     assert "name: INKBOX_IDENTITY" in text
+
+
+def test_detect_openai_realtime_key_prefers_plugin_specific_env(monkeypatch):
+    values = {
+        "OPENAI_API_KEY": "sk-openai",
+        "INKBOX_REALTIME_API_KEY": "sk-realtime",
+    }
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
+
+    assert setup_wizard._detect_openai_realtime_key() == ("INKBOX_REALTIME_API_KEY", "sk-realtime")
+
+
+def test_detect_openai_realtime_key_prefers_config(monkeypatch):
+    values = {
+        "OPENAI_API_KEY": "sk-openai",
+        "INKBOX_REALTIME_API_KEY": "sk-realtime",
+    }
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "sk-config")
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
+
+    assert setup_wizard._detect_openai_realtime_key() == (
+        "platforms.inkbox.realtime.api_key",
+        "sk-config",
+    )
+
+
+def test_configure_realtime_calls_existing_key_success(monkeypatch):
+    identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
+    saved = []
+    tested = []
+
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: "sk-existing" if name == "OPENAI_API_KEY" else "")
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(
+        setup_wizard,
+        "_test_openai_realtime_api_key",
+        lambda key, model: tested.append((key, model)) or (True, "ok"),
+    )
+
+    setup_wizard._configure_realtime_calls(identity)
+
+    assert tested == [("sk-existing", "gpt-realtime-2")]
+    assert ("INKBOX_REALTIME_ENABLED", "true") in saved
+    assert ("INKBOX_REALTIME_MODEL", "gpt-realtime-2") in saved
+    assert ("INKBOX_REALTIME_API_KEY", "sk-existing") in saved
+
+
+def test_configure_realtime_calls_prompts_for_missing_key(monkeypatch):
+    identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
+    saved = []
+
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: "sk-pasted")
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(setup_wizard, "_test_openai_realtime_api_key", lambda *_args: (True, "ok"))
+
+    setup_wizard._configure_realtime_calls(identity)
+
+    assert ("INKBOX_REALTIME_ENABLED", "true") in saved
+    assert ("INKBOX_REALTIME_API_KEY", "sk-pasted") in saved
+
+
+def test_configure_realtime_calls_validation_failure_disables(monkeypatch):
+    identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
+    saved = []
+
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: "sk-bad" if name == "OPENAI_API_KEY" else "")
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(
+        setup_wizard,
+        "_test_openai_realtime_api_key",
+        lambda *_args: (False, "OpenAI rejected the key or Realtime permission: HTTP 403"),
+    )
+
+    setup_wizard._configure_realtime_calls(identity)
+
+    assert saved == [("INKBOX_REALTIME_ENABLED", "false")]
+
+
+def test_configure_realtime_calls_without_phone_skips(monkeypatch):
+    saved = []
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+
+    setup_wizard._configure_realtime_calls(types.SimpleNamespace(phone_number=None))
+
+    assert saved == []

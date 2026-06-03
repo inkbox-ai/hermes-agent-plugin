@@ -64,9 +64,10 @@ hermes gateway restart
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
-5. Stores `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and related settings in `~/.hermes/.env`.
-6. Points the identity's mailbox and phone number at the agent-owned Inkbox tunnel.
-7. Prints the final mailbox/phone summary and next commands.
+5. Offers OpenAI Realtime for calls when a phone number exists, validates the OpenAI API key, and stores `INKBOX_REALTIME_*` settings only when validation succeeds.
+6. Stores `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and related settings in `~/.hermes/.env`.
+7. Points the identity's mailbox and phone number at the agent-owned Inkbox tunnel.
+8. Prints the final mailbox/phone summary and next commands.
 
 If setup provisions a new local phone number, it waits for an inbound SMS `START` to that number before finishing. Text `START` from every phone that should receive outbound SMS from the agent.
 
@@ -97,7 +98,7 @@ The setup wizard writes to `~/.hermes/.env`:
 ```bash
 INKBOX_API_KEY=ApiKey_xxxxxxxxxxxx
 INKBOX_IDENTITY=my-agent-handle
-INKBOX_SIGNING_KEY=whsec_xxxxxxxxxxxx
+INKBOX_SIGNING_KEY=xxxxxxxxxxxx
 INKBOX_ALLOW_ALL_USERS=true
 ```
 
@@ -122,7 +123,7 @@ Calls auto-detect OpenAI Realtime credentials. The plugin checks, in order:
 2. `INKBOX_REALTIME_API_KEY`.
 3. `OPENAI_API_KEY`.
 
-When an OpenAI API key is available and realtime is enabled, the next call uses raw Inkbox call media through OpenAI Realtime. If no realtime API key is available, or realtime is disabled, calls use Inkbox STT/TTS. Hermes/Codex OAuth is not used for GA Realtime calls.
+The setup wizard offers Realtime after a phone number is available. When an OpenAI API key is available and realtime is enabled, the wizard validates Realtime access before saving the plugin-specific key. If no realtime API key is available, validation fails, or realtime is disabled, calls use Inkbox STT/TTS. Hermes/Codex OAuth is not used for GA Realtime calls.
 
 Common realtime env vars:
 

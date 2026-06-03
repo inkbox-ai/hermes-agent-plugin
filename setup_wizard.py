@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import importlib
 import json
@@ -14,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 try:
     from .config import INKBOX_BASE_URL_DEFAULT
@@ -57,6 +59,8 @@ except Exception:  # pragma: no cover - local tests without Hermes
 
 INKBOX_REQUIREMENTS = ("inkbox>=0.4.6", "aiohttp>=3.9")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
+OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
+OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
 
 
 def print_header(title: str) -> None:
@@ -161,6 +165,32 @@ def _env(name: str) -> str:
         return os.getenv(name) or get_env_value(name) or ""
     except Exception:
         return os.getenv(name, "")
+
+
+def _config_realtime_api_key() -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        return ""
+
+    platforms = cfg.get("platforms") if isinstance(cfg, dict) else {}
+    inkbox = platforms.get("inkbox") if isinstance(platforms, dict) else {}
+    realtime = inkbox.get("realtime") if isinstance(inkbox, dict) else {}
+    api_key = realtime.get("api_key") if isinstance(realtime, dict) else ""
+    return str(api_key or "").strip()
+
+
+def _detect_openai_realtime_key() -> tuple[str, str] | None:
+    config_key = _config_realtime_api_key()
+    if config_key:
+        return "platforms.inkbox.realtime.api_key", config_key
+    for name in ("INKBOX_REALTIME_API_KEY", "OPENAI_API_KEY"):
+        value = _env(name).strip()
+        if value:
+            return name, value
+    return None
 
 
 def _install_commands() -> list[list[list[str]]]:
@@ -298,6 +328,158 @@ def _seed_identity_state(identity: Any) -> None:
         print_info("  Start the gateway and it will populate the file on connect.")
 
 
+def _redact_key_source(name: str) -> str:
+    if name == "platforms.inkbox.realtime.api_key":
+        return "platforms.inkbox.realtime.api_key"
+    if name == "INKBOX_REALTIME_API_KEY":
+        return "INKBOX_REALTIME_API_KEY"
+    if name == "OPENAI_API_KEY":
+        return "OPENAI_API_KEY"
+    return "the configured OpenAI API key"
+
+
+async def _test_openai_realtime_api_key_async(api_key: str, model: str) -> tuple[bool, str]:
+    try:
+        import aiohttp
+    except Exception as exc:
+        return False, f"aiohttp is not available in this Hermes environment: {exc}"
+
+    url = f"{OPENAI_REALTIME_TEST_URL}?{urlencode({'model': model})}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = aiohttp.ClientTimeout(total=12)
+    session_update = {
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "model": model,
+            "instructions": "Validation probe. Do not speak unless audio is provided.",
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "noise_reduction": None,
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500,
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcmu"},
+                    "voice": "cedar",
+                },
+            },
+        },
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(url, headers=headers, heartbeat=10) as ws:
+                await ws.send_str(json.dumps(session_update))
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 8.0
+                saw_session_created = False
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        if saw_session_created:
+                            return True, "OpenAI Realtime websocket accepted the key."
+                        return False, "Timed out waiting for an OpenAI Realtime session response."
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            event = json.loads(msg.data)
+                        except Exception:
+                            continue
+                        event_type = str(event.get("type") or "")
+                        if event_type == "session.updated":
+                            return True, "OpenAI Realtime session update succeeded."
+                        if event_type == "session.created":
+                            saw_session_created = True
+                            continue
+                        if event_type == "error":
+                            error = event.get("error") if isinstance(event.get("error"), dict) else event
+                            message = str(error.get("message") or event).strip()
+                            code = str(error.get("code") or "").strip()
+                            prefix = f"{code}: " if code else ""
+                            return False, f"{prefix}{message}"
+                    if msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                        detail = str(getattr(ws, "exception", lambda: None)() or "websocket closed")
+                        return False, detail
+    except aiohttp.WSServerHandshakeError as exc:
+        if exc.status in {401, 403}:
+            return False, f"OpenAI rejected the key or Realtime permission: HTTP {exc.status}"
+        return False, f"OpenAI Realtime websocket handshake failed: HTTP {exc.status} {exc.message}"
+    except asyncio.TimeoutError:
+        return False, "Timed out connecting to OpenAI Realtime."
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _test_openai_realtime_api_key(api_key: str, model: str = OPENAI_REALTIME_TEST_MODEL) -> tuple[bool, str]:
+    try:
+        return asyncio.run(_test_openai_realtime_api_key_async(api_key, model))
+    except RuntimeError as exc:
+        return False, f"Could not run Realtime validation from this setup process: {exc}"
+
+
+def _configure_realtime_calls(identity: Any) -> None:
+    phone = getattr(identity, "phone_number", None)
+    if phone is None:
+        return
+
+    print()
+    print(color("  --- OpenAI Realtime calls ---", Colors.CYAN))
+    print_info("  Realtime calls send raw phone audio to OpenAI Realtime.")
+    print_info("  This requires an OpenAI API key with /v1/realtime permission.")
+
+    detected = _detect_openai_realtime_key()
+    api_key = ""
+    key_source = ""
+    if detected is not None:
+        key_source, api_key = detected
+        print_success(f"  Found existing OpenAI API key in {_redact_key_source(key_source)}.")
+        if not prompt_yes_no("  Use OpenAI Realtime API for phone calls?", True):
+            _save("INKBOX_REALTIME_ENABLED", "false")
+            print_info("  Realtime disabled. Calls will use Inkbox STT/TTS.")
+            return
+    else:
+        print_warning("  No OpenAI API key was detected for Realtime.")
+        print_info("  If you opt in, paste an OpenAI API key in the next step.")
+        print_info("  The wizard will test the key before enabling Realtime calls.")
+        if not prompt_yes_no("  Use OpenAI Realtime API for phone calls?", False):
+            _save("INKBOX_REALTIME_ENABLED", "false")
+            print_info("  Realtime disabled. Calls will use Inkbox STT/TTS.")
+            return
+        api_key = prompt("  Paste your OpenAI API key for Realtime calls", password=True).strip()
+        key_source = "INKBOX_REALTIME_API_KEY"
+        if not api_key:
+            _save("INKBOX_REALTIME_ENABLED", "false")
+            print_warning("  No OpenAI API key entered. Realtime disabled; calls will use Inkbox STT/TTS.")
+            return
+
+    print_info(f"  Testing OpenAI Realtime access with {OPENAI_REALTIME_TEST_MODEL}...")
+    ok, detail = _test_openai_realtime_api_key(api_key, OPENAI_REALTIME_TEST_MODEL)
+    if not ok:
+        _save("INKBOX_REALTIME_ENABLED", "false")
+        print_error("  OpenAI Realtime validation failed.")
+        print_info(f"  {detail}")
+        print_info("  Realtime disabled. Calls will use Inkbox STT/TTS until a working OpenAI API key is configured.")
+        return
+
+    _save("INKBOX_REALTIME_ENABLED", "true")
+    _save("INKBOX_REALTIME_MODEL", OPENAI_REALTIME_TEST_MODEL)
+    # Persist the exact validated key under the plugin-specific env var so the
+    # gateway does not depend on the operator's shell exporting OPENAI_API_KEY.
+    _save("INKBOX_REALTIME_API_KEY", api_key)
+    print_success("  OpenAI Realtime validation succeeded.")
+    print_info("  Realtime calls are enabled for this Hermes Inkbox gateway.")
+
+
 def _setup_signing_key(api_key: str, base_url: str, Inkbox: Any) -> None:
     print()
     print(color("  --- Webhook signing key ---", Colors.CYAN))
@@ -306,7 +488,7 @@ def _setup_signing_key(api_key: str, base_url: str, Inkbox: Any) -> None:
 
     has_key = prompt_yes_no("  Do you already have an Inkbox signing key?", False)
     if has_key:
-        key = prompt("  Paste your signing key (starts with whsec_)", password=True).strip()
+        key = prompt("  Paste your Inkbox signing key", password=True).strip()
         if not key:
             print_warning("  No key entered; leaving signature verification off.")
             _save("INKBOX_REQUIRE_SIGNATURE", "false")
@@ -949,6 +1131,7 @@ def interactive_setup() -> None:
 
     _seed_identity_state(identity)
     _print_agent_summary(identity)
+    _configure_realtime_calls(identity)
 
     if did_provision_phone:
         _wait_for_sms_opt_in(api_key, base_url, getattr(identity, "phone_number", None), Inkbox)
