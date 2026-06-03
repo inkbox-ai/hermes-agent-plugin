@@ -133,10 +133,11 @@ def test_configure_realtime_calls_prompts_for_missing_key(monkeypatch):
 def test_configure_realtime_calls_validation_failure_disables(monkeypatch):
     identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
     saved = []
+    answers = iter([True, False])
 
     monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
     monkeypatch.setattr(setup_wizard, "_env", lambda name: "sk-bad" if name == "OPENAI_API_KEY" else "")
-    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
     monkeypatch.setattr(
         setup_wizard,
@@ -146,7 +147,44 @@ def test_configure_realtime_calls_validation_failure_disables(monkeypatch):
 
     setup_wizard._configure_realtime_calls(identity)
 
-    assert saved == [("INKBOX_REALTIME_ENABLED", "false")]
+    assert saved == [
+        ("INKBOX_REALTIME_ENABLED", "false"),
+        ("INKBOX_REALTIME_ENABLED", "false"),
+    ]
+
+
+def test_configure_realtime_calls_retries_after_validation_failure(monkeypatch):
+    identity = types.SimpleNamespace(phone_number=types.SimpleNamespace(number="+15551234567"))
+    saved = []
+    tested = []
+    answers = iter([True, True])
+    keys = iter(["sk-bad", "sk-good"])
+
+    def test_key(key, model):
+        tested.append((key, model))
+        if key == "sk-good":
+            return True, "ok"
+        return False, "invalid_api_key: Incorrect API key provided"
+
+    monkeypatch.setattr(setup_wizard, "_config_realtime_api_key", lambda: "")
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: next(keys))
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(setup_wizard, "_test_openai_realtime_api_key", test_key)
+
+    setup_wizard._configure_realtime_calls(identity)
+
+    assert tested == [
+        ("sk-bad", "gpt-realtime-2"),
+        ("sk-good", "gpt-realtime-2"),
+    ]
+    assert saved == [
+        ("INKBOX_REALTIME_ENABLED", "false"),
+        ("INKBOX_REALTIME_ENABLED", "true"),
+        ("INKBOX_REALTIME_MODEL", "gpt-realtime-2"),
+        ("INKBOX_REALTIME_API_KEY", "sk-good"),
+    ]
 
 
 def test_configure_realtime_calls_without_phone_skips(monkeypatch):

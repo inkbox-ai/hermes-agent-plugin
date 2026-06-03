@@ -438,46 +438,52 @@ def _configure_realtime_calls(identity: Any) -> None:
     print_info("  This requires an OpenAI API key with /v1/realtime permission.")
 
     detected = _detect_openai_realtime_key()
-    api_key = ""
-    key_source = ""
+    detected_key = ""
+    default_opt_in = False
+    prompt_for_key = False
     if detected is not None:
-        key_source, api_key = detected
+        key_source, detected_key = detected
+        default_opt_in = True
         print_success(f"  Found existing OpenAI API key in {_redact_key_source(key_source)}.")
-        if not prompt_yes_no("  Use OpenAI Realtime API for phone calls?", True):
-            _save("INKBOX_REALTIME_ENABLED", "false")
-            print_info("  Realtime disabled. Calls will use Inkbox STT/TTS.")
-            return
     else:
         print_warning("  No OpenAI API key was detected for Realtime.")
         print_info("  If you opt in, paste an OpenAI API key in the next step.")
         print_info("  The wizard will test the key before enabling Realtime calls.")
-        if not prompt_yes_no("  Use OpenAI Realtime API for phone calls?", False):
+
+    while True:
+        if not prompt_yes_no("  Use OpenAI Realtime API for phone calls?", default_opt_in):
             _save("INKBOX_REALTIME_ENABLED", "false")
             print_info("  Realtime disabled. Calls will use Inkbox STT/TTS.")
             return
-        api_key = prompt("  Paste your OpenAI API key for Realtime calls", password=True).strip()
-        key_source = "INKBOX_REALTIME_API_KEY"
+
+        if prompt_for_key or not detected_key:
+            api_key = prompt("  Paste your OpenAI API key for Realtime calls", password=True).strip()
+        else:
+            api_key = detected_key
         if not api_key:
             _save("INKBOX_REALTIME_ENABLED", "false")
             print_warning("  No OpenAI API key entered. Realtime disabled; calls will use Inkbox STT/TTS.")
             return
 
-    print_info(f"  Testing OpenAI Realtime access with {OPENAI_REALTIME_TEST_MODEL}...")
-    ok, detail = _test_openai_realtime_api_key(api_key, OPENAI_REALTIME_TEST_MODEL)
-    if not ok:
-        _save("INKBOX_REALTIME_ENABLED", "false")
-        print_error("  OpenAI Realtime validation failed.")
-        print_info(f"  {detail}")
-        print_info("  Realtime disabled. Calls will use Inkbox STT/TTS until a working OpenAI API key is configured.")
-        return
+        print_info(f"  Testing OpenAI Realtime access with {OPENAI_REALTIME_TEST_MODEL}...")
+        ok, detail = _test_openai_realtime_api_key(api_key, OPENAI_REALTIME_TEST_MODEL)
+        if not ok:
+            _save("INKBOX_REALTIME_ENABLED", "false")
+            print_error("  OpenAI Realtime validation failed.")
+            print_info(f"  {detail}")
+            print_info("  Realtime remains disabled. Try another key, or answer no to use Inkbox STT/TTS.")
+            default_opt_in = True
+            prompt_for_key = True
+            continue
 
-    _save("INKBOX_REALTIME_ENABLED", "true")
-    _save("INKBOX_REALTIME_MODEL", OPENAI_REALTIME_TEST_MODEL)
-    # Persist the exact validated key under the plugin-specific env var so the
-    # gateway does not depend on the operator's shell exporting OPENAI_API_KEY.
-    _save("INKBOX_REALTIME_API_KEY", api_key)
-    print_success("  OpenAI Realtime validation succeeded.")
-    print_info("  Realtime calls are enabled for this Hermes Inkbox gateway.")
+        _save("INKBOX_REALTIME_ENABLED", "true")
+        _save("INKBOX_REALTIME_MODEL", OPENAI_REALTIME_TEST_MODEL)
+        # Persist the exact validated key under the plugin-specific env var so the
+        # gateway does not depend on the operator's shell exporting OPENAI_API_KEY.
+        _save("INKBOX_REALTIME_API_KEY", api_key)
+        print_success("  OpenAI Realtime validation succeeded.")
+        print_info("  Realtime calls are enabled for this Hermes Inkbox gateway.")
+        return
 
 
 def _setup_signing_key(api_key: str, base_url: str, Inkbox: Any) -> None:
