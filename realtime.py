@@ -1,7 +1,7 @@
 """Inkbox ↔ OpenAI Realtime API voice bridge.
 
-When ``inkbox.realtime.enabled`` is true and an OpenAI API key or Codex OAuth
-token is configured, the call WebSocket handler in :mod:`gateway.platforms.inkbox`
+When ``inkbox.realtime.enabled`` is true and an OpenAI API key is configured,
+the call WebSocket handler in :mod:`gateway.platforms.inkbox`
 delegates inbound calls to :func:`run_inkbox_realtime_bridge` instead of using
 Inkbox-side STT/TTS.
 
@@ -49,7 +49,6 @@ except ImportError:  # pragma: no cover — aiohttp is a core dep on this fork
 logger = logging.getLogger(__name__)
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
-REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 DEFAULT_MODEL = "gpt-realtime-2"
 DEFAULT_VOICE = "cedar"
 AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
@@ -80,7 +79,6 @@ HANGUP_CLOSE_DELAY_S = 2.0
 def _openai_realtime_ws_headers(bearer: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {bearer}",
-        "OpenAI-Beta": "realtime=v1",
     }
 
 
@@ -274,7 +272,6 @@ class RealtimeConfig:
 
     enabled: bool = False
     api_key: str = ""
-    oauth_token: str = ""
     model: str = DEFAULT_MODEL
     voice: str = DEFAULT_VOICE
     additional_instructions: str = ""
@@ -284,7 +281,7 @@ class RealtimeConfig:
 
     @property
     def has_credential(self) -> bool:
-        return bool(self.api_key or self.oauth_token)
+        return bool(self.api_key)
 
 
 @dataclass
@@ -485,7 +482,7 @@ async def run_inkbox_realtime_bridge(
         logger.error("[Inkbox realtime] aiohttp not available; cannot open Realtime API WS")
         return
     if not config.has_credential:
-        logger.error("[Inkbox realtime] No OpenAI credential (api_key or oauth_token); refusing to bridge")
+        logger.error("[Inkbox realtime] No OpenAI API key; refusing to bridge")
         return
 
     state = _BridgeState()
@@ -577,30 +574,7 @@ async def _resolve_realtime_bearer(session: Any, config: RealtimeConfig) -> str:
     """Return the bearer token to use on the OpenAI Realtime WebSocket."""
     if config.api_key:
         return config.api_key
-
-    body = {
-        "session": {
-            "type": "realtime",
-            "model": config.model,
-            "audio": {"output": {"voice": config.voice}},
-        },
-    }
-    headers = {
-        "Authorization": f"Bearer {config.oauth_token}",
-        "Content-Type": "application/json",
-    }
-    async with session.post(REALTIME_CLIENT_SECRETS_URL, headers=headers, json=body) as resp:
-        if resp.status >= 400:
-            detail = (await resp.text())[:200]
-            raise RuntimeError(f"client_secrets HTTP {resp.status}: {detail}")
-        data = await resp.json()
-
-    secret = data.get("value")
-    if not secret and isinstance(data.get("client_secret"), dict):
-        secret = data["client_secret"].get("value")
-    if not secret:
-        raise RuntimeError("client_secrets response had no value")
-    return str(secret)
+    return ""
 
 
 async def _maybe_send_greeting(

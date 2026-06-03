@@ -43,7 +43,7 @@ optional_env:
     prompt: "Allow all users"
     secret: false
   - name: INKBOX_REALTIME_API_KEY
-    description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted. If omitted, Hermes Codex OAuth can be used when available."
+    description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted. If omitted, calls use Inkbox STT/TTS."
     prompt: "Realtime API key"
     secret: true
   - name: INKBOX_REALTIME_MODEL

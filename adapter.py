@@ -77,7 +77,6 @@ import re
 import socket as _socket
 import time
 from contextlib import suppress
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -271,16 +270,6 @@ def _conversation_summary_is_group(summary: Any) -> bool:
     return bool(_field(summary, "isGroup", "is_group", "is_group_conversation"))
 
 
-def _pool_codex_oauth_token() -> str:
-    """Best-effort lookup of Hermes/Codex OAuth without making it a hard dependency."""
-    try:
-        from hermes_cli.auth import _pool_codex_access_token
-
-        return (_pool_codex_access_token() or "").strip()
-    except Exception:
-        return ""
-
-
 def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     rt_extra = extra.get("realtime") if isinstance(extra.get("realtime"), dict) else {}
     rt_api_key = (
@@ -288,8 +277,7 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
         or os.getenv("INKBOX_REALTIME_API_KEY", "").strip()
         or os.getenv("OPENAI_API_KEY", "").strip()
     )
-    rt_oauth_token = "" if rt_api_key else _pool_codex_oauth_token()
-    rt_has_cred = bool(rt_api_key or rt_oauth_token)
+    rt_has_cred = bool(rt_api_key)
     rt_enabled_raw = (
         rt_extra.get("enabled")
         if "enabled" in rt_extra
@@ -304,7 +292,6 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     config = RealtimeConfig(
         enabled=rt_enabled_requested and rt_has_cred,
         api_key=rt_api_key,
-        oauth_token=rt_oauth_token,
         model=str(rt_extra.get("model") or os.getenv("INKBOX_REALTIME_MODEL") or REALTIME_DEFAULT_MODEL),
         voice=str(rt_extra.get("voice") or os.getenv("INKBOX_REALTIME_VOICE") or REALTIME_DEFAULT_VOICE),
         additional_instructions=str(rt_extra.get("additional_instructions") or ""),
@@ -317,7 +304,7 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     if rt_enabled_text in ("true", "1", "yes", "on") and not rt_has_cred:
         logger.warning(
             "[Inkbox] realtime voice was enabled but no OpenAI credential was found "
-            "(checked realtime.api_key, INKBOX_REALTIME_API_KEY, OPENAI_API_KEY, Codex OAuth); "
+            "(checked realtime.api_key, INKBOX_REALTIME_API_KEY, OPENAI_API_KEY); "
             "falling back to Inkbox-side STT/TTS for calls.",
         )
     return config
@@ -1045,9 +1032,9 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_require_signature = os.getenv("INKBOX_REQUIRE_SIGNATURE", "true")
         self._require_signature = str(raw_require_signature).lower() not in ("false", "0", "no")
 
-        # Realtime voice bridge. When an OpenAI key or Codex OAuth token is
-        # present, inbound voice calls are bridged to OpenAI's Realtime API
-        # instead of relying on Inkbox-side STT/TTS. See :mod:`realtime`.
+        # Realtime voice bridge. When an OpenAI API key is present, inbound
+        # voice calls are bridged to OpenAI's Realtime API instead of relying
+        # on Inkbox-side STT/TTS. See :mod:`realtime`.
         # Config shape under ``platforms.inkbox.realtime`` in config.yaml:
         #   enabled: bool (optional; defaults to auto-detect from credential)
         #   api_key: str (or read from OPENAI_API_KEY / INKBOX_REALTIME_API_KEY env)
@@ -2587,15 +2574,9 @@ class InkboxAdapter(BasePlatformAdapter):
                         call_context.get("conversation_summary") or ""
                     ).strip() or None,
                 )
-                rt_config = self._realtime_config
-                if rt_config.enabled and not rt_config.api_key:
-                    fresh_token = _pool_codex_oauth_token()
-                    if fresh_token:
-                        rt_config = replace(rt_config, oauth_token=fresh_token)
-
                 await run_inkbox_realtime_bridge(
                     inkbox_ws=ws,
-                    config=rt_config,
+                    config=self._realtime_config,
                     meta=rt_meta,
                     on_agent_consult=self._realtime_agent_consult,
                     on_post_call_actions=self._realtime_post_call_actions,

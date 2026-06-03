@@ -121,9 +121,8 @@ Calls auto-detect OpenAI Realtime credentials. The plugin checks, in order:
 1. `platforms.inkbox.realtime.api_key` in Hermes config.
 2. `INKBOX_REALTIME_API_KEY`.
 3. `OPENAI_API_KEY`.
-4. Hermes/Codex OAuth, which is exchanged for an ephemeral OpenAI Realtime client secret.
 
-When a credential is available and realtime is enabled, the next call uses raw Inkbox call media through OpenAI Realtime. If no realtime credential is available, or realtime is disabled, calls use Inkbox STT/TTS.
+When an OpenAI API key is available and realtime is enabled, the next call uses raw Inkbox call media through OpenAI Realtime. If no realtime API key is available, or realtime is disabled, calls use Inkbox STT/TTS. Hermes/Codex OAuth is not used for GA Realtime calls.
 
 Common realtime env vars:
 
