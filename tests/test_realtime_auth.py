@@ -13,6 +13,7 @@ from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin.realtime import (
     REALTIME_CLIENT_SECRETS_URL,
     RealtimeConfig,
+    _openai_realtime_ws_headers,
     _resolve_realtime_bearer,
 )
 
@@ -98,6 +99,13 @@ def test_realtime_api_key_used_directly():
 
     assert bearer == "sk-direct"
     assert session.calls == []
+
+
+def test_realtime_ws_headers_include_beta_flag():
+    assert _openai_realtime_ws_headers("ek-secret") == {
+        "Authorization": "Bearer ek-secret",
+        "OpenAI-Beta": "realtime=v1",
+    }
 
 
 def test_realtime_oauth_mints_client_secret():

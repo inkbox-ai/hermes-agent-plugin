@@ -77,6 +77,13 @@ HANGUP_CONFIRM_WINDOW_S = 60.0
 HANGUP_CLOSE_DELAY_S = 2.0
 
 
+def _openai_realtime_ws_headers(bearer: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "OpenAI-Beta": "realtime=v1",
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool schema definitions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -495,7 +502,7 @@ async def run_inkbox_realtime_bridge(
         if not bearer:
             return
 
-        headers = {"Authorization": f"Bearer {bearer}"}
+        headers = _openai_realtime_ws_headers(bearer)
         try:
             openai_ws = await session.ws_connect(url, headers=headers, heartbeat=30)
         except Exception as exc:
