@@ -24,6 +24,8 @@ def _clear_realtime_env(monkeypatch):
     monkeypatch.delenv("INKBOX_REALTIME_MODEL", raising=False)
     monkeypatch.delenv("INKBOX_REALTIME_VOICE", raising=False)
     monkeypatch.delenv("INKBOX_REALTIME_CONSULT_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("INKBOX_REALTIME_CONNECT_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS", raising=False)
 
 
 def test_realtime_auto_stays_off_without_api_key(monkeypatch):
@@ -52,6 +54,26 @@ def test_realtime_explicit_enable_without_any_credential_stays_off(monkeypatch):
 
     assert cfg.enabled is False
     assert cfg.api_key == ""
+
+
+def test_realtime_fallback_defaults_on_and_can_be_disabled(monkeypatch):
+    _clear_realtime_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-wins")
+
+    cfg = adapter_mod._resolve_realtime_config({})
+    assert cfg.fallback_to_inkbox_stt_tts is True
+
+    cfg = adapter_mod._resolve_realtime_config({
+        "realtime": {
+            "enabled": True,
+            "fallback_to_inkbox_stt_tts": False,
+        }
+    })
+    assert cfg.fallback_to_inkbox_stt_tts is False
+
+    monkeypatch.setenv("INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS", "false")
+    cfg = adapter_mod._resolve_realtime_config({})
+    assert cfg.fallback_to_inkbox_stt_tts is False
 
 
 class _FakeResponse:

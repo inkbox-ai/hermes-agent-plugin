@@ -17,8 +17,10 @@ from inkbox_plugin.realtime import (
     EDIT_POST_CALL_ACTION_TOOL_NAME,
     HANG_UP_CALL_TOOL_NAME,
     POST_CALL_ACTION_TOOL_NAME,
+    RealtimeBridgeConnectError,
     RealtimeCallMeta,
     RealtimeConfig,
+    RealtimeConsultResult,
     _BridgeState,
     _dispatch_tool_call,
     _dispatch_post_call,
@@ -27,6 +29,7 @@ from inkbox_plugin.realtime import (
     _send_session_update,
     build_realtime_greeting,
     build_realtime_instructions,
+    open_inkbox_realtime_bridge,
 )
 
 
@@ -90,6 +93,23 @@ class _FakeOpenAIWS(_FakeWS):
             raise StopAsyncIteration
 
 
+class _FakeClientSession:
+    def __init__(self, *, ws=None, error=None):
+        self.ws = ws or _FakeWS()
+        self.error = error
+        self.calls = []
+        self.closed = False
+
+    async def ws_connect(self, url, *, headers, heartbeat):
+        self.calls.append({"url": url, "headers": headers, "heartbeat": heartbeat})
+        if self.error:
+            raise self.error
+        return self.ws
+
+    async def close(self):
+        self.closed = True
+
+
 def test_instructions_include_full_contact_and_outbound_context():
     text = build_realtime_instructions(_meta(
         contact_name="Dima Vremenko",
@@ -112,6 +132,43 @@ def test_instructions_include_full_contact_and_outbound_context():
     assert "Follow up on the overdue invoice" in text
     assert "billing workflow" in text
     assert "Customer promised to pay by Friday." in text
+
+
+def test_open_realtime_bridge_preflights_openai_before_inkbox_accept(monkeypatch):
+    openai_ws = _FakeWS()
+    session = _FakeClientSession(ws=openai_ws)
+    monkeypatch.setattr(realtime_mod.aiohttp, "ClientSession", lambda: session, raising=False)
+
+    bridge = asyncio.run(open_inkbox_realtime_bridge(
+        config=RealtimeConfig(enabled=True, api_key="sk-test", connect_timeout_s=1),
+        meta=_meta(),
+    ))
+
+    assert bridge.openai_ws is openai_ws
+    assert session.calls[0]["url"].startswith("wss://api.openai.com/v1/realtime?")
+    assert session.calls[0]["headers"] == {"Authorization": "Bearer sk-test"}
+    assert openai_ws.sent[0]["type"] == "session.update"
+
+    asyncio.run(bridge.close())
+    assert openai_ws.closed is True
+    assert session.closed is True
+
+
+def test_open_realtime_bridge_raises_connect_error_and_closes_session(monkeypatch):
+    session = _FakeClientSession(error=RuntimeError("boom"))
+    monkeypatch.setattr(realtime_mod.aiohttp, "ClientSession", lambda: session, raising=False)
+
+    try:
+        asyncio.run(open_inkbox_realtime_bridge(
+            config=RealtimeConfig(enabled=True, api_key="sk-test", connect_timeout_s=1),
+            meta=_meta(),
+        ))
+    except RealtimeBridgeConnectError as exc:
+        assert "boom" in str(exc.cause)
+    else:
+        raise AssertionError("expected RealtimeBridgeConnectError")
+
+    assert session.closed is True
 
 
 def test_session_update_exposes_post_call_edit_and_delete_tools():
@@ -386,20 +443,140 @@ def test_hangup_second_call_sleeps_then_sends_frame_and_closes_sockets(monkeypat
 def test_post_call_dispatch_runs_exactly_one_path():
     state = _BridgeState()
     state.post_call_actions = [{"action": "Email Dima", "details": ""}]
+    state.consult_results = [
+        RealtimeConsultResult(
+            id="consult-1",
+            request="Send SMS now",
+            result="SMS queued",
+            created_at=1.0,
+            dedupe_key="sms:+15555550101:generic",
+        )
+    ]
     calls = {"actions": 0, "ended": 0}
+    seen = {}
 
-    async def _actions(*_args):
+    async def _actions(meta, actions, transcript, consult_results):
         calls["actions"] += 1
+        seen["consult_results"] = consult_results
 
     async def _ended(*_args):
         calls["ended"] += 1
 
     asyncio.run(_dispatch_post_call(state, _meta(), _actions, _ended))
     assert calls == {"actions": 1, "ended": 0}
+    assert seen["consult_results"][0].result == "SMS queued"
 
     state = _BridgeState()
     asyncio.run(_dispatch_post_call(state, _meta(), _actions, _ended))
     assert calls == {"actions": 1, "ended": 1}
+
+
+def test_agent_consult_records_result_and_guides_post_call_cleanup():
+    state = _BridgeState()
+    state.post_call_actions = [{"action": "Text Alex after call", "details": ""}]
+    openai_ws = _FakeWS()
+    seen = {}
+
+    async def _consult(meta, query, transcript, post_call_actions, consult_results):
+        seen["query"] = query
+        seen["post_call_actions"] = post_call_actions
+        seen["consult_results"] = consult_results
+        return "SMS sent to Alex."
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="consult-call",
+        name="hermes_agent_consult",
+        arguments_json=json.dumps({"query": 'Send SMS to +15555550101 "hello alex" now'}),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_consult,
+    ))
+
+    assert seen["query"].startswith("Send SMS")
+    assert seen["post_call_actions"] == [{"action": "Text Alex after call", "details": ""}]
+    assert seen["consult_results"] == []
+    assert len(state.consult_results) == 1
+    assert state.consult_results[0].result == "SMS sent to Alex."
+    outputs = [
+        json.loads(frame["item"]["output"])
+        for frame in openai_ws.sent
+        if frame["type"] == "conversation.item.create"
+    ]
+    assert outputs[-1]["status"] == "ok"
+    assert "post_call_action_guidance" in outputs[-1]
+
+
+def test_agent_consult_dedupes_completed_same_sms_request():
+    state = _BridgeState()
+    state.consult_results = [
+        RealtimeConsultResult(
+            id="consult-original",
+            request='Send SMS to +15555550101 "hello alex"',
+            result="SMS sent to Alex.",
+            created_at=1.0,
+            dedupe_key="sms:+15555550101:hello alex",
+        )
+    ]
+    openai_ws = _FakeWS()
+    called = False
+
+    async def _consult(*_args):
+        nonlocal called
+        called = True
+        return "should not run"
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="consult-dupe",
+        name="hermes_agent_consult",
+        arguments_json=json.dumps({"query": 'Please text +15555550101 "hello alex"'}),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_consult,
+    ))
+
+    outputs = [
+        json.loads(frame["item"]["output"])
+        for frame in openai_ws.sent
+        if frame["type"] == "conversation.item.create"
+    ]
+    assert called is False
+    assert outputs[-1]["status"] == "already_handled"
+    assert outputs[-1]["existing_tool_call_id"] == "consult-original"
+
+
+def test_agent_consult_allows_explicit_repeat_sms_request():
+    state = _BridgeState()
+    state.consult_results = [
+        RealtimeConsultResult(
+            id="consult-original",
+            request='Send SMS to +15555550101 "hello alex"',
+            result="SMS sent to Alex.",
+            created_at=1.0,
+            dedupe_key="sms:+15555550101:hello alex",
+        )
+    ]
+    openai_ws = _FakeWS()
+
+    async def _consult(*_args):
+        return "Second SMS sent."
+
+    asyncio.run(_dispatch_tool_call(
+        openai_ws=openai_ws,
+        call_id="consult-repeat",
+        name="hermes_agent_consult",
+        arguments_json=json.dumps({"query": 'Send another text to +15555550101 "hello alex"'}),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_consult,
+    ))
+
+    assert len(state.consult_results) == 2
+    assert state.consult_results[-1].result == "Second SMS sent."
 
 
 def test_adapter_realtime_call_ended_enqueues_reflection():
@@ -435,11 +612,28 @@ def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
     asyncio.run(adapter._realtime_post_call_actions(
         _meta(),
         [{"action": "Email Dima after the call", "details": "Keep it short."}],
-        [("caller", "Can you email me after this call?")],
+        [
+            ("caller", "Can you email me after this call?"),
+            ("agent", "I queued it for after the call."),
+        ],
+        [
+            RealtimeConsultResult(
+                id="consult-1",
+                request="Send the email now",
+                result="Email sent to Dima.",
+                created_at=1.0,
+            )
+        ],
     ))
 
     assert len(events) == 1
     assert "voice_post_call_actions" in events[0].text
     assert "Email Dima after the call" in events[0].text
+    assert "execute only the actions that are still needed" in events[0].text
+    assert "In-call Hermes consult results" in events[0].text
+    assert "Email sent to Dima." in events[0].text
+    assert "Full live-call transcript" in events[0].text
+    assert "I queued it for after the call." in events[0].text
     assert events[0].raw_message["event"] == "realtime_post_call_actions"
+    assert events[0].raw_message["consult_results"][0]["result"] == "Email sent to Dima."
     assert getattr(events[0], "auto_skill", None) is None

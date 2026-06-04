@@ -132,6 +132,7 @@ Common realtime env vars:
 export OPENAI_API_KEY="sk-..."
 export INKBOX_REALTIME_MODEL="gpt-realtime-2"
 export INKBOX_REALTIME_VOICE="cedar"
+export INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=true
 ```
 
 Disable realtime:
@@ -142,6 +143,8 @@ hermes gateway restart
 ```
 
 Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime model has direct access to `hermes_agent_consult`, `register_post_call_action`, `edit_post_call_action`, `delete_post_call_action`, and `hang_up_call`.
+
+When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
 ## CLI
 
@@ -200,6 +203,8 @@ After the gateway starts:
 | `OPENAI_API_KEY` | no | - | OpenAI API key used for realtime calls when `INKBOX_REALTIME_API_KEY` is absent. |
 | `INKBOX_REALTIME_MODEL` | no | `gpt-realtime-2` | Realtime voice model. |
 | `INKBOX_REALTIME_VOICE` | no | `cedar` | Realtime voice name. |
+| `INKBOX_REALTIME_CONNECT_TIMEOUT_S` | no | `8` | Seconds to wait for OpenAI Realtime preflight before falling back or failing. |
+| `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
 
 ## Tools
 

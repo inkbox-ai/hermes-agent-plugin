@@ -7,17 +7,18 @@ Inkbox-side STT/TTS.
 
 The bridge:
 
-1. Accepts the Inkbox call WS with ``x-use-inkbox-text-to-speech: false`` and
-   ``x-use-inkbox-speech-to-text: false`` headers, so Inkbox forwards raw
-   G.711 μ-law @ 8 kHz frames in both directions.
-2. Opens an OpenAI Realtime API WebSocket
+1. Preflights an OpenAI Realtime API WebSocket
    (``wss://api.openai.com/v1/realtime?model=<model>``) and sends
    ``session.update`` configuring tools, instructions, and the
    ``g711_ulaw`` input/output audio format.
+2. Lets the adapter accept the Inkbox call WS with
+   ``x-use-inkbox-text-to-speech: false`` and
+   ``x-use-inkbox-speech-to-text: false`` headers only after OpenAI is ready,
+   so fallback to Inkbox STT/TTS is still possible before accept.
 3. Bridges audio bidirectionally: Inkbox → OpenAI as
    ``input_audio_buffer.append`` events, OpenAI → Inkbox as
    ``media`` frames carrying ``response.audio.delta`` payloads.
-4. Exposes two tools to the realtime model:
+4. Exposes realtime-only tools to the model:
 
    - ``hermes_agent_consult`` — pauses the conversation, dispatches a synthetic
      SMS-mode turn through Hermes' main agent loop, and submits the agent's
@@ -25,6 +26,10 @@ The bridge:
    - ``register_post_call_action`` — queues a follow-up task. When the call
      ends, all queued actions are dispatched as a single synthetic SMS-mode
      turn so the main agent can execute them (send email, create note, etc.).
+   - ``edit_post_call_action`` / ``delete_post_call_action`` — modify queued
+     after-call work while the call is still live.
+   - ``hang_up_call`` — a two-step hangup that lets the model say goodbye
+     before closing the phone leg.
 
 The shape mirrors Inkbox's channel-plugin ``RealtimeCallWebSocket``.
 """
@@ -36,7 +41,9 @@ import base64
 import inspect
 import json
 import logging
+import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -74,6 +81,11 @@ HANGUP_CONFIRM_WINDOW_S = 60.0
 # sending Inkbox the actual hangup frame. This gives already-forwarded goodbye
 # audio time to play out instead of being clipped by immediate teardown.
 HANGUP_CLOSE_DELAY_S = 2.0
+
+# OpenAI Realtime must be reachable before the Inkbox websocket is accepted in
+# raw-media mode. If this preflight fails, the adapter can still accept the
+# same phone call with Inkbox STT/TTS enabled.
+DEFAULT_CONNECT_TIMEOUT_S = 8.0
 
 
 def _openai_realtime_ws_headers(bearer: str) -> Dict[str, str]:
@@ -276,6 +288,8 @@ class RealtimeConfig:
     voice: str = DEFAULT_VOICE
     additional_instructions: str = ""
     consult_timeout_s: float = DEFAULT_CONSULT_TIMEOUT_S
+    connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S
+    fallback_to_inkbox_stt_tts: bool = True
     # ``api.openai.com`` by default; override for Azure / proxies.
     base_url: str = REALTIME_URL
 
@@ -292,9 +306,20 @@ class _ToolCallEvent:
 
 
 @dataclass
+class RealtimeConsultResult:
+    id: str
+    request: str
+    result: str
+    created_at: float
+    dedupe_key: Optional[str] = None
+
+
+@dataclass
 class _BridgeState:
     transcript: List[Tuple[str, str]] = field(default_factory=list)
     post_call_actions: List[Dict[str, str]] = field(default_factory=list)
+    consult_results: List[RealtimeConsultResult] = field(default_factory=list)
+    pending_consult_keys: Dict[str, str] = field(default_factory=dict)
     last_response_id: Optional[str] = None
     closed: bool = False
     greeting_triggered: bool = False
@@ -375,19 +400,26 @@ def build_realtime_instructions(
     lines.extend([
         "Do not perform a context lookup before greeting the caller. Do not say you "
         "are waiting on a lookup or checking context.",
-        f"If the caller asks for work to happen after the call, call "
-        f"{POST_CALL_ACTION_TOOL_NAME}. Tell the caller the action is queued for "
-        f"after the call; do not claim it has already been completed.",
+        f"If the caller asks for work to happen now during the live call and it needs "
+        f"Hermes/Inkbox tools, call {AGENT_CONSULT_TOOL_NAME}. This includes sending "
+        f"SMS/email, reading SMS/email/call history, creating notes, updating contacts, "
+        f"or checking current workspace/session data.",
+        f"If the caller explicitly asks for work to happen after the call, or accepts "
+        f"an after-call deferral, call {POST_CALL_ACTION_TOOL_NAME}. Tell the caller "
+        f"the action is queued for after the call; do not claim it has already been "
+        f"completed.",
         f"If the caller changes or cancels previously queued after-call work, call "
         f"{EDIT_POST_CALL_ACTION_TOOL_NAME} or {DELETE_POST_CALL_ACTION_TOOL_NAME} "
         f"using the action index returned when the work was queued.",
+        f"If {AGENT_CONSULT_TOOL_NAME} completes or queues work that matches a "
+        f"previously registered after-call action, call {DELETE_POST_CALL_ACTION_TOOL_NAME} "
+        f"for that action so it is not executed twice after hangup.",
         f"If the caller asks to hang up, says goodbye, or the conversation is "
-        f"clearly complete, call {HANG_UP_CALL_TOOL_NAME}. Say any needed final "
-        f"goodbye before calling it.",
-        f"Call {AGENT_CONSULT_TOOL_NAME} only when the caller asks for current "
-        f"external data, session history, a calendar lookup, or other work that "
-        f"requires the full Hermes agent. Do not call it for greetings, identity, "
-        f"or generic chat.",
+        f"clearly complete, call {HANG_UP_CALL_TOOL_NAME}. The first call arms "
+        f"hangup and asks you to say goodbye; after the goodbye, call it once "
+        f"more to end the phone call.",
+        f"Do not call {AGENT_CONSULT_TOOL_NAME} for greetings, caller identity at "
+        f"call start, or generic chat.",
     ])
     if additional_instructions.strip():
         lines.append(additional_instructions.strip())
@@ -439,14 +471,25 @@ def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
 # implementation that runs a synthetic SMS-mode turn through the main agent
 # and returns the agent's reply as plain text.
 AgentConsultCallback = Callable[
-    [RealtimeCallMeta, str, List[Tuple[str, str]]],
+    [
+        RealtimeCallMeta,
+        str,
+        List[Tuple[str, str]],
+        List[Dict[str, str]],
+        List[RealtimeConsultResult],
+    ],
     Awaitable[str],
 ]
 
 # Called when the call ends, with the accumulated post-call actions list.
 # Platform dispatches them as a synthetic SMS-mode turn to the main agent.
 PostCallActionsCallback = Callable[
-    [RealtimeCallMeta, List[Dict[str, str]], List[Tuple[str, str]]],
+    [
+        RealtimeCallMeta,
+        List[Dict[str, str]],
+        List[Tuple[str, str]],
+        List[RealtimeConsultResult],
+    ],
     Awaitable[None],
 ]
 
@@ -458,6 +501,134 @@ CallEndedCallback = Callable[
     [RealtimeCallMeta, List[Tuple[str, str]]],
     Awaitable[None],
 ]
+
+
+class RealtimeBridgeConnectError(Exception):
+    """Raised when OpenAI Realtime cannot be opened before Inkbox accept."""
+
+    def __init__(self, cause: Any):
+        self.cause = cause
+        message = str(cause) if cause is not None else "unknown error"
+        super().__init__(f"OpenAI Realtime connect failed: {message}")
+
+
+@dataclass
+class OpenedRealtimeBridge:
+    session: Any
+    openai_ws: Any
+    state: _BridgeState
+    config: RealtimeConfig
+    meta: RealtimeCallMeta
+    _closed: bool = False
+
+    async def run(
+        self,
+        *,
+        inkbox_ws: Any,
+        on_agent_consult: AgentConsultCallback,
+        on_post_call_actions: PostCallActionsCallback,
+        on_call_ended: CallEndedCallback,
+    ) -> None:
+        """Bridge one already-opened OpenAI Realtime connection to Inkbox."""
+        state = self.state
+        openai_ws = self.openai_ws
+        try:
+            inkbox_task = asyncio.create_task(
+                _inkbox_to_openai_pump(inkbox_ws, openai_ws, state, self.meta),
+                name=f"realtime-inkbox-pump-{self.meta.call_id}",
+            )
+            openai_task = asyncio.create_task(
+                _openai_to_inkbox_pump(
+                    openai_ws=openai_ws,
+                    inkbox_ws=inkbox_ws,
+                    state=state,
+                    config=self.config,
+                    meta=self.meta,
+                    on_agent_consult=on_agent_consult,
+                ),
+                name=f"realtime-openai-pump-{self.meta.call_id}",
+            )
+
+            done, pending = await asyncio.wait(
+                {inkbox_task, openai_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    exc = None
+                if exc:
+                    logger.warning(
+                        "[Inkbox realtime] Pump %s raised: %s",
+                        task.get_name(),
+                        exc,
+                    )
+        finally:
+            state.closed = True
+            await self.close()
+
+        await _dispatch_post_call(state, self.meta, on_post_call_actions, on_call_ended)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with suppress(Exception):
+            await self.openai_ws.close()
+        with suppress(Exception):
+            await self.session.close()
+
+
+async def open_inkbox_realtime_bridge(
+    *,
+    config: RealtimeConfig,
+    meta: RealtimeCallMeta,
+) -> OpenedRealtimeBridge:
+    """Open OpenAI Realtime before the Inkbox websocket commits media mode."""
+    if aiohttp is None:
+        raise RealtimeBridgeConnectError("aiohttp not available")
+    if not config.has_credential:
+        raise RealtimeBridgeConnectError("no OpenAI API key configured")
+
+    session = aiohttp.ClientSession()
+    openai_ws = None
+    try:
+        bearer = await _resolve_realtime_bearer(session, config)
+        if not bearer:
+            raise RealtimeBridgeConnectError("no OpenAI bearer token resolved")
+
+        separator = "&" if "?" in config.base_url else "?"
+        url = f"{config.base_url}{separator}{urlencode({'model': config.model})}"
+        headers = _openai_realtime_ws_headers(bearer)
+        openai_ws = await asyncio.wait_for(
+            session.ws_connect(url, headers=headers, heartbeat=30),
+            timeout=config.connect_timeout_s,
+        )
+        await _send_session_update(openai_ws, config, meta)
+        return OpenedRealtimeBridge(
+            session=session,
+            openai_ws=openai_ws,
+            state=_BridgeState(),
+            config=config,
+            meta=meta,
+        )
+    except RealtimeBridgeConnectError:
+        if openai_ws is not None:
+            with suppress(Exception):
+                await openai_ws.close()
+        with suppress(Exception):
+            await session.close()
+        raise
+    except Exception as exc:
+        if openai_ws is not None:
+            with suppress(Exception):
+                await openai_ws.close()
+        with suppress(Exception):
+            await session.close()
+        raise RealtimeBridgeConnectError(exc) from exc
 
 
 async def run_inkbox_realtime_bridge(
@@ -478,77 +649,17 @@ async def run_inkbox_realtime_bridge(
     Errors are logged; the function does not re-raise so a partial failure
     doesn't crash the gateway's WS handler chain.
     """
-    if aiohttp is None:
-        logger.error("[Inkbox realtime] aiohttp not available; cannot open Realtime API WS")
-        return
-    if not config.has_credential:
-        logger.error("[Inkbox realtime] No OpenAI API key; refusing to bridge")
-        return
-
-    state = _BridgeState()
-    separator = "&" if "?" in config.base_url else "?"
-    url = f"{config.base_url}{separator}{urlencode({'model': config.model})}"
-
-    session = aiohttp.ClientSession()
     try:
-        try:
-            bearer = await _resolve_realtime_bearer(session, config)
-        except Exception as exc:
-            logger.error("[Inkbox realtime] Could not resolve OpenAI bearer: %s", exc)
-            return
-        if not bearer:
-            return
-
-        headers = _openai_realtime_ws_headers(bearer)
-        try:
-            openai_ws = await session.ws_connect(url, headers=headers, heartbeat=30)
-        except Exception as exc:
-            logger.error("[Inkbox realtime] Failed to connect to OpenAI Realtime: %s", exc)
-            return
-
-        try:
-            await _send_session_update(openai_ws, config, meta)
-            # Two concurrent pumps:
-            inkbox_task = asyncio.create_task(
-                _inkbox_to_openai_pump(inkbox_ws, openai_ws, state, meta),
-                name=f"realtime-inkbox-pump-{meta.call_id}",
-            )
-            openai_task = asyncio.create_task(
-                _openai_to_inkbox_pump(
-                    openai_ws=openai_ws,
-                    inkbox_ws=inkbox_ws,
-                    state=state,
-                    config=config,
-                    meta=meta,
-                    on_agent_consult=on_agent_consult,
-                ),
-                name=f"realtime-openai-pump-{meta.call_id}",
-            )
-
-            done, pending = await asyncio.wait(
-                {inkbox_task, openai_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            for task in done:
-                exc = task.exception()
-                if exc:
-                    logger.warning(
-                        "[Inkbox realtime] Pump %s raised: %s",
-                        task.get_name(),
-                        exc,
-                    )
-        finally:
-            state.closed = True
-            try:
-                await openai_ws.close()
-            except Exception:
-                pass
-
-        await _dispatch_post_call(state, meta, on_post_call_actions, on_call_ended)
-    finally:
-        await session.close()
+        bridge = await open_inkbox_realtime_bridge(config=config, meta=meta)
+    except RealtimeBridgeConnectError as exc:
+        logger.error("[Inkbox realtime] Failed to connect to OpenAI Realtime: %s", exc.cause)
+        return
+    await bridge.run(
+        inkbox_ws=inkbox_ws,
+        on_agent_consult=on_agent_consult,
+        on_post_call_actions=on_post_call_actions,
+        on_call_ended=on_call_ended,
+    )
 
 
 async def _dispatch_post_call(
@@ -560,7 +671,12 @@ async def _dispatch_post_call(
     """Dispatch exactly one follow-up turn after a call ends."""
     if state.post_call_actions:
         try:
-            await on_post_call_actions(meta, state.post_call_actions, list(state.transcript))
+            await on_post_call_actions(
+                meta,
+                state.post_call_actions,
+                list(state.transcript),
+                list(state.consult_results),
+            )
         except Exception as exc:
             logger.warning("[Inkbox realtime] Post-call action dispatch failed: %s", exc)
     else:
@@ -575,6 +691,42 @@ async def _resolve_realtime_bearer(session: Any, config: RealtimeConfig) -> str:
     if config.api_key:
         return config.api_key
     return ""
+
+
+def _normalize_consult_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+]+", " ", value.lower())).strip()
+
+
+def _quoted_consult_text(value: str) -> Optional[str]:
+    match = re.search(r'["“]([^"”]{8,280})["”]', value)
+    if not match:
+        return None
+    normalized = _normalize_consult_text(match.group(1))
+    return normalized or None
+
+
+def _realtime_consult_dedupe_key(request: str) -> Optional[str]:
+    normalized = _normalize_consult_text(request)
+    phone_match = re.search(r"\+\d{8,15}", normalized)
+    is_sms = re.search(r"\b(sms|text|message)\b", normalized) is not None
+    if not phone_match or not is_sms:
+        return None
+    quoted = _quoted_consult_text(request) or "generic"
+    return f"sms:{phone_match.group(0)}:{quoted}"
+
+
+def _realtime_consult_allows_repeat(request: str) -> bool:
+    return re.search(r"\b(again|another|different|new|repeat|second)\b", request, re.I) is not None
+
+
+def _consult_result_text(output: Dict[str, Any]) -> str:
+    result = output.get("answer") or output.get("result")
+    if isinstance(result, str) and result.strip():
+        return result.strip()
+    error = output.get("error")
+    if isinstance(error, str) and error.strip():
+        return f"ERROR: {error.strip()}"
+    return json.dumps(output)
 
 
 async def _maybe_send_greeting(
@@ -1010,6 +1162,40 @@ async def _dispatch_tool_call(
             )
             return
 
+        consult_key = _realtime_consult_dedupe_key(query)
+        if consult_key and not _realtime_consult_allows_repeat(query):
+            pending_call_id = state.pending_consult_keys.get(consult_key)
+            if pending_call_id:
+                await _submit_tool_result(openai_ws, call_id, {
+                    "status": "already_running",
+                    "existing_tool_call_id": pending_call_id,
+                    "answer": (
+                        "Hermes is already handling this same in-call request. "
+                        "Do not call the consult tool again or queue a duplicate "
+                        "post-call action; wait briefly for the existing result."
+                    ),
+                })
+                return
+            completed = next(
+                (
+                    entry
+                    for entry in reversed(state.consult_results)
+                    if entry.dedupe_key == consult_key
+                ),
+                None,
+            )
+            if completed:
+                await _submit_tool_result(openai_ws, call_id, {
+                    "status": "already_handled",
+                    "existing_tool_call_id": completed.id,
+                    "answer": (
+                        "Hermes already handled this same in-call request: "
+                        f"{completed.result}. Do not send it again unless the "
+                        "caller explicitly asks for another, repeat, or different message."
+                    ),
+                })
+                return
+
         # OpenAI Realtime doesn't have a native "I'll continue later" mechanism
         # for one tool call, but we can ALSO inject an interim instruction so
         # the model says "one moment" while the agent thinks. The final tool
@@ -1033,36 +1219,80 @@ async def _dispatch_tool_call(
             # authoritative.
             pass
 
+        if consult_key:
+            state.pending_consult_keys[consult_key] = call_id
         try:
             answer = await asyncio.wait_for(
-                on_agent_consult(meta, query, list(state.transcript)),
+                on_agent_consult(
+                    meta,
+                    query,
+                    list(state.transcript),
+                    list(state.post_call_actions),
+                    list(state.consult_results),
+                ),
                 timeout=config.consult_timeout_s,
             )
         except asyncio.TimeoutError:
-            await _submit_tool_result(openai_ws, call_id, {
+            output = {
                 "error": "agent_consult timed out",
                 "message": (
                     "Tell the caller you couldn't get an answer right now. "
                     "Offer to follow up after the call."
                 ),
-            })
+            }
+            state.consult_results.append(RealtimeConsultResult(
+                id=call_id,
+                request=query,
+                result=_consult_result_text(output),
+                created_at=time.time(),
+                dedupe_key=consult_key,
+            ))
+            if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
+                state.pending_consult_keys.pop(consult_key, None)
+            await _submit_tool_result(openai_ws, call_id, output)
             return
         except Exception as exc:
             logger.warning("[Inkbox realtime] agent_consult failed: %s", exc)
-            await _submit_tool_result(openai_ws, call_id, {
+            output = {
                 "error": f"agent_consult error: {exc}",
                 "message": "Apologize briefly and ask if you can help another way.",
-            })
+            }
+            state.consult_results.append(RealtimeConsultResult(
+                id=call_id,
+                request=query,
+                result=_consult_result_text(output),
+                created_at=time.time(),
+                dedupe_key=consult_key,
+            ))
+            if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
+                state.pending_consult_keys.pop(consult_key, None)
+            await _submit_tool_result(openai_ws, call_id, output)
             return
 
-        await _submit_tool_result(openai_ws, call_id, {
+        output = {
             "status": "ok",
             "answer": answer,
             "instructions": (
                 "Read the answer back to the caller in your own spoken voice. "
                 "Keep it natural and concise."
             ),
-        })
+        }
+        if state.post_call_actions:
+            output["post_call_action_guidance"] = (
+                "If this result completed, queued, canceled, or superseded a "
+                "pending after-call action, call delete_post_call_action for "
+                "that action_index before the call ends."
+            )
+        state.consult_results.append(RealtimeConsultResult(
+            id=call_id,
+            request=query,
+            result=_consult_result_text(output),
+            created_at=time.time(),
+            dedupe_key=consult_key,
+        ))
+        if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
+            state.pending_consult_keys.pop(consult_key, None)
+        await _submit_tool_result(openai_ws, call_id, output)
         return
 
     # Unknown tool — refuse politely.
