@@ -736,6 +736,61 @@ def _plain_value(value: Any) -> Optional[str]:
     return text or None
 
 
+def _normalize_email_address(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"<([^<>]+)>", text)
+    if match:
+        text = match.group(1).strip()
+    text = re.sub(r"^mailto:", "", text, flags=re.IGNORECASE).strip().lower()
+    return text if "@" in text else ""
+
+
+def _normalized_identity_handle(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _identity_email_addresses(identity: Any) -> set[str]:
+    mailbox = _field(identity, "mailbox")
+    return {
+        addr
+        for addr in (
+            _normalize_email_address(_field(mailbox, "email_address", "emailAddress")),
+            _normalize_email_address(_field(identity, "email_address", "emailAddress")),
+        )
+        if addr
+    }
+
+
+def _mail_agent_identity_matches(
+    envelope: Dict[str, Any],
+    from_address: str,
+    *,
+    identity_handle: str = "",
+    identity_id: str = "",
+) -> bool:
+    handle = _normalized_identity_handle(identity_handle)
+    own_id = str(identity_id or "").strip()
+    if not handle and not own_id:
+        return False
+    identities = _webhook_list(
+        envelope.get("data") or {},
+        "agent_identities",
+        "agentIdentities",
+    )
+    for entry in identities:
+        bucket = _field(entry, "bucket")
+        address = _normalize_email_address(_field(entry, "address"))
+        if bucket != "from" or address != from_address:
+            continue
+        entry_id = str(_field(entry, "id") or "").strip()
+        entry_handle = _normalized_identity_handle(
+            _field(entry, "agent_handle", "agentHandle")
+        )
+        if (own_id and entry_id == own_id) or (handle and entry_handle == handle):
+            return True
+    return False
+
+
 def _json_safe_detail(value: Any) -> Any:
     """Keep structured provider error details if they are JSON-safe."""
     if isinstance(value, (dict, list, str, int, float, bool)) or value is None:
@@ -1031,6 +1086,8 @@ class InkboxAdapter(BasePlatformAdapter):
         self._identity_handle = (
             extra.get("identity") or os.getenv("INKBOX_IDENTITY") or ""
         ).strip()
+        self._identity_id: Optional[str] = None
+        self._identity_email_addresses: set[str] = set()
         self._base_url = (
             extra.get("base_url") or os.getenv("INKBOX_BASE_URL") or INKBOX_BASE_URL_DEFAULT
         ).strip()
@@ -1404,6 +1461,8 @@ class InkboxAdapter(BasePlatformAdapter):
         previous_webhook_url = _read_previous_webhook_url()
 
         identity = self._inkbox.get_identity(self._identity_handle)
+        self._identity_id = str(getattr(identity, "id", "") or "") or None
+        self._identity_email_addresses = _identity_email_addresses(identity)
 
         # Mailbox: register the inbound-mail subscription.
         if identity.mailbox is not None:
@@ -1918,10 +1977,56 @@ class InkboxAdapter(BasePlatformAdapter):
         self._seen_request_ids[request_id] = now
         return False
 
+    async def _is_self_mail_received(
+        self,
+        envelope: Dict[str, Any],
+        from_address: str,
+    ) -> bool:
+        if _mail_agent_identity_matches(
+            envelope,
+            from_address,
+            identity_handle=self._identity_handle,
+            identity_id=self._identity_id or "",
+        ):
+            return True
+
+        if self._identity_email_addresses:
+            return from_address in self._identity_email_addresses
+
+        if self._inkbox is None or not self._identity_handle:
+            return False
+
+        try:
+            identity = await asyncio.to_thread(
+                self._inkbox.get_identity,
+                self._identity_handle,
+            )
+        except Exception as exc:
+            logger.debug("[Inkbox] Could not resolve identity for self-mail check: %s", exc)
+            return False
+
+        self._identity_id = str(getattr(identity, "id", "") or "") or None
+        self._identity_email_addresses = _identity_email_addresses(identity)
+        if _mail_agent_identity_matches(
+            envelope,
+            from_address,
+            identity_handle=self._identity_handle,
+            identity_id=self._identity_id or "",
+        ):
+            return True
+        return from_address in self._identity_email_addresses
+
     async def _on_mail_received(self, envelope: Dict[str, Any]) -> "web.Response":
         message = (envelope.get("data") or {}).get("message") or {}
-        from_address = (message.get("from_address") or "").strip().lower()
+        from_address = _normalize_email_address(message.get("from_address"))
         if not from_address:
+            return web.Response(status=200, text="ok")
+
+        if await self._is_self_mail_received(envelope, from_address):
+            logger.info(
+                "[Inkbox] Ignored self-originated inbound email from %s; not waking agent",
+                from_address,
+            )
             return web.Response(status=200, text="ok")
 
         contact = await self._resolve_contact_full(kind="email", value=from_address)
