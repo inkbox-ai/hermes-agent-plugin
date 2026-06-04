@@ -123,7 +123,9 @@ try:
         DEFAULT_CONSULT_TIMEOUT_S as REALTIME_DEFAULT_CONSULT_TIMEOUT_S,
         RealtimeCallMeta,
         RealtimeConfig,
-        run_inkbox_realtime_bridge,
+        RealtimeBridgeConnectError,
+        RealtimeConsultResult,
+        open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from realtime import (
@@ -132,7 +134,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         DEFAULT_CONSULT_TIMEOUT_S as REALTIME_DEFAULT_CONSULT_TIMEOUT_S,
         RealtimeCallMeta,
         RealtimeConfig,
-        run_inkbox_realtime_bridge,
+        RealtimeBridgeConnectError,
+        RealtimeConsultResult,
+        open_inkbox_realtime_bridge,
     )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +274,19 @@ def _conversation_summary_is_group(summary: Any) -> bool:
     return bool(_field(summary, "isGroup", "is_group", "is_group_conversation"))
 
 
+def _realtime_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
 def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     rt_extra = extra.get("realtime") if isinstance(extra.get("realtime"), dict) else {}
     rt_api_key = (
@@ -299,6 +316,17 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
             rt_extra.get("consult_timeout_s")
             or os.getenv("INKBOX_REALTIME_CONSULT_TIMEOUT_S")
             or REALTIME_DEFAULT_CONSULT_TIMEOUT_S
+        ),
+        connect_timeout_s=float(
+            rt_extra.get("connect_timeout_s")
+            or os.getenv("INKBOX_REALTIME_CONNECT_TIMEOUT_S")
+            or 8.0
+        ),
+        fallback_to_inkbox_stt_tts=_realtime_bool(
+            rt_extra.get("fallback_to_inkbox_stt_tts")
+            if "fallback_to_inkbox_stt_tts" in rt_extra
+            else os.getenv("INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS"),
+            True,
         ),
     )
     if rt_enabled_text in ("true", "1", "yes", "on") and not rt_has_cred:
@@ -2387,22 +2415,20 @@ class InkboxAdapter(BasePlatformAdapter):
             if not ok:
                 return web.Response(status=401, text="invalid signature")
 
-        # ``WebSocketResponse`` doesn't take ``headers=`` as a constructor kwarg;
-        # we mutate ``ws.headers`` before ``prepare()`` instead, which is what
-        # aiohttp's ``StreamResponse`` accepts.
-        #
-        # When realtime is enabled and configured, we instruct Inkbox NOT to
-        # do server-side STT/TTS so raw G.711 μ-law audio frames flow in
-        # both directions. Without realtime, Inkbox runs STT and TTS itself
-        # and we exchange text events on the WS.
+        # ``WebSocketResponse`` doesn't take ``headers=`` as a constructor kwarg.
+        # We mutate ``ws.headers`` immediately before ``prepare()`` once we know
+        # whether this call can really use OpenAI Realtime. Preparing too early
+        # commits Inkbox to raw-media mode before we know Realtime is reachable.
         ws = web.WebSocketResponse()
-        if self._realtime_config.enabled:
-            ws.headers["x-use-inkbox-text-to-speech"] = "false"
-            ws.headers["x-use-inkbox-speech-to-text"] = "false"
-        else:
-            ws.headers["x-use-inkbox-text-to-speech"] = "true"
-            ws.headers["x-use-inkbox-speech-to-text"] = "true"
-        await ws.prepare(request)
+
+        async def _prepare_call_ws(*, use_realtime: bool) -> None:
+            if use_realtime:
+                ws.headers["x-use-inkbox-text-to-speech"] = "false"
+                ws.headers["x-use-inkbox-speech-to-text"] = "false"
+            else:
+                ws.headers["x-use-inkbox-text-to-speech"] = "true"
+                ws.headers["x-use-inkbox-speech-to-text"] = "true"
+            await ws.prepare(request)
 
         # Resolve call context.  Three sources, tried in order:
         #   1. webhook-mode pre-stash from ``_on_incoming_call`` (legacy)
@@ -2523,11 +2549,12 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] Failed to load context_token %s: %s", ctx_token, exc,
                 )
 
-        # Realtime voice bridge — when configured, hand the WS off to the
-        # OpenAI Realtime API bridge instead of the legacy text-event
-        # flow below. The bridge owns the WS lifecycle until call end and
-        # then we fall through to the post-call cleanup at the bottom.
+        # Realtime voice bridge — when configured, pre-open OpenAI Realtime
+        # before accepting the Inkbox websocket in raw-media mode. If preflight
+        # fails and fallback is allowed, we still accept the same phone call
+        # with Inkbox STT/TTS and continue into the text-event flow below.
         if self._realtime_config.enabled:
+            realtime_bridge = None
             try:
                 identity_for_meta = None
                 if self._inkbox is not None:
@@ -2574,31 +2601,78 @@ class InkboxAdapter(BasePlatformAdapter):
                         call_context.get("conversation_summary") or ""
                     ).strip() or None,
                 )
-                await run_inkbox_realtime_bridge(
-                    inkbox_ws=ws,
+                realtime_bridge = await open_inkbox_realtime_bridge(
                     config=self._realtime_config,
                     meta=rt_meta,
-                    on_agent_consult=self._realtime_agent_consult,
-                    on_post_call_actions=self._realtime_post_call_actions,
-                    on_call_ended=self._realtime_call_ended,
                 )
+            except RealtimeBridgeConnectError as exc:
+                if self._realtime_config.fallback_to_inkbox_stt_tts:
+                    logger.warning(
+                        "[Inkbox] realtime bridge connect failed for call_id=%s; "
+                        "falling back to Inkbox STT/TTS: %s",
+                        call_id,
+                        exc.cause,
+                    )
+                else:
+                    logger.warning(
+                        "[Inkbox] realtime bridge connect failed for call_id=%s and "
+                        "fallback is disabled: %s",
+                        call_id,
+                        exc.cause,
+                    )
+                    self._active_call_ws.pop(contact_id, None)
+                    if self._last_inbound_modality.get(str(contact_id)) == "voice":
+                        self._last_inbound_modality.pop(str(contact_id), None)
+                    return web.Response(status=503, text="realtime bridge unavailable")
             except Exception as exc:
-                logger.warning(
-                    "[Inkbox] realtime bridge crashed for call_id=%s: %s",
-                    call_id, exc,
-                )
-            finally:
-                self._active_call_ws.pop(contact_id, None)
-                if self._last_inbound_modality.get(str(contact_id)) == "voice":
-                    self._last_inbound_modality.pop(str(contact_id), None)
-                self._voice_recently_closed[str(contact_id)] = time.time()
+                if self._realtime_config.fallback_to_inkbox_stt_tts:
+                    logger.warning(
+                        "[Inkbox] realtime bridge preflight crashed for call_id=%s; "
+                        "falling back to Inkbox STT/TTS: %s",
+                        call_id,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "[Inkbox] realtime bridge preflight crashed for call_id=%s "
+                        "and fallback is disabled: %s",
+                        call_id,
+                        exc,
+                    )
+                    self._active_call_ws.pop(contact_id, None)
+                    if self._last_inbound_modality.get(str(contact_id)) == "voice":
+                        self._last_inbound_modality.pop(str(contact_id), None)
+                    return web.Response(status=503, text="realtime bridge unavailable")
+
+            if realtime_bridge is not None:
                 try:
-                    if not ws.closed:
-                        await ws.close()
-                except Exception:
-                    pass
-                logger.info("[Inkbox] Call WS closed: call_id=%s", call_id)
-            return ws
+                    await _prepare_call_ws(use_realtime=True)
+                    await realtime_bridge.run(
+                        inkbox_ws=ws,
+                        on_agent_consult=self._realtime_agent_consult,
+                        on_post_call_actions=self._realtime_post_call_actions,
+                        on_call_ended=self._realtime_call_ended,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Inkbox] realtime bridge crashed for call_id=%s: %s",
+                        call_id, exc,
+                    )
+                finally:
+                    await realtime_bridge.close()
+                    self._active_call_ws.pop(contact_id, None)
+                    if self._last_inbound_modality.get(str(contact_id)) == "voice":
+                        self._last_inbound_modality.pop(str(contact_id), None)
+                    self._voice_recently_closed[str(contact_id)] = time.time()
+                    try:
+                        if not ws.closed:
+                            await ws.close()
+                    except Exception:
+                        pass
+                    logger.info("[Inkbox] Call WS closed: call_id=%s", call_id)
+                return ws
+
+        await _prepare_call_ws(use_realtime=False)
 
         logger.info(
             "[Inkbox] Call WS open: call_id=%s contact_id=%s remote=%s "
@@ -2843,11 +2917,33 @@ class InkboxAdapter(BasePlatformAdapter):
     # Realtime voice bridge callbacks
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _format_realtime_post_call_actions(actions: List[Dict[str, str]]) -> str:
+        lines = []
+        for i, action in enumerate(actions, start=1):
+            text = f"{i}. {action.get('action', '')}".strip()
+            details = (action.get("details") or "").strip()
+            if details:
+                text += f"\n   Details: {details}"
+            lines.append(text)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_realtime_consult_results(results: List[RealtimeConsultResult]) -> str:
+        lines = []
+        for i, result in enumerate(results, start=1):
+            request = getattr(result, "request", "")
+            answer = getattr(result, "result", "")
+            lines.append(f"{i}. Request: {request}\nResult: {answer}")
+        return "\n\n".join(lines)
+
     async def _realtime_agent_consult(
         self,
         meta: RealtimeCallMeta,
         query: str,
         transcript: List[Tuple[str, str]],
+        post_call_actions: Optional[List[Dict[str, str]]] = None,
+        consult_results: Optional[List[RealtimeConsultResult]] = None,
     ) -> str:
         """Run the agent_consult tool: spawn a one-shot Hermes agent invocation.
 
@@ -2873,6 +2969,29 @@ class InkboxAdapter(BasePlatformAdapter):
         ]
         for role, text in transcript[-10:]:
             prompt_lines.append(f"  {role}: {text}")
+        post_call_actions = post_call_actions or []
+        consult_results = consult_results or []
+        if post_call_actions:
+            prompt_lines.extend([
+                "",
+                "Pending after-call actions already queued by the realtime call agent:",
+                self._format_realtime_post_call_actions(post_call_actions),
+                (
+                    "If this consult completes, queues, cancels, or supersedes one "
+                    "of those pending actions, say so explicitly in your result so "
+                    "the call agent can delete that after-call action before hangup."
+                ),
+            ])
+        if consult_results:
+            prompt_lines.extend([
+                "",
+                "Previous Hermes consult results during this same live call:",
+                self._format_realtime_consult_results(consult_results),
+                (
+                    "Do not repeat work that was already completed or queued unless "
+                    "the caller explicitly asked for another, repeat, or different action."
+                ),
+            ])
         prompt_lines.extend([
             "",
             f"The realtime voice agent asked: {query}",
@@ -2964,6 +3083,7 @@ class InkboxAdapter(BasePlatformAdapter):
         meta: RealtimeCallMeta,
         actions: List[Dict[str, str]],
         transcript: List[Tuple[str, str]],
+        consult_results: Optional[List[RealtimeConsultResult]] = None,
     ) -> None:
         """Dispatch queued post-call actions as a synthetic SMS-mode turn.
 
@@ -2972,28 +3092,40 @@ class InkboxAdapter(BasePlatformAdapter):
         transcript, push it through the normal inbound queue so the main
         agent executes them with its full toolset.
         """
-        action_lines = []
-        for i, action in enumerate(actions, start=1):
-            line = f"{i}. {action.get('action', '')}"
-            details = (action.get("details") or "").strip()
-            if details:
-                line += f"\n   Details: {details}"
-            action_lines.append(line)
+        action_lines = self._format_realtime_post_call_actions(actions).splitlines()
+        consult_results = consult_results or []
+        consult_block = self._format_realtime_consult_results(consult_results)
         transcript_block = "\n".join(
-            f"{role}: {text}" for role, text in transcript[-30:]
+            f"{role}: {text}" for role, text in transcript
         )
         body = "\n".join([
             f"[inkbox:voice_post_call_actions call_id={meta.call_id}]",
-            "The realtime voice call ended. Execute these queued actions now "
-            "using your tools where appropriate. Do NOT send a confirmation "
-            "follow-up after successful work unless the caller explicitly "
-            "requested one. If required info is missing, prefer SMS to ask, "
-            "then email, then a follow-up call.",
+            "The realtime voice call ended. Review these queued post-call actions "
+            "and execute only the actions that are still needed.",
+            "These actions were registered during the live call and may be stale. "
+            "Before doing anything, reconcile them against the full live-call "
+            "transcript, in-call Hermes consult results, and prior messages in "
+            "this session.",
+            "If an action was already completed or queued during the call, canceled, "
+            "superseded, or the caller said it already happened, do not perform it "
+            "again. A same-channel in-call consult result that says an SMS/email "
+            "was sent or queued counts as already handled.",
+            "Do not merely say still-needed actions are impossible. If an email, "
+            "SMS, note, or contact update is still needed and enough recipient/"
+            "content info is present, perform it.",
+            "Do NOT send a confirmation follow-up after successful work unless the "
+            "caller explicitly requested one. Only if required information is "
+            "missing, ask the caller for the missing information. Try SMS first; "
+            "if SMS is unavailable or not opted in, try email; if email is "
+            "unavailable, place a follow-up call with the question.",
             "",
             "Queued actions:",
             *action_lines,
             "",
-            "Recent live-call transcript:" if transcript_block else "",
+            "In-call Hermes consult results:" if consult_block else "",
+            consult_block,
+            "",
+            "Full live-call transcript:" if transcript_block else "",
             transcript_block,
         ])
         source = self.build_source(
@@ -3014,6 +3146,16 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_message={
                 "event": "realtime_post_call_actions",
                 "actions": actions,
+                "consult_results": [
+                    {
+                        "id": result.id,
+                        "request": result.request,
+                        "result": result.result,
+                        "created_at": result.created_at,
+                        "dedupe_key": result.dedupe_key,
+                    }
+                    for result in consult_results
+                ],
             },
             message_id=f"call:{meta.call_id}:post-call-actions",
             reply_to_message_id=meta.call_id,
