@@ -1088,6 +1088,7 @@ class InkboxAdapter(BasePlatformAdapter):
         ).strip()
         self._identity_id: Optional[str] = None
         self._identity_email_addresses: set[str] = set()
+        self._identity_email_addresses_loaded = False
         self._base_url = (
             extra.get("base_url") or os.getenv("INKBOX_BASE_URL") or INKBOX_BASE_URL_DEFAULT
         ).strip()
@@ -1463,6 +1464,7 @@ class InkboxAdapter(BasePlatformAdapter):
         identity = self._inkbox.get_identity(self._identity_handle)
         self._identity_id = str(getattr(identity, "id", "") or "") or None
         self._identity_email_addresses = _identity_email_addresses(identity)
+        self._identity_email_addresses_loaded = True
 
         # Mailbox: register the inbound-mail subscription.
         if identity.mailbox is not None:
@@ -1990,7 +1992,7 @@ class InkboxAdapter(BasePlatformAdapter):
         ):
             return True
 
-        if self._identity_email_addresses:
+        if getattr(self, "_identity_email_addresses_loaded", False):
             return from_address in self._identity_email_addresses
 
         if self._inkbox is None or not self._identity_handle:
@@ -2007,6 +2009,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
         self._identity_id = str(getattr(identity, "id", "") or "") or None
         self._identity_email_addresses = _identity_email_addresses(identity)
+        self._identity_email_addresses_loaded = True
         if _mail_agent_identity_matches(
             envelope,
             from_address,

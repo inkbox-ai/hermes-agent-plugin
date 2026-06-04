@@ -45,6 +45,7 @@ def _adapter_for_self_mail_check():
     adapter._identity_handle = "agent"
     adapter._identity_id = None
     adapter._identity_email_addresses = {"agent@inkboxmail.com"}
+    adapter._identity_email_addresses_loaded = True
     adapter._inkbox = None
     return adapter
 
@@ -74,6 +75,32 @@ def test_inbound_email_from_own_mailbox_does_not_wake_agent(monkeypatch):
 
     assert response.status == 200
     assert calls == {"resolve": 0, "enqueue": 0}
+
+
+def test_self_mail_check_caches_identity_with_no_mailbox_address(monkeypatch):
+    calls = {"get_identity": 0}
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class FakeInkbox:
+        def get_identity(self, _handle):
+            calls["get_identity"] += 1
+            return types.SimpleNamespace(id="identity-1", mailbox=None, email_address=None)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    adapter = object.__new__(InkboxAdapter)
+    adapter._identity_handle = "agent"
+    adapter._identity_id = None
+    adapter._identity_email_addresses = set()
+    adapter._identity_email_addresses_loaded = False
+    adapter._inkbox = FakeInkbox()
+
+    envelope = _mail_envelope("person@example.com")
+
+    assert asyncio.run(adapter._is_self_mail_received(envelope, "person@example.com")) is False
+    assert asyncio.run(adapter._is_self_mail_received(envelope, "person@example.com")) is False
+    assert calls["get_identity"] == 1
 
 
 def test_inbound_email_from_same_agent_identity_marker_does_not_wake_agent(monkeypatch):
