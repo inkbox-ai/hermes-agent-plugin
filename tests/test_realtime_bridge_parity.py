@@ -13,6 +13,7 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin import realtime as realtime_mod
 from inkbox_plugin.realtime import (
+    AGENT_CONSULT_TOOL_NAME,
     DELETE_POST_CALL_ACTION_TOOL_NAME,
     EDIT_POST_CALL_ACTION_TOOL_NAME,
     HANG_UP_CALL_TOOL_NAME,
@@ -301,6 +302,102 @@ def test_ga_function_call_events_dispatch_once_with_buffered_name():
     ))
 
     assert state.post_call_actions == [{"action": "Email Dima", "details": ""}]
+
+
+def test_agent_consult_does_not_block_audio_pump():
+    # The consult tool runs the full main agent loop and can take seconds. It
+    # must be dispatched off the read loop so audio (and barge-in) keep flowing
+    # while the agent thinks — otherwise the caller hears dead air. Under the old
+    # inline-await behavior this test would deadlock: the pump would never read
+    # past the consult frame to forward the audio delta.
+
+    async def _run():
+        release = asyncio.Event()
+
+        async def _slow_consult(*_args, **_kwargs):
+            await release.wait()  # hold the consult open like a slow agent turn
+            return "Your balance is forty two dollars."
+
+        inkbox_ws = _FakeWS()
+        openai_ws = _FakeOpenAIWS([
+            # Model invokes the consult tool...
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-c",
+                    "call_id": "consult-1",
+                    "name": AGENT_CONSULT_TOOL_NAME,
+                },
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "item-c",
+                "call_id": "consult-1",
+                "arguments": '{"query":"what is my balance"}',
+            },
+            # ...and audio arrives WHILE the consult is still running. The pump
+            # must forward this without waiting for the consult to finish.
+            {"type": "response.output_audio.delta", "delta": "ONEMOMENT"},
+        ])
+        state = _BridgeState()
+        state.stream_id = "stream-c"
+
+        await _openai_to_inkbox_pump(
+            openai_ws=openai_ws,
+            inkbox_ws=inkbox_ws,
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_slow_consult,
+        )
+
+        # Audio that arrived during the consult reached Inkbox even though the
+        # consult has not returned yet.
+        assert any(
+            frame.get("event") == "media"
+            and frame["media"]["payload"] == "ONEMOMENT"
+            for frame in inkbox_ws.sent
+        )
+        # The consult was handed off to a background task, not awaited inline.
+        assert len(state.consult_tasks) == 1
+        # The slow consult result has NOT been submitted to OpenAI yet.
+        assert [
+            frame for frame in openai_ws.sent
+            if frame["type"] == "conversation.item.create"
+        ] == []
+
+        # Release the consult and let the background task finish; its result is
+        # then recorded for post-call follow-up.
+        release.set()
+        for task in list(state.consult_tasks):
+            await task
+        assert state.consult_results
+        assert state.consult_results[0].result == "Your balance is forty two dollars."
+
+    asyncio.run(_run())
+
+
+def test_inflight_consult_is_cancelled_when_call_tears_down():
+    # If the call ends with a consult still running, the bridge cancels the
+    # background task instead of leaking it.
+    async def _run():
+        state = _BridgeState()
+        never = asyncio.Event()
+
+        async def _hang():
+            await never.wait()
+
+        task = asyncio.create_task(_hang())
+        state.consult_tasks.add(task)
+
+        from inkbox_plugin.realtime import _cancel_consult_tasks
+        await _cancel_consult_tasks(state)
+
+        assert task.cancelled()
+        assert state.consult_tasks == set()
+
+    asyncio.run(_run())
 
 
 def test_edit_and_delete_post_call_actions_by_index():

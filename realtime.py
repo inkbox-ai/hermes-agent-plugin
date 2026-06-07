@@ -20,9 +20,11 @@ The bridge:
    ``media`` frames carrying ``response.audio.delta`` payloads.
 4. Exposes realtime-only tools to the model:
 
-   - ``hermes_agent_consult`` — pauses the conversation, dispatches a synthetic
-     SMS-mode turn through Hermes' main agent loop, and submits the agent's
-     reply as the tool result so the realtime model can speak it.
+   - ``hermes_agent_consult`` — dispatches a synthetic SMS-mode turn through
+     Hermes' main agent loop *in the background* and submits the agent's reply
+     as the tool result so the realtime model can speak it. It runs off the
+     audio pump so the model can keep talking (filler, small talk, barge-in)
+     while the main agent thinks, rather than the call going silent.
    - ``register_post_call_action`` — queues a follow-up task. When the call
      ends, all queued actions are dispatched as a single synthetic SMS-mode
      turn so the main agent can execute them (send email, create note, etc.).
@@ -45,7 +47,7 @@ import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 try:
@@ -329,6 +331,11 @@ class _BridgeState:
     # Monotonic timestamp of the first hang_up_call ("armed"). A second call
     # within HANGUP_CONFIRM_WINDOW_S fires the real hangup. None = not yet armed.
     hangup_armed_at: Optional[float] = None
+    # In-flight hermes_agent_consult dispatches. The consult tool runs the full
+    # main agent loop (seconds), so it is dispatched as a background task to keep
+    # the OpenAI→Inkbox audio pump flowing; we track the tasks here so they can
+    # be cancelled when the call tears down.
+    consult_tasks: Set["asyncio.Task[None]"] = field(default_factory=set)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -568,6 +575,10 @@ class OpenedRealtimeBridge:
                     )
         finally:
             state.closed = True
+            # The call is over, so any consult still mid-flight can no longer be
+            # spoken to the caller — cancel the background tasks and let them
+            # settle before we close the sockets.
+            await _cancel_consult_tasks(state)
             await self.close()
 
         await _dispatch_post_call(state, self.meta, on_post_call_actions, on_call_ended)
@@ -660,6 +671,17 @@ async def run_inkbox_realtime_bridge(
         on_post_call_actions=on_post_call_actions,
         on_call_ended=on_call_ended,
     )
+
+
+async def _cancel_consult_tasks(state: _BridgeState) -> None:
+    """Cancel any in-flight background consult tasks and await their teardown."""
+    tasks = list(state.consult_tasks)
+    state.consult_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 async def _dispatch_post_call(
@@ -859,10 +881,11 @@ async def _openai_to_inkbox_pump(
         if not cid or cid in dispatched:
             return
         dispatched.add(cid)
-        await _dispatch_tool_call(
+        name = entry.get("name") or ""
+        coro = _dispatch_tool_call(
             openai_ws=openai_ws,
             call_id=cid,
-            name=entry.get("name") or "",
+            name=name,
             arguments_json=entry.get("args") or "{}",
             state=state,
             config=config,
@@ -870,6 +893,20 @@ async def _openai_to_inkbox_pump(
             on_agent_consult=on_agent_consult,
             inkbox_ws=inkbox_ws,
         )
+        # hermes_agent_consult runs the full main agent loop, which can take many
+        # seconds. Awaiting it inline here would block this read loop for the
+        # whole consult — no audio deltas (not even the "one moment" filler) and
+        # no barge-in would reach the caller, so the agent appears to go silent.
+        # Dispatch it as a background task instead; the pump keeps streaming
+        # audio while the agent thinks, and the task submits the tool result when
+        # it finishes (this is exactly the async-tool flow gpt-realtime expects).
+        # Every other tool is an instant in-memory op, so it stays inline.
+        if name == AGENT_CONSULT_TOOL_NAME:
+            task = asyncio.create_task(coro, name=f"realtime-consult-{cid}")
+            state.consult_tasks.add(task)
+            task.add_done_callback(state.consult_tasks.discard)
+        else:
+            await coro
 
     async for msg in openai_ws:
         if state.closed:
