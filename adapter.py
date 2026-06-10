@@ -181,10 +181,17 @@ _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
     "text.delivery_unconfirmed",
 )
 
-# iMessage: inbound messages only. Tapback reactions fan out as
-# ``imessage.reaction_received`` but waking the agent for every thumbs-up
-# isn't worth a turn; live reactions are visible on message reads anyway.
-_DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = ("imessage.received",)
+# iMessage: inbound plus the outbound delivery lifecycle, consumed by
+# _on_imessage_received / _on_imessage_lifecycle — same split as text.
+# Tapback reactions (``imessage.reaction_received``) are deliberately not
+# subscribed: waking the agent for every thumbs-up isn't worth a turn, and
+# live reactions are visible on message reads anyway.
+_DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
+    "imessage.received",
+    "imessage.sent",
+    "imessage.delivered",
+    "imessage.delivery_failed",
+)
 
 
 def _inkbox_state_path():
@@ -2138,8 +2145,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if event_type == "imessage.received":
             return await self._on_imessage_received(envelope)
         if event_type and event_type.startswith("imessage."):
-            # Reaction fan-out etc. — visible on message reads; no agent turn.
-            return web.Response(status=200, text="ok")
+            return await self._on_imessage_lifecycle(envelope)
         if "phone_number_id" in envelope and "remote_phone_number" in envelope:
             return await self._on_incoming_call(envelope)
         return web.Response(status=200, text="ignored")
@@ -2794,6 +2800,29 @@ class InkboxAdapter(BasePlatformAdapter):
         # the quiet-window batcher (the burst marker rewrite understands
         # the [inkbox:imessage ...] prefix).
         await self._enqueue_sms_text_event(event)
+        return web.Response(status=200, text="ok")
+
+    async def _on_imessage_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Log iMessage delivery/status callbacks without enqueueing an agent turn.
+
+        Also the landing spot for any other ``imessage.*`` fan-out we don't
+        subscribe to (e.g. reactions, if a subscription drifts) — logged and
+        acknowledged, never a turn.
+        """
+        event_type = str(envelope.get("event_type") or "")
+        message = (envelope.get("data") or {}).get("message") or {}
+        message_id = str(message.get("id") or "").strip()
+        remote = str(message.get("remote_number") or "").strip()
+        status = _plain_value(message.get("status")) or ""
+        error_code = _plain_value(message.get("error_code"))
+        logger.info(
+            "[Inkbox] iMessage lifecycle event=%s id=%s status=%s remote=%s error=%s",
+            event_type,
+            message_id,
+            status,
+            redact_phone(remote),
+            error_code or "",
+        )
         return web.Response(status=200, text="ok")
 
     async def _on_incoming_call(self, envelope: Dict[str, Any]) -> "web.Response":

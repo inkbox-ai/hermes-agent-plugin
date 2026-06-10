@@ -156,7 +156,7 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 3. Inkbox texts back from the number assigned to that conversation. Send any first message there — the agent can only reply after you message it first (recipient-first; there is no cold outreach over iMessage).
 4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, the gateway routes the thread into the same contact-keyed Hermes session as email/SMS/voice, and the agent replies over iMessage by default to whoever last reached it there.
 
-If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again.
+If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
 
 ## CLI
 
@@ -234,6 +234,7 @@ Hermes direct tools:
 - `inkbox_mark_text_conversation_read`
 - `inkbox_imessage_triage_number`
 - `inkbox_send_imessage`
+- `inkbox_list_imessage_assignments`
 - `inkbox_list_imessage_conversations`
 - `inkbox_get_imessage_conversation`
 - `inkbox_send_imessage_reaction`

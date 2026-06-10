@@ -300,3 +300,49 @@ def test_direct_send_accepts_imessage_conversation_target(monkeypatch):
     assert out["success"] is True
     assert out["mode"] == "imessage"
     assert identity.sent_imessages == [{"conversation_id": "imconv-123", "text": "cron says hi"}]
+
+
+def test_list_imessage_assignments_tool(monkeypatch):
+    identity = FakeIdentity()
+    identity.list_imessage_assignments = lambda **kwargs: (
+        identity.calls.append(("list_imessage_assignments", kwargs))
+        or [{"id": "assign-1", "remote_number": "+15555550101", "status": "active"}]
+    )
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_list_imessage_assignments({}))
+
+    assert out["ok"] is True
+    assert out["count"] == 1
+    assert out["assignments"][0]["remote_number"] == "+15555550101"
+    assert identity.calls == [("list_imessage_assignments", {"limit": 25, "offset": 0})]
+
+
+def test_imessage_lifecycle_event_logs_without_agent_turn(monkeypatch):
+    enqueued = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._enqueue = _enqueue
+
+    response = asyncio.run(adapter._on_imessage_lifecycle({
+        "event_type": "imessage.delivered",
+        "data": {
+            "message": {
+                "id": "im-1",
+                "direction": "outbound",
+                "remote_number": "+15555550101",
+                "status": "delivered",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert enqueued == []

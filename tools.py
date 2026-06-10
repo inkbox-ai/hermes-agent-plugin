@@ -427,6 +427,20 @@ def inkbox_list_imessage_conversations(args: dict, **kwargs) -> str:
         return _json({"error": str(exc)})
 
 
+def inkbox_list_imessage_assignments(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        options = {"limit": int(args.get("limit") or 25), "offset": int(args.get("offset") or 0)}
+        assignments = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_imessage_assignments", "listImessageAssignments"),
+            options,
+        )
+        return _json({"ok": True, "count": len(assignments or []), "assignments": _json_safe(assignments or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
 def inkbox_get_imessage_conversation(args: dict, **kwargs) -> str:
     del kwargs
     try:
@@ -706,9 +720,21 @@ SEND_IMESSAGE_SCHEMA = {
     },
 }
 
+LIST_IMESSAGE_ASSIGNMENTS_SCHEMA = {
+    "name": "inkbox_list_imessage_assignments",
+    "description": "List the people actively connected to this agent over iMessage (one row per recipient, newest first). Released connections are not returned. Use to answer who the agent can currently iMessage.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+}
+
 LIST_IMESSAGE_CONVERSATIONS_SCHEMA = {
     "name": "inkbox_list_imessage_conversations",
-    "description": "List iMessage conversation summaries for the configured Inkbox identity. Returns conversation IDs for replies plus latest-message previews and unread counts.",
+    "description": "List iMessage conversation summaries for the configured Inkbox identity. Returns conversation IDs for replies, latest-message previews, unread counts, and assignment_status (released = that person disconnected; replies fail until they reconnect).",
     "parameters": {
         "type": "object",
         "properties": {
@@ -791,6 +817,7 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_mark_text_conversation_read", "inkbox", MARK_TEXT_CONVERSATION_READ_SCHEMA, inkbox_mark_text_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_imessage_triage_number", "inkbox", IMESSAGE_TRIAGE_NUMBER_SCHEMA, inkbox_imessage_triage_number, check_fn=_configured)
     ctx.register_tool("inkbox_send_imessage", "inkbox", SEND_IMESSAGE_SCHEMA, inkbox_send_imessage, check_fn=_configured)
+    ctx.register_tool("inkbox_list_imessage_assignments", "inkbox", LIST_IMESSAGE_ASSIGNMENTS_SCHEMA, inkbox_list_imessage_assignments, check_fn=_configured)
     ctx.register_tool("inkbox_list_imessage_conversations", "inkbox", LIST_IMESSAGE_CONVERSATIONS_SCHEMA, inkbox_list_imessage_conversations, check_fn=_configured)
     ctx.register_tool("inkbox_get_imessage_conversation", "inkbox", GET_IMESSAGE_CONVERSATION_SCHEMA, inkbox_get_imessage_conversation, check_fn=_configured)
     ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)

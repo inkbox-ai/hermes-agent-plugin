@@ -345,3 +345,29 @@ def test_wait_for_imessage_first_message_greets_back(monkeypatch):
     assert identity.sent[0]["conversation_id"] == "imconv-123"
     assert "@agent" in identity.sent[0]["text"]
     assert identity.marked_read == ["imconv-123"]
+
+
+def test_configure_imessage_already_connected_defaults_to_skip(monkeypatch):
+    identity = _FakeIMessageIdentity(enabled=True)
+    identity.list_imessage_assignments = lambda **_kwargs: [
+        types.SimpleNamespace(remote_number="+15555550101"),
+    ]
+    client = _FakeIMessageClient(identity)
+    prompts = []
+
+    def _prompt_yes_no(question, default=True):
+        prompts.append((question.strip(), default))
+        return default
+
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", _prompt_yes_no)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_wait_for_imessage_first_message",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not walk through connect")),
+    )
+
+    setup_wizard._configure_imessage(
+        "ApiKey_test", "https://inkbox.ai", "agent", lambda **_kwargs: client,
+    )
+
+    assert prompts == [("Connect another iPhone to this agent now?", False)]

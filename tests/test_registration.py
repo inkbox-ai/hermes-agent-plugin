@@ -72,6 +72,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_mark_text_conversation_read",
         "inkbox_imessage_triage_number",
         "inkbox_send_imessage",
+        "inkbox_list_imessage_assignments",
         "inkbox_list_imessage_conversations",
         "inkbox_get_imessage_conversation",
         "inkbox_send_imessage_reaction",

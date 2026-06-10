@@ -17,19 +17,20 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 
 ## Required tools
 
-- `inkbox_list_imessage_conversations` — start here for triage; returns conversation IDs, latest-message previews, unread counts
+- `inkbox_list_imessage_conversations` — start here for triage; returns conversation IDs, latest-message previews, unread counts, and `assignment_status`
 - `inkbox_get_imessage_conversation` — pull message history (includes live tapback reactions on each message)
 - `inkbox_send_imessage` — outbound by `conversationId` (preferred) or `to` E.164
 
 ## Optional (allowlist needed)
 
 - `inkbox_imessage_triage_number` — router number + connect command for onboarding new people
+- `inkbox_list_imessage_assignments` — who is actively connected to this agent right now (one row per recipient)
 - `inkbox_send_imessage_reaction` — tapback (love/like/dislike/laugh/emphasize/question) on a received message
 - `inkbox_mark_imessage_conversation_read` — send a read receipt and clear unread state
 
 ## Workflow
 
-1. **Pull conversations.** Call `inkbox_list_imessage_conversations` (defaults: `limit: 25`). Each row shows `id`, `remote_number`, `latest_text`, `unread_count`, `total_count`.
+1. **Pull conversations.** Call `inkbox_list_imessage_conversations` (defaults: `limit: 25`). Each row shows `id`, `remote_number`, `latest_text`, `unread_count`, `total_count`, and `assignment_status` — `released` means that person disconnected, so a reply will fail until they reconnect through the router; tell them how instead of retrying.
 
 2. **Pick a conversation to handle.** If you need history, call `inkbox_get_imessage_conversation` with `conversationId: row.id`. Inbound messages may carry `reactions` — live tapbacks the person put on a message.
 

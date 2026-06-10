@@ -670,7 +670,28 @@ def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -
             print_warning(f"  Could not refresh the identity after enabling: {exc}")
             return
 
-    if not prompt_yes_no("  Connect your iPhone to this agent now?", True):
+    # Surface phones already connected through the router so reruns don't
+    # read like a first-time setup, and default the walkthrough off when a
+    # connection already exists (connecting another phone is the rare case).
+    connected = []
+    list_assignments = getattr(identity, "list_imessage_assignments", None)
+    if callable(list_assignments):
+        try:
+            connected = list(list_assignments(limit=5))
+        except Exception:
+            connected = []
+        if connected:
+            numbers = ", ".join(
+                str(getattr(a, "remote_number", "") or "") for a in connected
+            )
+            print_success(f"  Already connected: {numbers}")
+
+    question = (
+        "  Connect another iPhone to this agent now?"
+        if connected
+        else "  Connect your iPhone to this agent now?"
+    )
+    if not prompt_yes_no(question, not connected):
         print_info("  You can connect anytime — rerun `hermes inkbox setup` for the walkthrough.")
         return
     _wait_for_imessage_first_message(client, identity, handle)
