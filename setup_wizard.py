@@ -724,7 +724,7 @@ def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) ->
 
     print()
     print_info("  From your iPhone, in the Messages app:")
-    print(color(f"    1. Text \"{connect_command}\" to {triage.number}", Colors.BOLD))
+    print(color(f"      1. Text \"{connect_command}\" to {triage.number}", Colors.BOLD))
     print_info("    2. Inkbox texts you back from the number now assigned to this agent.")
     print_info("    3. Send any first message (e.g. \"hi\") in that NEW thread.")
     print_info("  The agent can only message you after you message it first.")
@@ -804,6 +804,8 @@ def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) ->
     except Exception:
         pass
     print_info("  Start the gateway (`hermes gateway run`) and keep chatting there.")
+    print_info("  If the gateway is already running, restart it (`hermes gateway restart`)")
+    print_info("  so it picks up this new iMessage connection.")
 
 
 def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[Any | None, str, bool]:
