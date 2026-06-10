@@ -3045,6 +3045,13 @@ class InkboxAdapter(BasePlatformAdapter):
             ],
             timestamp=timestamp,
         )
+        # A "question" tapback usually expects a reply, so show the typing
+        # indicator while the agent works on it (cancelled on send, or on the
+        # [SILENT] path if the agent decides no reply is warranted after all).
+        # Other reaction types most often resolve to [SILENT], so we don't
+        # promise a reply that isn't coming.
+        if reaction_type == "question":
+            self._start_imessage_typing(conversation_id)
         await self._enqueue(event)
         return web.Response(status=200, text="ok")
 

@@ -431,19 +431,27 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     adapter._resolve_contact_full = _resolve_contact_full
     adapter._enqueue = _enqueue
 
-    response = asyncio.run(adapter._on_imessage_reaction({
-        "event_type": "imessage.reaction_received",
-        "data": {
-            "reaction": {
-                "id": "react-in-1",
-                "direction": "inbound",
-                "remote_number": "+15555550101",
-                "conversation_id": "imconv-123",
-                "target_message_id": "im-target-9",
-                "reaction": "question",
+    async def _run():
+        response = await adapter._on_imessage_reaction({
+            "event_type": "imessage.reaction_received",
+            "data": {
+                "reaction": {
+                    "id": "react-in-1",
+                    "direction": "inbound",
+                    "remote_number": "+15555550101",
+                    "conversation_id": "imconv-123",
+                    "target_message_id": "im-target-9",
+                    "reaction": "question",
+                },
             },
-        },
-    }))
+        })
+        # A "question" tapback usually warrants a reply — check the typing
+        # pulse started before the run loop tears down (and cancel it).
+        assert "imconv-123" in adapter._typing_tasks()
+        adapter._stop_imessage_typing("imconv-123")
+        return response
+
+    response = asyncio.run(_run())
 
     assert response.status == 200
     assert len(enqueued) == 1
@@ -457,6 +465,51 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     # Reply target is stashed so a follow-up send lands in the right thread.
     assert adapter._last_inbound_imessage["contact-123"]["conversation_id"] == "imconv-123"
     assert adapter._last_inbound_modality["contact-123"] == "imessage"
+
+
+def test_inbound_non_question_reaction_does_not_type(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _resolve_contact_full(**_kwargs):
+        return {"id": "contact-123", "name": "Alex"}
+
+    enqueued = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+
+    response = asyncio.run(adapter._on_imessage_reaction({
+        "event_type": "imessage.reaction_received",
+        "data": {
+            "reaction": {
+                "id": "react-in-2",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-123",
+                "target_message_id": "im-target-9",
+                "reaction": "love",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert len(enqueued) == 1
+    # A 'love' tapback usually resolves to [SILENT]; don't promise a reply.
+    assert "imconv-123" not in adapter._typing_tasks()
 
 
 def test_inbound_reaction_ignores_outbound_echo(monkeypatch):
