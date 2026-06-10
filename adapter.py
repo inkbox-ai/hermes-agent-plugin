@@ -183,14 +183,17 @@ _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
 
 # iMessage: inbound plus the outbound delivery lifecycle, consumed by
 # _on_imessage_received / _on_imessage_lifecycle — same split as text.
-# Tapback reactions (``imessage.reaction_received``) are deliberately not
-# subscribed: waking the agent for every thumbs-up isn't worth a turn, and
-# live reactions are visible on message reads anyway.
+# Tapback reactions (``imessage.reaction_received``) are subscribed and
+# routed to _on_imessage_reaction, which enqueues a turn carrying the
+# reaction + a response policy: the agent decides whether to reply or emit
+# [SILENT] (a "?" tapback usually warrants a reply, a "love" usually does
+# not). The agent can also send its own tapbacks via inkbox_send_imessage_reaction.
 _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.received",
     "imessage.sent",
     "imessage.delivered",
     "imessage.delivery_failed",
+    "imessage.reaction_received",
 )
 
 
@@ -1185,6 +1188,11 @@ class InkboxAdapter(BasePlatformAdapter):
         self._identity_id: Optional[str] = None
         self._identity_email_addresses: set[str] = set()
         self._identity_email_addresses_loaded = False
+        # Background tasks that refresh the iMessage typing indicator while
+        # the agent processes an inbound message, keyed by conversation_id.
+        # Started in _start_imessage_typing, cancelled in _stop_imessage_typing
+        # (on send or on failure).
+        self._imessage_typing_tasks: Dict[str, "asyncio.Task"] = {}
         self._base_url = (
             extra.get("base_url") or os.getenv("INKBOX_BASE_URL") or INKBOX_BASE_URL_DEFAULT
         ).strip()
@@ -1422,6 +1430,17 @@ class InkboxAdapter(BasePlatformAdapter):
             )
         self._pending_sms_text_batch_tasks.clear()
         self._pending_sms_text_batches.clear()
+
+        # Cancel any iMessage typing pulses still running.
+        for task in list(self._imessage_typing_tasks.values()):
+            if not task.done():
+                task.cancel()
+        if self._imessage_typing_tasks:
+            await asyncio.gather(
+                *self._imessage_typing_tasks.values(),
+                return_exceptions=True,
+            )
+        self._imessage_typing_tasks.clear()
 
         # Close any live call WS so callers don't hang on a half-open socket.
         for ws in list(self._active_call_ws.values()):
@@ -1688,6 +1707,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Suppressed admin notice for chat %s: %s…",
                 chat_id, (content or "")[:60].replace("\n", " "),
             )
+            self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-admin-notice")
 
         # The [SILENT] marker is the cron scheduler's "I have nothing to
@@ -1702,6 +1722,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Suppressed [SILENT] sentinel for chat %s",
                 chat_id,
             )
+            self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-silent-marker")
 
         meta = metadata or {}
@@ -1824,6 +1845,9 @@ class InkboxAdapter(BasePlatformAdapter):
                     success=False,
                     error=f"No iMessage conversation or phone number for chat {chat_id}",
                 )
+            # The reply is going out now — stop the typing pulse for this
+            # conversation regardless of how the send below resolves.
+            self._stop_imessage_typing(conversation_id)
             send_imessage = getattr(identity, "send_imessage", None)
             if not callable(send_imessage):
                 return SendResult(
@@ -2144,6 +2168,8 @@ class InkboxAdapter(BasePlatformAdapter):
             return await self._on_text_lifecycle(envelope)
         if event_type == "imessage.received":
             return await self._on_imessage_received(envelope)
+        if event_type == "imessage.reaction_received":
+            return await self._on_imessage_reaction(envelope)
         if event_type and event_type.startswith("imessage."):
             return await self._on_imessage_lifecycle(envelope)
         if "phone_number_id" in envelope and "remote_phone_number" in envelope:
@@ -2710,7 +2736,13 @@ class InkboxAdapter(BasePlatformAdapter):
             source=source,
             raw_message=envelope,
             message_id=message_id,
-            auto_skill="inkbox:inkbox-troubleshooting" if message_type == MessageType.TEXT else None,
+            # Attach the iMessage-specific responder alongside the general
+            # Inkbox guide so the agent has the tapback/typing playbook for
+            # this channel on the first turn.
+            auto_skill=(
+                ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"]
+                if message_type == MessageType.TEXT else None
+            ),
             timestamp=timestamp,
             media_urls=list(media_urls or []),
             media_types=list(media_types or []),
@@ -2796,6 +2828,9 @@ class InkboxAdapter(BasePlatformAdapter):
             media_types=media_types,
             conversation_id=conversation_id,
         )
+        # Show the recipient a typing indicator while the agent works on the
+        # reply. The pulse is cancelled in send() once the response goes out.
+        self._start_imessage_typing(conversation_id)
         # iMessage users send fragment bursts just like SMS users — reuse
         # the quiet-window batcher (the burst marker rewrite understands
         # the [inkbox:imessage ...] prefix).
@@ -2823,6 +2858,194 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
+        return web.Response(status=200, text="ok")
+
+    # ── iMessage typing indicator ──────────────────────────────────────────
+    #
+    # iMessage typing indicators auto-expire client-side after a short window,
+    # so a single send_imessage_typing() would fade while the agent is still
+    # thinking. We refresh every IMESSAGE_TYPING_REFRESH_SECONDS until the
+    # reply goes out (or the turn fails), mirroring the "…" a human would see.
+
+    IMESSAGE_TYPING_REFRESH_SECONDS = 2.0
+    # Safety cap so a turn that errors out before send() (and thus never
+    # cancels the pulse) can't leave the indicator pulsing indefinitely.
+    IMESSAGE_TYPING_MAX_SECONDS = 300.0
+
+    def _typing_tasks(self) -> Dict[str, "asyncio.Task"]:
+        """Lazily-initialized typing-task registry.
+
+        Tolerates adapter instances built via ``object.__new__`` (used in
+        unit tests and any path that skips ``__init__``).
+        """
+        tasks = getattr(self, "_imessage_typing_tasks", None)
+        if tasks is None:
+            tasks = {}
+            self._imessage_typing_tasks = tasks
+        return tasks
+
+    def _start_imessage_typing(self, conversation_id: str) -> None:
+        """Begin (or keep) showing a typing indicator for a conversation."""
+        if not conversation_id:
+            return
+        existing = self._typing_tasks().get(conversation_id)
+        if existing is not None and not existing.done():
+            return  # already pulsing for this conversation
+        self._typing_tasks()[conversation_id] = asyncio.create_task(
+            self._imessage_typing_loop(conversation_id)
+        )
+
+    def _stop_imessage_typing(self, conversation_id: str) -> None:
+        """Cancel the typing pulse for a conversation, if any."""
+        if not conversation_id:
+            return
+        task = self._typing_tasks().pop(conversation_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _stop_imessage_typing_for_chat(self, chat_id: Any) -> None:
+        """Stop the typing pulse tied to a chat's last inbound iMessage.
+
+        Used on send paths that return before resolving a conversation_id
+        (e.g. the [SILENT] sentinel and admin-notice suppression), so a
+        no-reply turn doesn't leave the indicator pulsing forever.
+        """
+        state = self._last_inbound_imessage.get(str(chat_id)) or {}
+        self._stop_imessage_typing(str(state.get("conversation_id") or ""))
+
+    async def _imessage_typing_loop(self, conversation_id: str) -> None:
+        """Pulse the iMessage typing indicator until cancelled."""
+        if self._inkbox is None or not self._identity_handle:
+            return
+        elapsed = 0.0
+        try:
+            while elapsed < self.IMESSAGE_TYPING_MAX_SECONDS:
+                try:
+                    identity = await asyncio.to_thread(
+                        self._inkbox.get_identity, self._identity_handle,
+                    )
+                    send_typing = getattr(identity, "send_imessage_typing", None)
+                    if not callable(send_typing):
+                        return  # SDK too old — nothing to pulse
+                    await asyncio.to_thread(send_typing, conversation_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A transient typing failure should never derail the turn;
+                    # log at debug and keep trying on the next tick.
+                    logger.debug(
+                        "[Inkbox] iMessage typing pulse failed for %s: %s",
+                        conversation_id, exc,
+                    )
+                await asyncio.sleep(self.IMESSAGE_TYPING_REFRESH_SECONDS)
+                elapsed += self.IMESSAGE_TYPING_REFRESH_SECONDS
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # If we exited on the safety cap, our entry is stale — drop it.
+            # (When cancelled via _stop_imessage_typing the entry was already
+            # popped, and a *newer* pulse may now own the slot; only remove
+            # the mapping when it still points at this very task.)
+            current = asyncio.current_task()
+            tasks = self._typing_tasks()
+            if tasks.get(conversation_id) is current:
+                tasks.pop(conversation_id, None)
+
+    async def _on_imessage_reaction(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Route an inbound tapback into the contact's Hermes session.
+
+        Unlike SMS/email there is no body — the signal is the reaction itself
+        plus which message it targets. We enqueue a turn that hands the agent
+        the reaction and a response policy: a "question" tapback usually wants
+        a reply, the rest usually don't, so the agent is told it may return
+        [SILENT] when no visible reply is warranted (the same sentinel the
+        group-SMS policy and send() suppression already understand).
+        """
+        reaction = (envelope.get("data") or {}).get("reaction") or {}
+        reaction_id = str(reaction.get("id") or "").strip()
+        if reaction_id and self._is_duplicate(f"imessage_reaction:{reaction_id}"):
+            return web.Response(status=200, text="duplicate")
+        direction = str(reaction.get("direction") or "").strip().lower()
+        if direction and direction != "inbound":
+            # The agent's own outbound tapbacks echo back as a webhook too.
+            return web.Response(status=200, text="ok")
+        remote = str(reaction.get("remote_number") or "").strip()
+        if not remote:
+            return web.Response(status=200, text="ok")
+        conversation_id = str(reaction.get("conversation_id") or "").strip()
+        target_message_id = str(reaction.get("target_message_id") or "").strip()
+        reaction_type = str(reaction.get("reaction") or "").strip().lower()
+        custom_emoji = str(reaction.get("custom_emoji") or "").strip()
+        reaction_label = (
+            f"{reaction_type}:{custom_emoji}"
+            if reaction_type == "custom" and custom_emoji
+            else reaction_type
+        ) or "unknown"
+        timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
+
+        contact = await self._resolve_contact_full(kind="phone", value=remote)
+        chat_id = (contact["id"] if contact else remote)
+        contact_name = contact["name"] if contact and contact.get("name") else None
+        contact_block = self._contact_marker(contact)
+
+        # Keep the reply target fresh so a follow-up send() lands in the right
+        # iMessage conversation, exactly like an inbound message would.
+        self._last_inbound_modality[str(chat_id)] = "imessage"
+        imessage_state = {
+            "conversation_id": conversation_id,
+            "remote_number": remote,
+            "message_id": target_message_id,
+        }
+        self._last_inbound_imessage[str(chat_id)] = imessage_state
+        if conversation_id:
+            self._last_inbound_imessage[
+                _sms_state_key(chat_id, f"imessage:{conversation_id}")
+            ] = imessage_state
+
+        conversation_part = (
+            f" conversation_id={conversation_id}" if conversation_id else ""
+        )
+        target_part = (
+            f" target_message_id={target_message_id}" if target_message_id else ""
+        )
+        marker = (
+            f"[inkbox:imessage_reaction from={remote} reaction={reaction_label}"
+            f"{conversation_part}{target_part} | {contact_block}]"
+        )
+        policy = "\n".join([
+            f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
+            "A reaction is a lightweight signal, not always a request for a reply.",
+            "Reply only when the reaction plausibly warrants one — e.g. a 'question' "
+            "tapback usually asks for clarification or a follow-up, 'emphasize' may "
+            "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just "
+            "acknowledgements that need no response.",
+            "If no visible reply is warranted, return exactly [SILENT].",
+        ])
+        text = f"{marker}\n{policy}"
+
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=contact_name or remote,
+            chat_type="dm",
+            user_id=str(chat_id),
+            user_name=contact_name or remote,
+            user_id_alt=remote,
+            thread_id=f"imessage:{conversation_id}" if conversation_id else None,
+            message_id=target_message_id or reaction_id,
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=envelope,
+            message_id=reaction_id or target_message_id,
+            auto_skill=[
+                "inkbox:inkbox-troubleshooting",
+                "inkbox:inkbox-imessage-responder",
+            ],
+            timestamp=timestamp,
+        )
+        await self._enqueue(event)
         return web.Response(status=200, text="ok")
 
     async def _on_incoming_call(self, envelope: Dict[str, Any]) -> "web.Response":

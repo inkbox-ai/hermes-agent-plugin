@@ -43,3 +43,15 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 ## Inbound markers
 
 Inbound iMessages arrive prefixed `[inkbox:imessage from=+1555… conversation_id=… | contact…]` (bursts arrive as `[inkbox:imessage_burst …]` with one line per fragment). Use the marker for routing context; never echo it back.
+
+While you compose a reply, the recipient automatically sees a typing indicator (the adapter pulses it until your message sends), so there is no separate "I'm typing" tool to call.
+
+## Reacting to your messages (tapbacks)
+
+When someone puts a tapback on one of **your** messages, you receive a turn prefixed `[inkbox:imessage_reaction from=+1555… reaction=<type> conversation_id=… target_message_id=… | contact…]` followed by a short response policy. A reaction is a lightweight signal, not always a request for a reply:
+
+- A `question` tapback usually asks for clarification or a follow-up — replying is normally warranted.
+- `emphasize` may invite a brief acknowledgement or follow-up.
+- `love` / `like` / `laugh` / `dislike` are usually just acknowledgements that need no response.
+
+Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the adapter drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
