@@ -775,6 +775,29 @@ def _parse_inkbox_timestamp(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _reaction_is_removal(reaction: Dict[str, Any]) -> bool:
+    """Best-effort detection of a tapback *removal* on an inbound reaction.
+
+    The typed SDK ``IMessageWebhookReaction`` shape carries no removal flag
+    yet, so we look across the field names the backend might use and default
+    to False — an added tapback must never be misread as a removal. When the
+    wire shape settles on one field, this can be narrowed to it.
+    """
+    for key in ("removed", "is_removal", "is_removed", "deleted"):
+        value = reaction.get(key)
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}:
+            return True
+    for key in ("action", "event", "operation", "op", "change", "kind"):
+        value = reaction.get(key)
+        if isinstance(value, str) and value.strip().lower() in {
+            "removed", "remove", "removal", "deleted", "delete", "retract", "retracted",
+        }:
+            return True
+    return False
+
+
 def _format_inkbox_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -2981,6 +3004,12 @@ class InkboxAdapter(BasePlatformAdapter):
             if reaction_type == "custom" and custom_emoji
             else reaction_type
         ) or "unknown"
+        # Whether the person ADDED a tapback or took one back (REMOVED). The
+        # typed SDK shape doesn't carry this yet, so detect it from whichever
+        # field the backend populates and default to "added" — a normal add
+        # must never be misread as a removal.
+        removed = _reaction_is_removal(reaction)
+        action = "removed" if removed else "added"
         timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
@@ -3010,17 +3039,27 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         marker = (
             f"[inkbox:imessage_reaction from={remote} reaction={reaction_label}"
-            f"{conversation_part}{target_part} | {contact_block}]"
+            f" action={action}{conversation_part}{target_part} | {contact_block}]"
         )
-        policy = "\n".join([
-            f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
-            "A reaction is a lightweight signal, not always a request for a reply.",
-            "Reply only when the reaction plausibly warrants one — e.g. a 'question' "
-            "tapback usually asks for clarification or a follow-up, 'emphasize' may "
-            "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just "
-            "acknowledgements that need no response.",
-            "If no visible reply is warranted, return exactly [SILENT].",
-        ])
+        if removed:
+            policy = "\n".join([
+                f"{contact_name or remote} removed their '{reaction_label}' tapback from your message.",
+                "Taking a tapback back is almost always a quiet correction or a "
+                "change of mind, not a request for anything — it very rarely "
+                "warrants a reply.",
+                "Reply only if the removal clearly changes something actionable in "
+                "the conversation; otherwise return exactly [SILENT].",
+            ])
+        else:
+            policy = "\n".join([
+                f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
+                "A reaction is a lightweight signal, not always a request for a reply.",
+                "Reply only when the reaction plausibly warrants one — e.g. a 'question' "
+                "tapback usually asks for clarification or a follow-up, 'emphasize' may "
+                "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just "
+                "acknowledgements that need no response.",
+                "If no visible reply is warranted, return exactly [SILENT].",
+            ])
         text = f"{marker}\n{policy}"
 
         source = self.build_source(
@@ -3045,12 +3084,12 @@ class InkboxAdapter(BasePlatformAdapter):
             ],
             timestamp=timestamp,
         )
-        # A "question" tapback usually expects a reply, so show the typing
-        # indicator while the agent works on it (cancelled on send, or on the
-        # [SILENT] path if the agent decides no reply is warranted after all).
-        # Other reaction types most often resolve to [SILENT], so we don't
-        # promise a reply that isn't coming.
-        if reaction_type == "question":
+        # Adding a "question" tapback usually expects a reply, so show the
+        # typing indicator while the agent works on it (cancelled on send, or
+        # on the [SILENT] path if it decides no reply is warranted after all).
+        # Other reaction types — and any removal, which almost always resolves
+        # to [SILENT] — don't promise a reply that isn't coming.
+        if reaction_type == "question" and not removed:
             self._start_imessage_typing(conversation_id)
         await self._enqueue(event)
         return web.Response(status=200, text="ok")

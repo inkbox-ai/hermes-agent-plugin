@@ -459,6 +459,7 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     assert text.startswith(
         "[inkbox:imessage_reaction from=+15555550101 reaction=question"
     )
+    assert "action=added" in text
     assert "conversation_id=imconv-123" in text
     assert "target_message_id=im-target-9" in text
     assert "[SILENT]" in text  # the agent is told it may stay silent
@@ -509,6 +510,70 @@ def test_inbound_non_question_reaction_does_not_type(monkeypatch):
     assert response.status == 200
     assert len(enqueued) == 1
     # A 'love' tapback usually resolves to [SILENT]; don't promise a reply.
+    assert "imconv-123" not in adapter._typing_tasks()
+
+
+def test_reaction_is_removal_detection():
+    # Defaults to "added" when no removal field is present.
+    assert adapter_mod._reaction_is_removal({"reaction": "question"}) is False
+    # Boolean flags under any of the plausible names.
+    assert adapter_mod._reaction_is_removal({"removed": True}) is True
+    assert adapter_mod._reaction_is_removal({"is_removal": True}) is True
+    assert adapter_mod._reaction_is_removal({"removed": False}) is False
+    # String action/event fields.
+    assert adapter_mod._reaction_is_removal({"action": "removed"}) is True
+    assert adapter_mod._reaction_is_removal({"event": "retracted"}) is True
+    assert adapter_mod._reaction_is_removal({"action": "added"}) is False
+
+
+def test_inbound_reaction_removal_enqueues_silent_leaning_turn(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _resolve_contact_full(**_kwargs):
+        return {"id": "contact-123", "name": "Alex"}
+
+    enqueued = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+
+    response = asyncio.run(adapter._on_imessage_reaction({
+        "event_type": "imessage.reaction_received",
+        "data": {
+            "reaction": {
+                "id": "react-rm-1",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-123",
+                "target_message_id": "im-target-9",
+                "reaction": "question",
+                "action": "removed",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert len(enqueued) == 1
+    text = enqueued[0].text
+    # The agent is woken and explicitly told it was a removal.
+    assert "action=removed" in text
+    assert "removed their" in text
+    assert "[SILENT]" in text
+    # Even a removed 'question' tapback must NOT start typing.
     assert "imconv-123" not in adapter._typing_tasks()
 
 
