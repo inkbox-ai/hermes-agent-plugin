@@ -48,11 +48,10 @@ While you compose a reply, the recipient automatically sees a typing indicator (
 
 ## Reacting to your messages (tapbacks)
 
-When someone puts a tapback on one of **your** messages, you receive a turn prefixed `[inkbox:imessage_reaction from=+1555… reaction=<type> action=<added|removed> conversation_id=… target_message_id=… | contact…]` followed by a short response policy. A reaction is a lightweight signal, not always a request for a reply:
+When someone puts a tapback on one of **your** messages, you receive a turn prefixed `[inkbox:imessage_reaction from=+1555… reaction=<type> conversation_id=… target_message_id=… | contact…]` followed by a short response policy. A reaction is a lightweight signal, not always a request for a reply:
 
-- A `question` tapback (`action=added`) usually asks for clarification or a follow-up — replying is normally warranted.
+- A `question` tapback usually asks for clarification or a follow-up — replying is normally warranted.
 - `emphasize` may invite a brief acknowledgement or follow-up.
 - `love` / `like` / `laugh` / `dislike` are usually just acknowledgements that need no response.
-- `action=removed` means they **took a tapback back** — almost always a quiet correction or change of mind, not a request for anything. Replying is very rarely warranted.
 
-Decide based on the reaction, the action, and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the adapter drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
+Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the adapter drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
