@@ -3,8 +3,9 @@
 Inkbox (https://inkbox.ai) is API-first communication infrastructure that
 gives an AI agent a stable email address, phone number, and persistent
 contact list scoped to one *agent identity*. This adapter routes the
-three Inkbox modalities — inbound email, inbound SMS, and live voice
-calls — into a single contact-keyed Hermes session per remote party.
+four Inkbox modalities — inbound email, inbound SMS, inbound iMessage,
+and live voice calls — into a single contact-keyed Hermes session per
+remote party.
 
 Architecture
 ------------
@@ -18,11 +19,14 @@ On ``connect()`` the adapter:
      directly. Production deployments can bypass tunneling entirely by
      setting ``INKBOX_PUBLIC_URL``.
   2. Registers webhook subscriptions for the configured identity's
-     mailbox (``message.*`` events) and phone number (``text.*``
-     events) pointing at the tunnel, and patches the phone number's
-     incoming-call webhook URL + WebSocket URL on the resource itself
-     (the call channel is a synchronous control-plane callback and is
-     not a fan-out subscription).
+     mailbox (``message.*`` events), phone number (``text.*``
+     events), and — when the identity is iMessage-enabled — the
+     identity itself (``imessage.*`` events; iMessage rides shared
+     Inkbox-managed numbers, so the subscription owner is the agent
+     identity rather than a phone number) pointing at the tunnel, and
+     patches the phone number's incoming-call webhook URL + WebSocket
+     URL on the resource itself (the call channel is a synchronous
+     control-plane callback and is not a fan-out subscription).
   3. Starts an aiohttp server with two routes:
         - ``POST /webhook`` — verifies the ``X-Inkbox-Signature`` HMAC
           via the SDK, parses the body into one of three event shapes
@@ -40,12 +44,13 @@ Session keys
 Every inbound event is mapped to ``chat_id = contact_id`` so that one
 Hermes session spans email + SMS + voice for the same remote party::
 
-    inbound mail   → chat_id=contact_id, thread_id=f"email:{tid}"
-    inbound SMS    → chat_id=contact_id, thread_id=None
-    inbound call   → chat_id=contact_id, thread_id=f"call:{call_id}"
-    outbound call  → chat_id=contact_id, thread_id=None  (joins the
-                     contact's main session so the agent inherits the
-                     conversation that decided to place the call)
+    inbound mail     → chat_id=contact_id, thread_id=f"email:{tid}"
+    inbound SMS      → chat_id=contact_id, thread_id=None
+    inbound iMessage → chat_id=contact_id, thread_id=f"imessage:{cid}"
+    inbound call     → chat_id=contact_id, thread_id=f"call:{call_id}"
+    outbound call    → chat_id=contact_id, thread_id=None  (joins the
+                       contact's main session so the agent inherits the
+                       conversation that decided to place the call)
 
 When ``inkbox.contacts.lookup()`` returns 0 or >1 contacts the adapter
 falls back to the raw email address / phone number as ``chat_id``, so
@@ -54,10 +59,14 @@ unknown senders still get a session — just not a contact-merged one.
 Outbound
 --------
 ``send()`` is mode-aware via ``metadata['mode']``:
-  - ``email`` → ``identity.send_email(to=..., subject=..., body_text=...)``
-  - ``sms``   → ``identity.send_text(conversation_id=..., text=...)``
-                for replies, falling back to ``to=...`` for legacy/new sends
-  - ``voice`` → push a ``text`` frame onto the contact's active call
+  - ``email``    → ``identity.send_email(to=..., subject=..., body_text=...)``
+  - ``sms``      → ``identity.send_text(conversation_id=..., text=...)``
+                   for replies, falling back to ``to=...`` for legacy/new sends
+  - ``imessage`` → ``identity.send_imessage(conversation_id=..., text=...)``.
+    iMessage is recipient-first: the remote party must have messaged the
+    agent at least once before outbound sends work, so replies always
+    target an existing conversation.
+  - ``voice``    → push a ``text`` frame onto the contact's active call
     WebSocket so Inkbox-managed TTS speaks it to the caller.
 
 When the agent streams (gateway calls ``edit_message()`` repeatedly),
@@ -172,6 +181,21 @@ _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
     "text.delivery_unconfirmed",
 )
 
+# iMessage: inbound plus the outbound delivery lifecycle, consumed by
+# _on_imessage_received / _on_imessage_lifecycle — same split as text.
+# Tapback reactions (``imessage.reaction_received``) are subscribed and
+# routed to _on_imessage_reaction, which enqueues a turn carrying the
+# reaction + a response policy: the agent decides whether to reply or emit
+# [SILENT] (a "?" tapback usually warrants a reply, a "love" usually does
+# not). The agent can also send its own tapbacks via inkbox_send_imessage_reaction.
+_DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
+    "imessage.received",
+    "imessage.sent",
+    "imessage.delivered",
+    "imessage.delivery_failed",
+    "imessage.reaction_received",
+)
+
 
 def _inkbox_state_path():
     """Return the on-disk path used for the Inkbox identity state file.
@@ -221,6 +245,22 @@ def _sms_conversation_target(raw: Any) -> Optional[str]:
     if match:
         return match.group(1).strip() or None
     match = re.match(r"^(?:sms:|text:|phone:)(.+)$", without_provider, flags=re.IGNORECASE)
+    if match:
+        candidate = match.group(1).strip()
+        return candidate if candidate and not candidate.startswith("+") else None
+    return None
+
+
+def _imessage_conversation_target(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    without_provider = re.sub(r"^(inkbox:)", "", text, flags=re.IGNORECASE)
+    match = re.match(
+        r"^(?:imessage:conversation:|imessage:)(.+)$",
+        without_provider,
+        flags=re.IGNORECASE,
+    )
     if match:
         candidate = match.group(1).strip()
         return candidate if candidate and not candidate.startswith("+") else None
@@ -480,6 +520,28 @@ def _reconcile_text_subscription(
         client,
         owner_kwarg="phone_number_id",
         owner_id=phone_number_id,
+        desired_url=desired_url,
+        previous_webhook_url=previous_webhook_url,
+        desired_events=desired_events,
+    )
+
+
+def _reconcile_imessage_subscription(
+    client,
+    agent_identity_id,
+    desired_url: str,
+    previous_webhook_url: Optional[str],
+    desired_events: tuple[str, ...] = _DESIRED_IMESSAGE_EVENTS,
+):
+    """Reconcile the identity-owned iMessage webhook subscription.
+
+    iMessage traffic rides shared Inkbox-managed numbers, so the
+    subscription owner is the agent identity, not a phone number.
+    """
+    return _reconcile_subscription(
+        client,
+        owner_kwarg="agent_identity_id",
+        owner_id=agent_identity_id,
         desired_url=desired_url,
         previous_webhook_url=previous_webhook_url,
         desired_events=desired_events,
@@ -955,7 +1017,44 @@ def _sms_send_failure_dict(exc: Exception) -> Dict[str, Any]:
     }
 
 
-def _extract_text_media(text_msg: Dict[str, Any]) -> Tuple[list[str], list[str], list[str]]:
+def _format_inkbox_imessage_error(fields: Dict[str, Any]) -> str:
+    status = fields.get("status_code")
+    code = fields.get("error_code")
+    message = fields.get("message") or "send_imessage failed"
+    prefix = "Inkbox iMessage send failed"
+    if status:
+        prefix += f" (HTTP {status})"
+    if code:
+        prefix += f" [{code}]"
+    return f"{prefix}: {message}"
+
+
+def _imessage_send_failure(exc: Exception, *, target: str) -> SendResult:
+    # Same structured extraction as SMS — Inkbox error envelopes share one
+    # shape — but labelled as iMessage so logs and agent-visible errors
+    # point at the right channel. 409s carry the recipient-first /
+    # disconnected-assignment explanations from the server verbatim.
+    fields = _extract_inkbox_sms_error(exc)
+    logger.error(
+        "[Inkbox] iMessage send failed to %s: status=%s code=%s message=%s",
+        redact_phone(target),
+        fields.get("status_code"),
+        fields.get("error_code"),
+        fields.get("message"),
+    )
+    return SendResult(
+        success=False,
+        error=_format_inkbox_imessage_error(fields),
+        raw_response={"platform": "inkbox", "mode": "imessage", **fields},
+        retryable=bool(fields.get("retryable")),
+    )
+
+
+def _extract_text_media(
+    text_msg: Dict[str, Any],
+    *,
+    marker_label: str = "MMS",
+) -> Tuple[list[str], list[str], list[str]]:
     media_items = (
         text_msg.get("media")
         or text_msg.get("attachments")
@@ -994,7 +1093,7 @@ def _extract_text_media(text_msg: Dict[str, Any]) -> Tuple[list[str], list[str],
             urls.append(url)
         media_type = content_type or "unknown"
         types.append(media_type)
-        markers.append(f"[MMS attachment received: {media_type}]")
+        markers.append(f"[{marker_label} attachment received: {media_type}]")
     return urls, types, markers
 
 
@@ -1089,6 +1188,11 @@ class InkboxAdapter(BasePlatformAdapter):
         self._identity_id: Optional[str] = None
         self._identity_email_addresses: set[str] = set()
         self._identity_email_addresses_loaded = False
+        # Background tasks that refresh the iMessage typing indicator while
+        # the agent processes an inbound message, keyed by conversation_id.
+        # Started in _start_imessage_typing, cancelled in _stop_imessage_typing
+        # (on send or on failure).
+        self._imessage_typing_tasks: Dict[str, "asyncio.Task"] = {}
         self._base_url = (
             extra.get("base_url") or os.getenv("INKBOX_BASE_URL") or INKBOX_BASE_URL_DEFAULT
         ).strip()
@@ -1185,6 +1289,10 @@ class InkboxAdapter(BasePlatformAdapter):
         # instead of reconstructing a phone-number send. This is required for
         # group MMS and keeps 1:1 replies on the canonical server thread.
         self._last_inbound_sms: Dict[str, Dict[str, str]] = {}
+        # chat_id → metadata of the most-recent inbound iMessage for that
+        # chat. iMessage rides shared Inkbox numbers, so replies MUST target
+        # the conversation id (there is no agent-owned number to send from).
+        self._last_inbound_imessage: Dict[str, Dict[str, str]] = {}
         # chat_id → modality of the most-recent inbound message ('email',
         # 'sms', or 'voice').  Critical when chat_id is a Contact UUID (no
         # `+` or `@` to disambiguate) — without this, send() defaults the
@@ -1322,6 +1430,17 @@ class InkboxAdapter(BasePlatformAdapter):
             )
         self._pending_sms_text_batch_tasks.clear()
         self._pending_sms_text_batches.clear()
+
+        # Cancel any iMessage typing pulses still running.
+        for task in list(self._imessage_typing_tasks.values()):
+            if not task.done():
+                task.cancel()
+        if self._imessage_typing_tasks:
+            await asyncio.gather(
+                *self._imessage_typing_tasks.values(),
+                return_exceptions=True,
+            )
+        self._imessage_typing_tasks.clear()
 
         # Close any live call WS so callers don't hang on a half-open socket.
         for ws in list(self._active_call_ws.values()):
@@ -1505,6 +1624,21 @@ class InkboxAdapter(BasePlatformAdapter):
                 identity.phone_number.number, webhook_url, ws_url,
             )
 
+        # iMessage: identity-owned subscription, only while the identity is
+        # enabled (the server rejects imessage.* subscriptions otherwise).
+        if getattr(identity, "imessage_enabled", False) and self._identity_id:
+            _reconcile_imessage_subscription(
+                self._inkbox,
+                self._identity_id,
+                desired_url=webhook_url,
+                previous_webhook_url=previous_webhook_url,
+                desired_events=_DESIRED_IMESSAGE_EVENTS,
+            )
+            logger.info(
+                "[Inkbox] Patched iMessage for identity %s → %s",
+                self._identity_handle, webhook_url,
+            )
+
         # Persist the resolved identity so non-Inkbox sessions (CLI, etc.) can
         # tell the agent which email + phone it can be reached on.  Read by
         # ``prompt_builder.build_inkbox_identity_hint``.
@@ -1532,6 +1666,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     str(getattr(identity.phone_number, "id", ""))
                     if identity.phone_number else None
                 ),
+                "imessage_enabled": bool(getattr(identity, "imessage_enabled", False)),
                 "public_url": self._public_url,
                 "webhook_url": webhook_url,
                 "ws_url": ws_url,
@@ -1557,9 +1692,10 @@ class InkboxAdapter(BasePlatformAdapter):
         """Dispatch a message via the right Inkbox modality.
 
         ``metadata['mode']`` selects the channel: ``email`` (default for
-        contacts that have an email on file), ``sms``, or ``voice``. For
-        voice mode the message is pushed onto the contact's active call
-        WebSocket — the caller hears it through Inkbox-managed TTS.
+        contacts that have an email on file), ``sms``, ``imessage``, or
+        ``voice``. For voice mode the message is pushed onto the contact's
+        active call WebSocket — the caller hears it through Inkbox-managed
+        TTS.
 
         Hermes admin / status banners (session-reset notices, runtime info,
         home-channel prompt, update notifications) are silently dropped —
@@ -1571,6 +1707,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Suppressed admin notice for chat %s: %s…",
                 chat_id, (content or "")[:60].replace("\n", " "),
             )
+            self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-admin-notice")
 
         # The [SILENT] marker is the cron scheduler's "I have nothing to
@@ -1585,6 +1722,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Suppressed [SILENT] sentinel for chat %s",
                 chat_id,
             )
+            self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-silent-marker")
 
         meta = metadata or {}
@@ -1680,6 +1818,74 @@ class InkboxAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             return SendResult(success=False, error=f"get_identity failed: {exc}")
+
+        if mode == "imessage":
+            thread_id = str(meta.get("thread_id") or "").strip()
+            imessage_meta = (
+                self._last_inbound_imessage.get(_sms_state_key(chat_id, thread_id))
+                or self._last_inbound_imessage.get(str(chat_id), {})
+            )
+            conversation_id = str(
+                meta.get("conversation_id")
+                or meta.get("conversationId")
+                or _imessage_conversation_target(thread_id)
+                or imessage_meta.get("conversation_id")
+                or ""
+            ).strip()
+            to_number = str(imessage_meta.get("remote_number") or "").strip()
+            if not conversation_id and not to_number:
+                if str(chat_id).startswith("+"):
+                    to_number = str(chat_id).strip()
+                else:
+                    to_number = await asyncio.to_thread(
+                        self._lookup_contact_phone, chat_id,
+                    ) or ""
+            if not conversation_id and not to_number:
+                return SendResult(
+                    success=False,
+                    error=f"No iMessage conversation or phone number for chat {chat_id}",
+                )
+            # The reply is going out now — stop the typing pulse for this
+            # conversation regardless of how the send below resolves.
+            self._stop_imessage_typing(conversation_id)
+            send_imessage = getattr(identity, "send_imessage", None)
+            if not callable(send_imessage):
+                return SendResult(
+                    success=False,
+                    error=(
+                        "Installed Inkbox SDK has no send_imessage; "
+                        "upgrade with: pip install -U inkbox"
+                    ),
+                )
+            try:
+                if conversation_id:
+                    msg = await asyncio.to_thread(
+                        send_imessage,
+                        conversation_id=conversation_id,
+                        text=content,
+                    )
+                    target_label = f"conversation:{conversation_id}"
+                else:
+                    msg = await asyncio.to_thread(
+                        send_imessage, to=to_number, text=content,
+                    )
+                    target_label = redact_phone(to_number)
+                raw_response = _text_message_metadata(msg, mode="imessage")
+                logger.info(
+                    "[Inkbox] iMessage queued to %s: id=%s status=%s",
+                    target_label,
+                    raw_response.get("message_id") or "",
+                    raw_response.get("status") or "",
+                )
+                return SendResult(
+                    success=True,
+                    message_id=str(getattr(msg, "id", "")),
+                    raw_response=raw_response,
+                )
+            except Exception as exc:
+                return _imessage_send_failure(
+                    exc, target=conversation_id or to_number,
+                )
 
         if mode == "sms":
             thread_id = str(meta.get("thread_id") or "").strip()
@@ -1823,7 +2029,7 @@ class InkboxAdapter(BasePlatformAdapter):
         modality = self._last_inbound_modality.get(str(chat_id), "")
         if modality == "email":
             return False
-        if modality == "sms":
+        if modality in ("sms", "imessage"):
             return True
         # Unknown modality (agent-initiated outbound, contact-keyed chat
         # we haven't seen inbound yet) — mirror send()'s default heuristic:
@@ -1855,7 +2061,7 @@ class InkboxAdapter(BasePlatformAdapter):
         modality = self._last_inbound_modality.get(str(chat_id), "")
         if modality == "email":
             return False
-        if modality == "sms":
+        if modality in ("sms", "imessage"):
             return True
         # Unknown modality — mirror send()'s E.164-or-email heuristic
         # (matches ``supports_progress_updates``): E.164-shaped chat_id
@@ -1960,6 +2166,12 @@ class InkboxAdapter(BasePlatformAdapter):
             return await self._on_text_received(envelope)
         if event_type and event_type.startswith("text."):
             return await self._on_text_lifecycle(envelope)
+        if event_type == "imessage.received":
+            return await self._on_imessage_received(envelope)
+        if event_type == "imessage.reaction_received":
+            return await self._on_imessage_reaction(envelope)
+        if event_type and event_type.startswith("imessage."):
+            return await self._on_imessage_lifecycle(envelope)
         if "phone_number_id" in envelope and "remote_phone_number" in envelope:
             return await self._on_incoming_call(envelope)
         return web.Response(status=200, text="ignored")
@@ -2213,6 +2425,8 @@ class InkboxAdapter(BasePlatformAdapter):
             or text.startswith("[inkbox:sms_burst ")
             or text.startswith("[inkbox:group_sms ")
             or text.startswith("[inkbox:group_sms_burst ")
+            or text.startswith("[inkbox:imessage ")
+            or text.startswith("[inkbox:imessage_burst ")
         ):
             return {"mode": "queue", "merge_text": True}
         return None
@@ -2306,6 +2520,16 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[inkbox:group_sms ",
                     (
                         f"[inkbox:group_sms_burst messages={len(fragments)} "
+                        f"first_at={_format_inkbox_timestamp(first_at)} "
+                        f"last_at={_format_inkbox_timestamp(last_at)} "
+                    ),
+                    1,
+                )
+            elif str(batch["marker"]).startswith("[inkbox:imessage "):
+                burst_marker = batch["marker"].replace(
+                    "[inkbox:imessage ",
+                    (
+                        f"[inkbox:imessage_burst messages={len(fragments)} "
                         f"first_at={_format_inkbox_timestamp(first_at)} "
                         f"last_at={_format_inkbox_timestamp(last_at)} "
                     ),
@@ -2470,6 +2694,365 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
+        return web.Response(status=200, text="ok")
+
+    def _build_imessage_event(
+        self,
+        *,
+        envelope: Dict[str, Any],
+        message_id: str,
+        remote: str,
+        contact: Optional[Dict[str, Any]],
+        chat_id: Any,
+        contact_name: Optional[str],
+        body: str,
+        timestamp: datetime,
+        text: Optional[str] = None,
+        message_type: MessageType = MessageType.TEXT,
+        media_urls: Optional[list[str]] = None,
+        media_types: Optional[list[str]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> MessageEvent:
+        thread_id = f"imessage:{conversation_id}" if conversation_id else None
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=contact_name or remote,
+            chat_type="dm",
+            user_id=str(chat_id),
+            user_name=contact_name or remote,
+            user_id_alt=remote,
+            thread_id=thread_id,
+            message_id=message_id,
+        )
+        if text is None:
+            contact_block = self._contact_marker(contact)
+            conversation_part = (
+                f" conversation_id={conversation_id}" if conversation_id else ""
+            )
+            text = f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]\n{body}"
+        return MessageEvent(
+            text=text,
+            message_type=message_type,
+            source=source,
+            raw_message=envelope,
+            message_id=message_id,
+            # Attach the iMessage-specific responder alongside the general
+            # Inkbox guide so the agent has the tapback/typing playbook for
+            # this channel on the first turn.
+            auto_skill=(
+                ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"]
+                if message_type == MessageType.TEXT else None
+            ),
+            timestamp=timestamp,
+            media_urls=list(media_urls or []),
+            media_types=list(media_types or []),
+        )
+
+    async def _on_imessage_received(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Route an inbound iMessage into the contact's Hermes session.
+
+        Mirrors ``_on_text_received`` minus the SMS-only concerns: there is
+        no group support, no opt-in control words, and no local number —
+        iMessage rides a shared Inkbox-managed line, so the conversation id
+        is the only stable reply target and is stashed for ``send()``.
+        """
+        message = (envelope.get("data") or {}).get("message") or {}
+        message_id = str(message.get("id") or "").strip()
+        if message_id and self._is_duplicate(f"imessage:{message_id}"):
+            return web.Response(status=200, text="duplicate")
+        direction = str(message.get("direction") or "").strip().lower()
+        if direction and direction != "inbound":
+            return web.Response(status=200, text="ok")
+        remote = str(
+            message.get("remote_number") or message.get("remoteNumber") or ""
+        ).strip()
+        if not remote:
+            return web.Response(status=200, text="ok")
+        conversation_id = str(
+            message.get("conversation_id") or message.get("conversationId") or ""
+        ).strip()
+
+        contact = await self._resolve_contact_full(kind="phone", value=remote)
+        chat_id = (contact["id"] if contact else remote)
+        contact_name = contact["name"] if contact and contact.get("name") else None
+        raw_body = message.get("content") or ""
+        body = raw_body
+        media_urls, media_types, media_markers = _extract_text_media(
+            message, marker_label="iMessage",
+        )
+        if media_markers:
+            body = "\n".join(part for part in [body, *media_markers] if part)
+        timestamp = _parse_inkbox_timestamp(message.get("created_at"))
+
+        self._last_inbound_modality[str(chat_id)] = "imessage"
+        imessage_state = {
+            "conversation_id": conversation_id,
+            "remote_number": remote,
+            "message_id": message_id,
+        }
+        self._last_inbound_imessage[str(chat_id)] = imessage_state
+        if conversation_id:
+            self._last_inbound_imessage[
+                _sms_state_key(chat_id, f"imessage:{conversation_id}")
+            ] = imessage_state
+
+        if raw_body.lstrip().startswith("/"):
+            event = self._build_imessage_event(
+                envelope=envelope,
+                message_id=message_id,
+                remote=remote,
+                contact=contact,
+                chat_id=chat_id,
+                contact_name=contact_name,
+                body=body,
+                timestamp=timestamp,
+                text=raw_body.strip(),
+                message_type=MessageType.COMMAND,
+                media_urls=media_urls,
+                media_types=media_types,
+                conversation_id=conversation_id,
+            )
+            await self._enqueue(event)
+            return web.Response(status=200, text="ok")
+
+        event = self._build_imessage_event(
+            envelope=envelope,
+            message_id=message_id,
+            remote=remote,
+            contact=contact,
+            chat_id=chat_id,
+            contact_name=contact_name,
+            body=body,
+            timestamp=timestamp,
+            media_urls=media_urls,
+            media_types=media_types,
+            conversation_id=conversation_id,
+        )
+        # Show the recipient a typing indicator while the agent works on the
+        # reply. The pulse is cancelled in send() once the response goes out.
+        self._start_imessage_typing(conversation_id)
+        # iMessage users send fragment bursts just like SMS users — reuse
+        # the quiet-window batcher (the burst marker rewrite understands
+        # the [inkbox:imessage ...] prefix).
+        await self._enqueue_sms_text_event(event)
+        return web.Response(status=200, text="ok")
+
+    async def _on_imessage_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Log iMessage delivery/status callbacks without enqueueing an agent turn.
+
+        Also the landing spot for any other ``imessage.*`` fan-out we don't
+        subscribe to (e.g. reactions, if a subscription drifts) — logged and
+        acknowledged, never a turn.
+        """
+        event_type = str(envelope.get("event_type") or "")
+        message = (envelope.get("data") or {}).get("message") or {}
+        message_id = str(message.get("id") or "").strip()
+        remote = str(message.get("remote_number") or "").strip()
+        status = _plain_value(message.get("status")) or ""
+        error_code = _plain_value(message.get("error_code"))
+        logger.info(
+            "[Inkbox] iMessage lifecycle event=%s id=%s status=%s remote=%s error=%s",
+            event_type,
+            message_id,
+            status,
+            redact_phone(remote),
+            error_code or "",
+        )
+        return web.Response(status=200, text="ok")
+
+    # ── iMessage typing indicator ──────────────────────────────────────────
+    #
+    # iMessage typing indicators auto-expire client-side after a short window,
+    # so a single send_imessage_typing() would fade while the agent is still
+    # thinking. We refresh every IMESSAGE_TYPING_REFRESH_SECONDS until the
+    # reply goes out (or the turn fails), mirroring the "…" a human would see.
+
+    IMESSAGE_TYPING_REFRESH_SECONDS = 2.0
+    # Safety cap so a turn that errors out before send() (and thus never
+    # cancels the pulse) can't leave the indicator pulsing indefinitely.
+    IMESSAGE_TYPING_MAX_SECONDS = 300.0
+
+    def _typing_tasks(self) -> Dict[str, "asyncio.Task"]:
+        """Lazily-initialized typing-task registry.
+
+        Tolerates adapter instances built via ``object.__new__`` (used in
+        unit tests and any path that skips ``__init__``).
+        """
+        tasks = getattr(self, "_imessage_typing_tasks", None)
+        if tasks is None:
+            tasks = {}
+            self._imessage_typing_tasks = tasks
+        return tasks
+
+    def _start_imessage_typing(self, conversation_id: str) -> None:
+        """Begin (or keep) showing a typing indicator for a conversation."""
+        if not conversation_id:
+            return
+        existing = self._typing_tasks().get(conversation_id)
+        if existing is not None and not existing.done():
+            return  # already pulsing for this conversation
+        self._typing_tasks()[conversation_id] = asyncio.create_task(
+            self._imessage_typing_loop(conversation_id)
+        )
+
+    def _stop_imessage_typing(self, conversation_id: str) -> None:
+        """Cancel the typing pulse for a conversation, if any."""
+        if not conversation_id:
+            return
+        task = self._typing_tasks().pop(conversation_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _stop_imessage_typing_for_chat(self, chat_id: Any) -> None:
+        """Stop the typing pulse tied to a chat's last inbound iMessage.
+
+        Used on send paths that return before resolving a conversation_id
+        (e.g. the [SILENT] sentinel and admin-notice suppression), so a
+        no-reply turn doesn't leave the indicator pulsing forever.
+        """
+        state = self._last_inbound_imessage.get(str(chat_id)) or {}
+        self._stop_imessage_typing(str(state.get("conversation_id") or ""))
+
+    async def _imessage_typing_loop(self, conversation_id: str) -> None:
+        """Pulse the iMessage typing indicator until cancelled."""
+        if self._inkbox is None or not self._identity_handle:
+            return
+        elapsed = 0.0
+        try:
+            while elapsed < self.IMESSAGE_TYPING_MAX_SECONDS:
+                try:
+                    identity = await asyncio.to_thread(
+                        self._inkbox.get_identity, self._identity_handle,
+                    )
+                    send_typing = getattr(identity, "send_imessage_typing", None)
+                    if not callable(send_typing):
+                        return  # SDK too old — nothing to pulse
+                    await asyncio.to_thread(send_typing, conversation_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A transient typing failure should never derail the turn;
+                    # log at debug and keep trying on the next tick.
+                    logger.debug(
+                        "[Inkbox] iMessage typing pulse failed for %s: %s",
+                        conversation_id, exc,
+                    )
+                await asyncio.sleep(self.IMESSAGE_TYPING_REFRESH_SECONDS)
+                elapsed += self.IMESSAGE_TYPING_REFRESH_SECONDS
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # If we exited on the safety cap, our entry is stale — drop it.
+            # (When cancelled via _stop_imessage_typing the entry was already
+            # popped, and a *newer* pulse may now own the slot; only remove
+            # the mapping when it still points at this very task.)
+            current = asyncio.current_task()
+            tasks = self._typing_tasks()
+            if tasks.get(conversation_id) is current:
+                tasks.pop(conversation_id, None)
+
+    async def _on_imessage_reaction(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Route an inbound tapback into the contact's Hermes session.
+
+        Unlike SMS/email there is no body — the signal is the reaction itself
+        plus which message it targets. We enqueue a turn that hands the agent
+        the reaction and a response policy: a "question" tapback usually wants
+        a reply, the rest usually don't, so the agent is told it may return
+        [SILENT] when no visible reply is warranted (the same sentinel the
+        group-SMS policy and send() suppression already understand).
+        """
+        reaction = (envelope.get("data") or {}).get("reaction") or {}
+        reaction_id = str(reaction.get("id") or "").strip()
+        if reaction_id and self._is_duplicate(f"imessage_reaction:{reaction_id}"):
+            return web.Response(status=200, text="duplicate")
+        direction = str(reaction.get("direction") or "").strip().lower()
+        if direction and direction != "inbound":
+            # The agent's own outbound tapbacks echo back as a webhook too.
+            return web.Response(status=200, text="ok")
+        remote = str(reaction.get("remote_number") or "").strip()
+        if not remote:
+            return web.Response(status=200, text="ok")
+        conversation_id = str(reaction.get("conversation_id") or "").strip()
+        target_message_id = str(reaction.get("target_message_id") or "").strip()
+        reaction_type = str(reaction.get("reaction") or "").strip().lower()
+        custom_emoji = str(reaction.get("custom_emoji") or "").strip()
+        reaction_label = (
+            f"{reaction_type}:{custom_emoji}"
+            if reaction_type == "custom" and custom_emoji
+            else reaction_type
+        ) or "unknown"
+        timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
+
+        contact = await self._resolve_contact_full(kind="phone", value=remote)
+        chat_id = (contact["id"] if contact else remote)
+        contact_name = contact["name"] if contact and contact.get("name") else None
+        contact_block = self._contact_marker(contact)
+
+        # Keep the reply target fresh so a follow-up send() lands in the right
+        # iMessage conversation, exactly like an inbound message would.
+        self._last_inbound_modality[str(chat_id)] = "imessage"
+        imessage_state = {
+            "conversation_id": conversation_id,
+            "remote_number": remote,
+            "message_id": target_message_id,
+        }
+        self._last_inbound_imessage[str(chat_id)] = imessage_state
+        if conversation_id:
+            self._last_inbound_imessage[
+                _sms_state_key(chat_id, f"imessage:{conversation_id}")
+            ] = imessage_state
+
+        conversation_part = (
+            f" conversation_id={conversation_id}" if conversation_id else ""
+        )
+        target_part = (
+            f" target_message_id={target_message_id}" if target_message_id else ""
+        )
+        marker = (
+            f"[inkbox:imessage_reaction from={remote} reaction={reaction_label}"
+            f"{conversation_part}{target_part} | {contact_block}]"
+        )
+        policy = "\n".join([
+            f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
+            "A reaction is a lightweight signal, not always a request for a reply.",
+            "Reply only when the reaction plausibly warrants one — e.g. a 'question' "
+            "tapback usually asks for clarification or a follow-up, 'emphasize' may "
+            "invite one, while 'love'/'like'/'laugh'/'dislike' are usually just "
+            "acknowledgements that need no response.",
+            "If no visible reply is warranted, return exactly [SILENT].",
+        ])
+        text = f"{marker}\n{policy}"
+
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=contact_name or remote,
+            chat_type="dm",
+            user_id=str(chat_id),
+            user_name=contact_name or remote,
+            user_id_alt=remote,
+            thread_id=f"imessage:{conversation_id}" if conversation_id else None,
+            message_id=target_message_id or reaction_id,
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=envelope,
+            message_id=reaction_id or target_message_id,
+            auto_skill=[
+                "inkbox:inkbox-troubleshooting",
+                "inkbox:inkbox-imessage-responder",
+            ],
+            timestamp=timestamp,
+        )
+        # A "question" tapback usually expects a reply, so show the typing
+        # indicator while the agent works on it (cancelled on send, or on the
+        # [SILENT] path if the agent decides no reply is warranted after all).
+        # Other reaction types most often resolve to [SILENT], so we don't
+        # promise a reply that isn't coming.
+        if reaction_type == "question":
+            self._start_imessage_typing(conversation_id)
+        await self._enqueue(event)
         return web.Response(status=200, text="ok")
 
     async def _on_incoming_call(self, envelope: Dict[str, Any]) -> "web.Response":
@@ -3440,7 +4023,10 @@ async def send_inkbox_direct(
     )
     chosen_mode = (mode or "").lower().strip()
     if not chosen_mode:
-        chosen_mode = "sms" if str(chat_id).startswith("+") or _sms_conversation_target(chat_id) else "email"
+        if _imessage_conversation_target(chat_id):
+            chosen_mode = "imessage"
+        else:
+            chosen_mode = "sms" if str(chat_id).startswith("+") or _sms_conversation_target(chat_id) else "email"
     if chosen_mode == "sms" and len(message or "") > SMS_MAX_LENGTH:
         return _sms_too_long_failure_dict(message)
 
@@ -3498,6 +4084,48 @@ async def send_inkbox_direct(
                     "delivery_status": _plain_value(
                         getattr(msg, "delivery_status", None),
                     ),
+                }
+
+            if chosen_mode == "imessage":
+                send_imessage = getattr(identity, "send_imessage", None)
+                if not callable(send_imessage):
+                    return {
+                        "error": (
+                            "Installed Inkbox SDK has no send_imessage; "
+                            "upgrade with: pip install -U inkbox"
+                        ),
+                    }
+                conversation_id = _imessage_conversation_target(chat_id)
+                try:
+                    if conversation_id:
+                        msg = send_imessage(conversation_id=conversation_id, text=message)
+                    elif str(chat_id).startswith("+"):
+                        msg = send_imessage(to=str(chat_id).strip(), text=message)
+                    else:
+                        return {"error": f"No iMessage conversation target in {chat_id!r}"}
+                except Exception as exc:
+                    logger.error(
+                        "[Inkbox] Direct iMessage send failed to %s",
+                        conversation_id or redact_phone(str(chat_id)),
+                    )
+                    fields = _extract_inkbox_sms_error(exc)
+                    return {
+                        "success": False,
+                        "platform": "inkbox",
+                        "mode": "imessage",
+                        "error": _format_inkbox_imessage_error(fields),
+                        **fields,
+                    }
+                return {
+                    "success": True,
+                    "platform": "inkbox",
+                    "chat_id": chat_id,
+                    "message_id": str(getattr(msg, "id", "")),
+                    "mode": "imessage",
+                    "conversation_id": conversation_id or _plain_value(
+                        getattr(msg, "conversation_id", None),
+                    ),
+                    "status": _plain_value(getattr(msg, "status", None)),
                 }
 
             if chosen_mode == "email":

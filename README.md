@@ -1,8 +1,8 @@
 # Hermes Agent Inkbox Plugin
 
-[Inkbox](https://inkbox.ai) platform plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives a Hermes agent its own Inkbox identity: mailbox, phone number, SMS/MMS, voice calls, contact rules, an Inkbox tunnel, realtime phone calls, and bundled Inkbox skills without forking Hermes.
+[Inkbox](https://inkbox.ai) platform plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives a Hermes agent its own Inkbox identity: mailbox, phone number, SMS/MMS, iMessage, voice calls, contact rules, an Inkbox tunnel, realtime phone calls, and bundled Inkbox skills without forking Hermes.
 
-Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS conversations, inbound email/SMS/voice, OpenAI Realtime phone calls, post-call actions, SMS conversation tools, and package-included skills are implemented.
+Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS conversations, inbound email/SMS/iMessage/voice, OpenAI Realtime phone calls, post-call actions, SMS and iMessage conversation tools, and package-included skills are implemented.
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ Start the gateway:
 hermes gateway run
 ```
 
-Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, and calls into Hermes sessions.
+Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text/iMessage webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
 To update an existing install:
 
@@ -60,14 +60,15 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.4.6` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.4.7` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
 5. Offers OpenAI Realtime for calls when a phone number exists, validates the OpenAI API key, and stores `INKBOX_REALTIME_*` settings only when validation succeeds.
-6. Stores `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and related settings in `~/.hermes/.env`.
-7. Points the identity's mailbox and phone number at the agent-owned Inkbox tunnel.
-8. Prints the final mailbox/phone summary and next commands.
+6. Offers to enable iMessage for the agent (existing or freshly created), then walks you through connecting your iPhone: text the connect command to the Inkbox iMessage router, message the agent once, and receive a welcome reply confirming the channel.
+7. Stores `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and related settings in `~/.hermes/.env`.
+8. Points the identity's mailbox, phone number, and iMessage events at the agent-owned Inkbox tunnel.
+9. Prints the final mailbox/phone summary and next commands.
 
 If setup provisions a new local phone number, it waits for an inbound SMS `START` to that number before finishing. Text `START` from every phone that should receive outbound SMS from the agent.
 
@@ -80,13 +81,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.4.6' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.4.7' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.4.6' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.4.7' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -146,6 +147,17 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
+## iMessage
+
+iMessage works differently from SMS: the agent does not get its own iMessage number. People connect to the agent through the Inkbox iMessage router, and each connected person gets a dedicated thread with the agent.
+
+1. Enable iMessage for the agent during `hermes inkbox setup` (or later by rerunning it). Enablement is stored on the Inkbox identity, not in local config.
+2. From an iPhone, text the connect command (for example `connect @my-agent-handle`) to the Inkbox iMessage router number. The wizard prints both, and the agent can also share them via the `inkbox_imessage_triage_number` tool.
+3. Inkbox texts back from the number assigned to that conversation. Send any first message there — the agent can only reply after you message it first (recipient-first; there is no cold outreach over iMessage).
+4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, the gateway routes the thread into the same contact-keyed Hermes session as email/SMS/voice, and the agent replies over iMessage by default to whoever last reached it there.
+
+If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
+
 ## CLI
 
 ```bash
@@ -181,8 +193,9 @@ After the gateway starts:
 3. Send the agent an SMS and verify it replies in the same SMS thread.
 4. Add the agent to a group SMS/MMS conversation and verify it stays silent for unrelated chatter, then replies in the same conversation when addressed.
 5. Send the agent an email and verify it replies from its Inkbox mailbox.
-6. Call the agent phone number and ask for its handle, email, and phone.
-7. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
+6. If iMessage is enabled, connect via the iMessage router, message the agent, and verify it replies in the same iMessage thread.
+7. Call the agent phone number and ask for its handle, email, and phone.
+8. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
 
 ## Config Reference
 
@@ -190,7 +203,7 @@ After the gateway starts:
 |---|---|---|---|
 | `INKBOX_API_KEY` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup so it can create or choose an identity. |
 | `INKBOX_IDENTITY` | yes | - | Inkbox agent identity handle. |
-| `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, and calls. |
+| `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, iMessage, and calls. |
 | `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound webhooks unless set to `false`. |
 | `INKBOX_BASE_URL` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
@@ -219,6 +232,13 @@ Hermes direct tools:
 - `inkbox_get_text`
 - `inkbox_mark_text_read`
 - `inkbox_mark_text_conversation_read`
+- `inkbox_imessage_triage_number`
+- `inkbox_send_imessage`
+- `inkbox_list_imessage_assignments`
+- `inkbox_list_imessage_conversations`
+- `inkbox_get_imessage_conversation`
+- `inkbox_send_imessage_reaction`
+- `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
 
 Realtime-only call tools:
@@ -238,6 +258,7 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 | `inkbox-troubleshooting` | Runtime/config errors, failed tools, readiness issues |
 | `inkbox-email-triage` | Checking or replying to Inkbox email |
 | `inkbox-sms-responder` | Sending, replying to, or triaging SMS |
+| `inkbox-imessage-responder` | Sending, replying to, or triaging iMessage |
 | `inkbox-outbound-calling` | Placing calls to numbers or contacts |
 | `inkbox-call-review` | Reviewing calls and transcripts |
 | `inkbox-contact-lookup` | Resolving, creating, or updating contacts |
@@ -257,7 +278,7 @@ python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.p
 ## Architecture Notes
 
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
-- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions, and wires the incoming-call URL.
+- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions (plus an identity-owned iMessage subscription when enabled), and wires the incoming-call URL.
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
 - Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main Hermes agent after hangup.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.

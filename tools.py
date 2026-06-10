@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import secrets
@@ -74,6 +75,22 @@ def _call_with_key_and_options(method, key: str, options: Dict[str, Any], camel_
             return method(key, camel_options or options)
         except TypeError:
             return method(key)
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert SDK dataclasses (UUIDs, datetimes, enums) into JSON-safe data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    return str(getattr(value, "value", value))
 
 
 def _text_conversation_key(args: dict) -> Tuple[str, str, Optional[str]]:
@@ -329,6 +346,188 @@ def inkbox_mark_text_conversation_read(args: dict, **kwargs) -> str:
         return _json({"error": str(exc)})
 
 
+def inkbox_imessage_triage_number(args: dict, **kwargs) -> str:
+    del args, kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        imessages = getattr(client, "imessages", None)
+        if imessages is None:
+            return _json({"error": "Installed Inkbox SDK has no iMessage support; upgrade with: pip install -U inkbox"})
+        triage = imessages.get_triage_number()
+        return _json({
+            "ok": True,
+            "number": str(getattr(triage, "number", "")),
+            "connect_command": str(getattr(triage, "connect_command", "")),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_send_imessage(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        text = str(args.get("text") or "")
+        media_urls = _normalize_recipients(args.get("mediaUrls") or args.get("media_urls"))
+        if not text and not media_urls:
+            return _json({"error": "Provide `text`, `mediaUrls`, or both."})
+        if media_urls and len(media_urls) > 1:
+            return _json({"error": "Inkbox iMessage supports at most one media URL per message."})
+
+        conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
+        to = str(args.get("to") or "").strip()
+        if bool(conversation_id) == bool(to):
+            return _json({"error": "Specify exactly one of `to` or `conversationId`."})
+
+        payload: dict[str, Any] = {"text": text or None}
+        camel_payload: dict[str, Any] = {"text": text or None}
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+            camel_payload["conversationId"] = conversation_id
+        else:
+            payload["to"] = to
+            camel_payload["to"] = to
+        if media_urls:
+            payload["media_urls"] = media_urls
+            camel_payload["mediaUrls"] = media_urls
+        send_style = str(args.get("sendStyle") or args.get("send_style") or "").strip()
+        if send_style:
+            payload["send_style"] = send_style
+            camel_payload["sendStyle"] = send_style
+
+        msg = _call_with_kwargs_or_payload(
+            _identity_method(identity, "send_imessage", "sendImessage"),
+            payload,
+            camel_payload,
+        )
+        return _json({
+            "ok": True,
+            "message_id": str(getattr(msg, "id", "")),
+            "conversation_id": _json_safe(
+                getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
+            ),
+            "service": _json_safe(getattr(msg, "service", None)),
+            "status": _json_safe(getattr(msg, "status", None)),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_imessage_conversations(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        options = {"limit": int(args.get("limit") or 25), "offset": int(args.get("offset") or 0)}
+        convos = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_imessage_conversations", "listImessageConversations"),
+            options,
+        )
+        return _json({"ok": True, "count": len(convos or []), "conversations": _json_safe(convos or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_imessage_assignments(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        options = {"limit": int(args.get("limit") or 25), "offset": int(args.get("offset") or 0)}
+        assignments = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_imessage_assignments", "listImessageAssignments"),
+            options,
+        )
+        return _json({"ok": True, "count": len(assignments or []), "assignments": _json_safe(assignments or [])})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_imessage_conversation(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
+        if not conversation_id:
+            return _json({"error": "`conversationId` is required"})
+        payload = {
+            "conversation_id": conversation_id,
+            "limit": int(args.get("limit") or 50),
+            "offset": int(args.get("offset") or 0),
+        }
+        camel_payload = {
+            "conversationId": conversation_id,
+            "limit": payload["limit"],
+            "offset": payload["offset"],
+        }
+        msgs = _call_with_kwargs_or_payload(
+            _identity_method(identity, "list_imessages", "listImessages"),
+            payload,
+            camel_payload,
+        )
+        return _json({
+            "ok": True,
+            "conversation_id": conversation_id,
+            "count": len(msgs or []),
+            "messages": _json_safe(msgs or []),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_send_imessage_reaction(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        message_id = str(args.get("messageId") or args.get("message_id") or "").strip()
+        reaction = str(args.get("reaction") or "").strip().lower()
+        if not message_id:
+            return _json({"error": "`messageId` is required"})
+        if not reaction:
+            return _json({"error": "`reaction` is required"})
+        payload = {
+            "message_id": message_id,
+            "reaction": reaction,
+            "part_index": int(args.get("partIndex") or args.get("part_index") or 0),
+        }
+        camel_payload = {
+            "messageId": message_id,
+            "reaction": reaction,
+            "partIndex": payload["part_index"],
+        }
+        result = _call_with_kwargs_or_payload(
+            _identity_method(identity, "send_imessage_reaction", "sendImessageReaction"),
+            payload,
+            camel_payload,
+        )
+        return _json({"ok": True, "reaction": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_mark_imessage_conversation_read(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, _client, identity = _client_and_identity()
+        conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
+        if not conversation_id:
+            return _json({"error": "`conversationId` is required"})
+        result = _identity_method(
+            identity,
+            "mark_imessage_conversation_read",
+            "markImessageConversationRead",
+        )(conversation_id)
+        updated = (
+            getattr(result, "updated_count", None)
+            or getattr(result, "updatedCount", None)
+        )
+        return _json({
+            "ok": True,
+            "conversation_id": conversation_id,
+            "updated_count": _json_safe(updated),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
 def inkbox_place_call(args: dict, **kwargs) -> str:
     del kwargs
     try:
@@ -496,6 +695,99 @@ MARK_TEXT_CONVERSATION_READ_SCHEMA = {
     },
 }
 
+IMESSAGE_TRIAGE_NUMBER_SCHEMA = {
+    "name": "inkbox_imessage_triage_number",
+    "description": "Return the Inkbox iMessage router number and the connect command a person texts to it (from an iPhone) to reach this agent over iMessage. Share these when someone asks how to iMessage the agent.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+SEND_IMESSAGE_SCHEMA = {
+    "name": "inkbox_send_imessage",
+    "description": "Send an iMessage from the configured Inkbox identity. Recipient-first channel: a person must have connected via the iMessage router and messaged this agent before outbound sends work, so prefer conversationId from an inbound message or inkbox_list_imessage_conversations.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conversationId": {"type": "string", "description": "Existing Inkbox iMessage conversation UUID. Preferred for replies. Mutually exclusive with `to`."},
+            "to": {"type": "string", "description": "Recipient phone number in E.164 format. Only works after that person has messaged this agent. Mutually exclusive with `conversationId`."},
+            "text": {"type": "string", "description": "Message body."},
+            "mediaUrls": {"type": "array", "items": {"type": "string"}, "maxItems": 1, "description": "Optional media URL (at most one per message)."},
+            "sendStyle": {
+                "type": "string",
+                "enum": ["celebration", "shooting_star", "fireworks", "lasers", "love", "confetti", "balloons", "spotlight", "echo", "invisible", "gentle", "loud", "slam"],
+                "description": "Optional expressive iMessage send style.",
+            },
+        },
+    },
+}
+
+LIST_IMESSAGE_ASSIGNMENTS_SCHEMA = {
+    "name": "inkbox_list_imessage_assignments",
+    "description": "List the people actively connected to this agent over iMessage (one row per recipient, newest first). Released connections are not returned. Use to answer who the agent can currently iMessage.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+}
+
+LIST_IMESSAGE_CONVERSATIONS_SCHEMA = {
+    "name": "inkbox_list_imessage_conversations",
+    "description": "List iMessage conversation summaries for the configured Inkbox identity. Returns conversation IDs for replies, latest-message previews, unread counts, and assignment_status (released = that person disconnected; replies fail until they reconnect).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+}
+
+GET_IMESSAGE_CONVERSATION_SCHEMA = {
+    "name": "inkbox_get_imessage_conversation",
+    "description": "Fetch messages in one iMessage conversation, newest first. Messages include any live tapback reactions.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conversationId": {"type": "string", "description": "Inkbox iMessage conversation UUID from inkbox_list_imessage_conversations."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+        "required": ["conversationId"],
+    },
+}
+
+SEND_IMESSAGE_REACTION_SCHEMA = {
+    "name": "inkbox_send_imessage_reaction",
+    "description": "Send a tapback reaction to an iMessage the agent received.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "messageId": {"type": "string", "description": "UUID of the iMessage being reacted to."},
+            "reaction": {
+                "type": "string",
+                "enum": ["love", "like", "dislike", "laugh", "emphasize", "question"],
+                "description": "Tapback kind.",
+            },
+            "partIndex": {"type": "integer", "minimum": 0, "default": 0, "description": "Part of a multi-part message to react to."},
+        },
+        "required": ["messageId", "reaction"],
+    },
+}
+
+MARK_IMESSAGE_CONVERSATION_READ_SCHEMA = {
+    "name": "inkbox_mark_imessage_conversation_read",
+    "description": "Send a read receipt and mark every inbound message in an iMessage conversation as read.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conversationId": {"type": "string", "description": "Inkbox iMessage conversation UUID."},
+        },
+        "required": ["conversationId"],
+    },
+}
+
 PLACE_CALL_SCHEMA = {
     "name": "inkbox_place_call",
     "description": "Place an outbound call from the configured Inkbox identity phone number. Always include purpose.",
@@ -523,4 +815,11 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_get_text", "inkbox", GET_TEXT_SCHEMA, inkbox_get_text, check_fn=_configured)
     ctx.register_tool("inkbox_mark_text_read", "inkbox", MARK_TEXT_READ_SCHEMA, inkbox_mark_text_read, check_fn=_configured)
     ctx.register_tool("inkbox_mark_text_conversation_read", "inkbox", MARK_TEXT_CONVERSATION_READ_SCHEMA, inkbox_mark_text_conversation_read, check_fn=_configured)
+    ctx.register_tool("inkbox_imessage_triage_number", "inkbox", IMESSAGE_TRIAGE_NUMBER_SCHEMA, inkbox_imessage_triage_number, check_fn=_configured)
+    ctx.register_tool("inkbox_send_imessage", "inkbox", SEND_IMESSAGE_SCHEMA, inkbox_send_imessage, check_fn=_configured)
+    ctx.register_tool("inkbox_list_imessage_assignments", "inkbox", LIST_IMESSAGE_ASSIGNMENTS_SCHEMA, inkbox_list_imessage_assignments, check_fn=_configured)
+    ctx.register_tool("inkbox_list_imessage_conversations", "inkbox", LIST_IMESSAGE_CONVERSATIONS_SCHEMA, inkbox_list_imessage_conversations, check_fn=_configured)
+    ctx.register_tool("inkbox_get_imessage_conversation", "inkbox", GET_IMESSAGE_CONVERSATION_SCHEMA, inkbox_get_imessage_conversation, check_fn=_configured)
+    ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)
+    ctx.register_tool("inkbox_mark_imessage_conversation_read", "inkbox", MARK_IMESSAGE_CONVERSATION_READ_SCHEMA, inkbox_mark_imessage_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)

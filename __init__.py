@@ -158,11 +158,11 @@ def register(ctx) -> None:
         pii_safe=True,
         emoji="📨",
         platform_hint=(
-            "You are chatting through Inkbox email, SMS/MMS, or voice. "
-            "Inbound messages may start with an [inkbox:...] routing marker; "
-            "use it for channel/contact context and never echo it. During live "
-            "voice calls, answer conversationally in text; the adapter speaks "
-            "the response over the active call."
+            "You are chatting through Inkbox email, SMS/MMS, iMessage, or "
+            "voice. Inbound messages may start with an [inkbox:...] routing "
+            "marker; use it for channel/contact context and never echo it. "
+            "During live voice calls, answer conversationally in text; the "
+            "adapter speaks the response over the active call."
         ),
     )
     register_tools(ctx)
