@@ -96,6 +96,7 @@ def object_summary(obj: Any) -> Any:
         "type",
         "sms_status",
         "sms_error_code",
+        "imessage_enabled",
         "incoming_call_action",
         "client_websocket_url",
         "public_host",

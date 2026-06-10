@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_REQUIREMENTS = ("inkbox>=0.4.6", "aiohttp>=3.9")
+INKBOX_REQUIREMENTS = ("inkbox>=0.4.7", "aiohttp>=3.9")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
@@ -336,6 +336,7 @@ def _seed_identity_state(identity: Any) -> None:
             ),
             "phone_number": getattr(phone, "number", None) if phone else None,
             "phone_number_id": str(getattr(phone, "id", "")) if phone else None,
+            "imessage_enabled": bool(getattr(identity, "imessage_enabled", False)),
             "tunnel_public_host": getattr(tunnel, "public_host", None) if tunnel else None,
         }
         path = Path(get_hermes_home()) / "inkbox_identity_state.json"
@@ -615,6 +616,173 @@ def _wait_for_sms_opt_in(api_key: str, base_url: str, phone: Any, Inkbox: Any) -
         sys.stdout.flush()
         print()
         print_warning(f"  Skipped. Text START to {phone.number} anytime to enable outbound SMS.")
+
+
+def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -> None:
+    """Offer to enable iMessage for the agent and walk through connecting.
+
+    Args:
+        api_key (str): The agent-scoped Inkbox API key the wizard saved.
+        base_url (str): Inkbox API base URL.
+        handle (str): Agent identity handle being configured.
+        Inkbox (Any): The Inkbox SDK client class.
+
+    Returns:
+        None: Prints progress; failures degrade to a warning and return.
+    """
+    print()
+    print(color("  --- iMessage ---", Colors.CYAN))
+    print_info("  Inkbox can make this agent reachable over iMessage from your iPhone.")
+    print_info("  No number to provision — you connect through the Inkbox iMessage router.")
+
+    try:
+        client = Inkbox(api_key=api_key, base_url=base_url)
+        identity = client.get_identity(handle)
+    except Exception as exc:
+        print_warning(f"  Could not load the identity for iMessage setup: {exc}")
+        return
+
+    # Old SDKs predate iMessage entirely — detect by surface, not version.
+    if not hasattr(client, "imessages") or not hasattr(identity, "imessage_enabled"):
+        print_warning("  The installed Inkbox SDK does not support iMessage yet.")
+        print_info("  Upgrade it and rerun setup:")
+        print_info(f"    {_install_command_text()}")
+        return
+
+    if identity.imessage_enabled:
+        print_success("  iMessage is already enabled for this agent.")
+    else:
+        if not prompt_yes_no("  Enable iMessage for this agent?", True):
+            print_info("  Skipped. Rerun `hermes inkbox setup` anytime to enable iMessage.")
+            return
+        try:
+            identity.update(imessage_enabled=True)
+        except Exception as exc:
+            print_error(f"  Could not enable iMessage: {exc}")
+            print_info("  You can enable it later from the Inkbox console and rerun setup.")
+            return
+        print_success("  iMessage enabled for this agent.")
+        try:
+            # Re-fetch so the local object reflects the new flag (the SDK
+            # gates its iMessage helpers on it).
+            identity = client.get_identity(handle)
+        except Exception as exc:
+            print_warning(f"  Could not refresh the identity after enabling: {exc}")
+            return
+
+    if not prompt_yes_no("  Connect your iPhone to this agent now?", True):
+        print_info("  You can connect anytime — rerun `hermes inkbox setup` for the walkthrough.")
+        return
+    _wait_for_imessage_first_message(client, identity, handle)
+
+
+def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) -> None:
+    """Walk the user through the iMessage connect flow and greet them back.
+
+    Args:
+        client (Any): Authenticated Inkbox SDK client (agent-scoped key).
+        identity (Any): The iMessage-enabled agent identity object.
+        handle (str): Agent identity handle, used in the welcome message.
+
+    Returns:
+        None: Polls until the first inbound iMessage arrives (Ctrl+C skips),
+        then sends the channel-introduction reply into that conversation.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        triage = client.imessages.get_triage_number()
+    except Exception as exc:
+        print_warning(f"  Could not fetch the iMessage router number: {exc}")
+        print_info("  Rerun `hermes inkbox setup` later to finish connecting.")
+        return
+
+    connect_command = str(getattr(triage, "connect_command", "") or "").strip()
+    if not connect_command or "your-handle" in connect_command:
+        connect_command = f"connect @{handle}"
+
+    print()
+    print_info("  From your iPhone, in the Messages app:")
+    print(color(f"    1. Text \"{connect_command}\" to {triage.number}", Colors.BOLD))
+    print_info("    2. Inkbox texts you back from the number now assigned to this agent.")
+    print_info("    3. Send any first message (e.g. \"hi\") in that NEW thread.")
+    print_info("  The agent can only message you after you message it first.")
+
+    print()
+    print(color("  --- Waiting for your first iMessage ---", Colors.YELLOW))
+    print_info("  Polling every 3s for an inbound iMessage to this agent.")
+    print_info("  Press Ctrl+C to skip; you can connect anytime.")
+
+    started_at = datetime.now(timezone.utc)
+
+    def find_first_inbound(messages: Any) -> Any | None:
+        for message in messages:
+            direction = (_enum_value(getattr(message, "direction", "")) or "").lower()
+            if direction != "inbound":
+                continue
+            created_at = getattr(message, "created_at", None)
+            # Ignore traffic from a connection that predates this run.
+            # Naive timestamps can't be compared to the aware cutoff —
+            # accept those rather than crash the poll loop.
+            if (
+                created_at is not None
+                and created_at.tzinfo is not None
+                and created_at < started_at
+            ):
+                continue
+            return message
+        return None
+
+    spinner = "|/-\\"
+    idx = 0
+    next_poll_at = time.monotonic()
+    clear_line = "\r" + " " * 72 + "\r"
+    match = None
+
+    try:
+        while match is None:
+            now = time.monotonic()
+            if now >= next_poll_at:
+                try:
+                    messages = identity.list_imessages(limit=10)
+                except Exception:
+                    messages = []
+                match = find_first_inbound(messages)
+                next_poll_at = now + 3.0
+            if match is None:
+                sys.stdout.write(f"\r  {spinner[idx]} Listening for your first iMessage...  ")
+                sys.stdout.flush()
+                idx = (idx + 1) % len(spinner)
+                time.sleep(0.25)
+    except KeyboardInterrupt:
+        sys.stdout.write(clear_line)
+        sys.stdout.flush()
+        print()
+        print_warning("  Skipped. The agent replies over iMessage once you connect and message it.")
+        return
+
+    sys.stdout.write(clear_line)
+    sys.stdout.flush()
+    remote = getattr(match, "remote_number", "") or "your phone"
+    print_success(f"  Got it. First iMessage received from {remote}.")
+
+    conversation_id = getattr(match, "conversation_id", None)
+    welcome = (
+        f"You're connected! This is your iMessage channel to your Hermes agent "
+        f"@{handle}. Anything you send here goes straight to the agent, and its "
+        f"replies will show up right in this thread."
+    )
+    try:
+        identity.send_imessage(conversation_id=conversation_id, text=welcome)
+        print_success("  Sent a welcome message back on that thread.")
+    except Exception as exc:
+        print_warning(f"  Could not send the welcome message: {exc}")
+    try:
+        # Clear the unread flag the walkthrough message left behind.
+        identity.mark_imessage_conversation_read(conversation_id)
+    except Exception:
+        pass
+    print_info("  Start the gateway (`hermes gateway run`) and keep chatting there.")
 
 
 def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[Any | None, str, bool]:
@@ -1165,6 +1333,8 @@ def interactive_setup() -> None:
 
     if did_provision_phone:
         _wait_for_sms_opt_in(api_key, base_url, getattr(identity, "phone_number", None), Inkbox)
+
+    _configure_imessage(api_key, base_url, identity.agent_handle, Inkbox)
 
     _setup_signing_key(api_key, base_url, Inkbox)
 

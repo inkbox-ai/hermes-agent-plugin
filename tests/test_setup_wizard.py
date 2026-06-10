@@ -21,7 +21,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "install",
         "--python",
         "/tmp/hermes/venv/bin/python",
-        "inkbox>=0.4.6",
+        "inkbox>=0.4.7",
         "aiohttp>=3.9",
     ]]
 
@@ -31,10 +31,10 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
 
     assert setup_wizard._install_commands() == [
-        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.6", "aiohttp>=3.9"]],
+        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9"]],
         [
             ["/tmp/hermes/venv/bin/python", "-m", "ensurepip", "--upgrade"],
-            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.6", "aiohttp>=3.9"],
+            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9"],
         ],
     ]
 
@@ -53,7 +53,7 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "/tmp/hermes/venv/bin/python" in out
     assert "uv pip install --python" in out
-    assert "inkbox>=0.4.6" in out
+    assert "inkbox>=0.4.7" in out
     assert "aiohttp>=3.9" in out
 
 
@@ -236,3 +236,112 @@ def test_configure_realtime_calls_without_phone_skips(monkeypatch):
     setup_wizard._configure_realtime_calls(types.SimpleNamespace(phone_number=None))
 
     assert saved == []
+
+
+class _FakeIMessageIdentity:
+    def __init__(self, enabled=False):
+        self.imessage_enabled = enabled
+        self.updates = []
+        self.sent = []
+        self.marked_read = []
+        self._inbox = []
+
+    def update(self, **kwargs):
+        self.updates.append(kwargs)
+        if "imessage_enabled" in kwargs:
+            self.imessage_enabled = kwargs["imessage_enabled"]
+        return self
+
+    def list_imessages(self, **_kwargs):
+        return list(self._inbox)
+
+    def send_imessage(self, **kwargs):
+        self.sent.append(kwargs)
+        return types.SimpleNamespace(id="im-1")
+
+    def mark_imessage_conversation_read(self, conversation_id):
+        self.marked_read.append(conversation_id)
+
+
+class _FakeIMessageClient:
+    def __init__(self, identity):
+        self._identity = identity
+        self.imessages = types.SimpleNamespace(
+            get_triage_number=lambda: types.SimpleNamespace(
+                number="+15550009999",
+                connect_command="connect @agent",
+            ),
+        )
+
+    def get_identity(self, _handle):
+        return self._identity
+
+
+def test_configure_imessage_enables_and_offers_connect(monkeypatch):
+    identity = _FakeIMessageIdentity(enabled=False)
+    client = _FakeIMessageClient(identity)
+    walked = []
+
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_wait_for_imessage_first_message",
+        lambda _client, _identity, handle: walked.append(handle),
+    )
+
+    setup_wizard._configure_imessage(
+        "ApiKey_test", "https://inkbox.ai", "agent", lambda **_kwargs: client,
+    )
+
+    assert identity.updates == [{"imessage_enabled": True}]
+    assert walked == ["agent"]
+
+
+def test_configure_imessage_declined_leaves_identity_untouched(monkeypatch):
+    identity = _FakeIMessageIdentity(enabled=False)
+    client = _FakeIMessageClient(identity)
+
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_wait_for_imessage_first_message",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not walk through connect")),
+    )
+
+    setup_wizard._configure_imessage(
+        "ApiKey_test", "https://inkbox.ai", "agent", lambda **_kwargs: client,
+    )
+
+    assert identity.updates == []
+
+
+def test_wait_for_imessage_first_message_greets_back(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    identity = _FakeIMessageIdentity(enabled=True)
+    client = _FakeIMessageClient(identity)
+    identity._inbox = [
+        types.SimpleNamespace(
+            id="im-old",
+            direction="inbound",
+            conversation_id="imconv-old",
+            remote_number="+15555550101",
+            created_at=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
+        types.SimpleNamespace(
+            id="im-new",
+            direction="inbound",
+            conversation_id="imconv-123",
+            remote_number="+15555550101",
+            created_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        ),
+    ]
+
+    monkeypatch.setattr(setup_wizard.time, "sleep", lambda _s: None)
+
+    setup_wizard._wait_for_imessage_first_message(client, identity, "agent")
+
+    assert len(identity.sent) == 1
+    assert identity.sent[0]["conversation_id"] == "imconv-123"
+    assert "@agent" in identity.sent[0]["text"]
+    assert identity.marked_read == ["imconv-123"]
