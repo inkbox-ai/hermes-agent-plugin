@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 try:
     from .config import INKBOX_BASE_URL_DEFAULT
@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_REQUIREMENTS = ("inkbox>=0.4.7", "aiohttp>=3.9")
+INKBOX_REQUIREMENTS = ("inkbox>=0.4.7", "aiohttp>=3.9", "segno>=1.5")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
@@ -66,6 +66,21 @@ OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
 def print_header(title: str) -> None:
     print()
     print(color(f"* {title}", Colors.CYAN, Colors.BOLD))
+
+
+def _show_qr(data: str) -> bool:
+    stdout = getattr(sys, "stdout", None)
+    if stdout is not None and hasattr(stdout, "isatty") and not stdout.isatty():
+        return False
+    try:
+        import segno
+    except ImportError:
+        return False
+    try:
+        segno.make(data).terminal(compact=True)
+        return True
+    except Exception:
+        return False
 
 
 def _sanitize_pasted_input(value: str) -> str:
@@ -729,6 +744,17 @@ def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) ->
     print_info("    3. Send any first message (e.g. \"hi\") in that NEW thread.")
     print_info("  The agent can only message you after you message it first.")
 
+    sms_link = str(getattr(triage, "sms_link", "") or "").strip()
+    if not sms_link or "your-handle" in sms_link:
+        sms_link = f"sms:{triage.number}?&body={quote(connect_command)}"
+
+    qr_payload = f"SMSTO:{triage.number}:{connect_command}"
+    print()
+    print_info("  Or just scan this with your iPhone camera to do step 1 in one tap:")
+    print()
+    if not _show_qr(qr_payload):
+        print_info(f"    (install 'segno' to show a scannable QR here: {sms_link})")
+
     print()
     print(color("  --- Waiting for your first iMessage ---", Colors.YELLOW))
     print_info("  Polling every 3s for an inbound iMessage to this agent.")
@@ -1280,6 +1306,14 @@ def _print_agent_summary(identity: Any) -> None:
         print(color("  --- SMS opt-in ---", Colors.YELLOW))
         print_info(f"  Text START to {phone.number} to enable SMS from this agent")
         print_info("  to your phone. Do this from every phone you want to message it from.")
+
+        qr_payload = f"SMSTO:{phone.number}:START"
+        sms_link = f"sms:{phone.number}?&body=START"
+        print()
+        print_info("  Or just scan this with your phone camera to draft that text in one tap:")
+        print()
+        if not _show_qr(qr_payload):
+            print_info(f"    (install 'segno' to show a scannable QR here: {sms_link})")
 
     print()
     print(color("  --- Reachability rules ---", Colors.CYAN))
