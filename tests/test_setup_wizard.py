@@ -425,3 +425,76 @@ def test_configure_imessage_already_connected_defaults_to_skip(monkeypatch):
     )
 
     assert prompts == [("Connect another iPhone to this agent now?", False)]
+
+
+def test_avatar_auto_attached_on_signup(monkeypatch):
+    uploaded = {}
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda _base, _key, handle, image: (
+            uploaded.update(handle=handle, size=len(image)) or (True, "ok")
+        ),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt_yes_no",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no prompt on signup")),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "_identity_has_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no probe on signup")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=True)
+
+    assert uploaded["handle"] == "dev-agent"
+    assert uploaded["size"] > 0
+
+
+def test_avatar_skipped_when_existing_agent_already_has_one(monkeypatch):
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not upload")),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt_yes_no",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
+
+
+def test_avatar_offered_and_uploaded_for_existing_agent_without_one(monkeypatch):
+    uploaded = {}
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda _base, _key, handle, _image: uploaded.update(handle=handle) or (True, "ok"),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
+
+    assert uploaded["handle"] == "dev-agent"
+
+
+def test_avatar_declined_for_existing_agent(monkeypatch):
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("declined should not upload")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)

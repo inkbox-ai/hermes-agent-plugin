@@ -59,6 +59,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
 
 INKBOX_REQUIREMENTS = ("inkbox>=0.4.7", "aiohttp>=3.9", "segno>=1.5")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
+_AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.png"
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
 
@@ -631,6 +632,88 @@ def _wait_for_sms_opt_in(api_key: str, base_url: str, phone: Any, Inkbox: Any) -
         sys.stdout.flush()
         print()
         print_warning(f"  Skipped. Text START to {phone.number} anytime to enable outbound SMS.")
+
+
+async def _identity_has_avatar_async(base_url: str, api_key: str, handle: str) -> bool | None:
+    """Check whether an identity already has a contact-card avatar."""
+    import aiohttp
+
+    url = f"{base_url.rstrip('/')}/api/v1/identities/{handle}/avatar"
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"X-API-Key": api_key}) as resp:
+                if resp.status == 200:
+                    return True
+                if resp.status == 404:
+                    return False
+                return None
+    except Exception:
+        return None
+
+
+async def _upload_avatar_async(
+    base_url: str, api_key: str, handle: str, image: bytes
+) -> tuple[bool, str]:
+    """PUT the Hermes avatar image to the identity's avatar endpoint."""
+    import aiohttp
+
+    url = f"{base_url.rstrip('/')}/api/v1/identities/{handle}/avatar"
+    timeout = aiohttp.ClientTimeout(total=30)
+    form = aiohttp.FormData()
+    form.add_field("file", image, filename="hermes_with_iphone.png", content_type="image/png")
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.put(url, headers={"X-API-Key": api_key}, data=form) as resp:
+                if resp.status in (200, 201):
+                    return True, "ok"
+                return False, f"HTTP {resp.status} {(await resp.text())[:200]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _identity_has_avatar(base_url: str, api_key: str, handle: str) -> bool | None:
+    try:
+        return asyncio.run(_identity_has_avatar_async(base_url, api_key, handle))
+    except RuntimeError:
+        return None
+
+
+def _upload_avatar(base_url: str, api_key: str, handle: str, image: bytes) -> tuple[bool, str]:
+    try:
+        return asyncio.run(_upload_avatar_async(base_url, api_key, handle, image))
+    except RuntimeError as exc:
+        return False, f"could not run avatar upload from this setup process: {exc}"
+
+
+def _configure_avatar(base_url: str, api_key: str, identity: Any, *, is_signup: bool) -> None:
+    """Attach the bundled Hermes avatar to the agent's Inkbox contact card."""
+    handle = getattr(identity, "agent_handle", "") or ""
+    if not handle or not _AVATAR_PATH.exists():
+        return
+
+    if not is_signup:
+        if _identity_has_avatar(base_url, api_key, handle) is True:
+            return
+        print()
+        print(color("  --- Agent avatar ---", Colors.CYAN))
+        print_info("  This agent has no avatar on its Inkbox contact card.")
+        if not prompt_yes_no("  Add the Hermes avatar?", True):
+            print_info("  Skipped. You can set an avatar later in the Inkbox console.")
+            return
+
+    try:
+        image = _AVATAR_PATH.read_bytes()
+    except Exception as exc:
+        print_warning(f"  Could not read the bundled avatar: {exc}")
+        return
+
+    ok, detail = _upload_avatar(base_url, api_key, handle, image)
+    if ok:
+        print_success("  Attached the Hermes avatar to this agent.")
+    else:
+        print_warning(f"  Could not attach the avatar: {detail}")
+        print_info("  You can set one later in the Inkbox console.")
 
 
 def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -> None:
@@ -1377,6 +1460,8 @@ def interactive_setup() -> None:
     _save("INKBOX_IDENTITY", identity.agent_handle)
     if base_url != INKBOX_BASE_URL_DEFAULT or _env("INKBOX_BASE_URL"):
         _save("INKBOX_BASE_URL", base_url)
+
+    _configure_avatar(base_url, api_key, identity, is_signup=not has_key)
 
     _save("INKBOX_ALLOW_ALL_USERS", "true")
     print()
