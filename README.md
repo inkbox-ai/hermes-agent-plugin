@@ -1,6 +1,21 @@
-# Hermes Agent Inkbox Plugin
+<h1>Hermes Agent Inkbox Plugin</h1>
 
-[Inkbox](https://inkbox.ai) platform plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives a Hermes agent its own Inkbox identity: mailbox, phone number, SMS/MMS, iMessage, voice calls, contact rules, an Inkbox tunnel, realtime phone calls, and bundled Inkbox skills without forking Hermes.
+<img src="assets/hermes_with_iphone.png" alt="Hermes, now with a phone" width="200" align="left">
+
+<p>
+  <br><br>
+  <b>Give your Hermes agent its own Inkbox identity:</b><br>
+  a mailbox, iMessage, a phone number for calls and SMS, realtime phone calls, and an Inkbox tunnel.<br>
+  Keep Hermes reachable from anywhere without forking Hermes.
+</p>
+
+<p>
+  <code>Email</code> · <code>Calls</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Tunnel</code> · <code>Skills</code>
+</p>
+
+<br clear="left">
+
+---
 
 Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS conversations, inbound email/SMS/iMessage/voice, OpenAI Realtime phone calls, post-call actions, SMS and iMessage conversation tools, and package-included skills are implemented.
 
