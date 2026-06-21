@@ -2288,18 +2288,110 @@ class InkboxAdapter(BasePlatformAdapter):
             f"{f' subject={subject!r}' if subject else ''}"
             f" | {contact_block}]\n{body_text}"
         )
+        # Built-in default plus any operator-configured email overrides
+        # (system prompt and/or extra skills) for this contact.
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "email", chat_id, "inkbox:inkbox-troubleshooting"
+        )
         event = MessageEvent(
             text=tagged,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=envelope,
             message_id=rfc_message_id or str(message.get("id") or ""),
-            # Auto-load the plugin-provided Inkbox guide on the first turn of
-            # every new session. Plugin skills use qualified names.
-            auto_skill="inkbox:inkbox-troubleshooting",
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
         )
         await self._enqueue(event)
         return web.Response(status=200, text="ok")
+
+    def _resolve_channel_overrides(
+        self,
+        modality: str,
+        chat_id: Any,
+        default_skills: "str | list[str] | None",
+    ) -> "tuple[Optional[str], str | list[str] | None]":
+        """Resolve the per-channel system prompt and auto-loaded skills for an event.
+
+        Operators tailor how this agent behaves on each Inkbox channel with two
+        optional ``inkbox:`` config blocks — ``channel_prompts`` (an ephemeral
+        system prompt) and ``channel_skill_bindings`` (extra skills to load on a
+        new session). Both are keyed by either a modality or a specific Inkbox
+        contact id, contact id winning. Configured skills are merged on top of
+        the channel's built-in defaults so a binding never drops them.
+
+        Args:
+            modality (str): Inkbox channel for this event — ``email``, ``sms``,
+                ``imessage``, or ``voice``. The broad lookup key.
+            chat_id (Any): Inkbox contact id (or raw address) for this event.
+                The fine-grained lookup key, preferred over the modality.
+            default_skills (str | list[str] | None): Skills the channel always
+                auto-loads, before operator overrides are merged in.
+
+        Returns:
+            tuple[Optional[str], str | list[str] | None]: The resolved channel
+                prompt (or ``None``) and the merged ``auto_skill`` value.
+        """
+        config = getattr(self, "config", None)
+        extra = getattr(config, "extra", None) or {}
+        contact_key = str(chat_id or "")
+        prompt = self._lookup_channel_prompt(extra, contact_key, modality)
+        configured = self._lookup_channel_skills(extra, contact_key, modality)
+        return prompt, self._merge_auto_skills(default_skills, configured)
+
+    @staticmethod
+    def _lookup_channel_prompt(
+        extra: Dict[str, Any], contact_key: str, modality: str
+    ) -> Optional[str]:
+        """Return the operator channel prompt for this contact/modality, else None."""
+        prompts = extra.get("channel_prompts")
+        if not isinstance(prompts, dict):
+            return None
+        # Contact-specific prompt wins over the modality-wide default.
+        for key in (contact_key, modality):
+            if not key:
+                continue
+            value = prompts.get(key)
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _lookup_channel_skills(
+        extra: Dict[str, Any], contact_key: str, modality: str
+    ) -> "str | list[str] | None":
+        """Return operator-bound skills for this contact/modality, else None."""
+        bindings = extra.get("channel_skill_bindings")
+        if not isinstance(bindings, list):
+            return None
+        # Contact-specific binding wins over the modality-wide one.
+        for key in (contact_key, modality):
+            if not key:
+                continue
+            for entry in bindings:
+                if not isinstance(entry, dict) or str(entry.get("id") or "") != key:
+                    continue
+                skills = entry.get("skills")
+                if skills is None:
+                    skills = entry.get("skill")  # single-name shorthand
+                if skills:
+                    return skills
+        return None
+
+    @staticmethod
+    def _merge_auto_skills(default, configured):
+        """Union built-in defaults with configured skills, defaults first, deduped."""
+        merged: list = []
+        for group in (default, configured):
+            if not group:
+                continue
+            for name in [group] if isinstance(group, str) else group:
+                if name and name not in merged:
+                    merged.append(name)
+        return merged or None
 
     def _sms_text_batch_key(self, event: MessageEvent) -> str:
         from gateway.session import build_session_key
@@ -2404,13 +2496,21 @@ class InkboxAdapter(BasePlatformAdapter):
             else:
                 conversation_part = f" conversation_id={conversation_id}" if conversation_id else ""
                 text = f"[inkbox:sms from={remote}{conversation_part} | {contact_block}]\n{body}"
+        default_skills = (
+            "inkbox:inkbox-troubleshooting"
+            if message_type == MessageType.TEXT else None
+        )
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "sms", chat_id, default_skills
+        )
         return MessageEvent(
             text=text,
             message_type=message_type,
             source=source,
             raw_message=envelope,
             message_id=text_id,
-            auto_skill="inkbox:inkbox-troubleshooting" if message_type == MessageType.TEXT else None,
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
             timestamp=timestamp,
             media_urls=list(media_urls or []),
             media_types=list(media_types or []),
@@ -2730,19 +2830,23 @@ class InkboxAdapter(BasePlatformAdapter):
                 f" conversation_id={conversation_id}" if conversation_id else ""
             )
             text = f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]\n{body}"
+        # iMessage always carries the responder playbook alongside the general
+        # guide; operator overrides for this channel layer on top.
+        default_skills = (
+            ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"]
+            if message_type == MessageType.TEXT else None
+        )
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "imessage", chat_id, default_skills
+        )
         return MessageEvent(
             text=text,
             message_type=message_type,
             source=source,
             raw_message=envelope,
             message_id=message_id,
-            # Attach the iMessage-specific responder alongside the general
-            # Inkbox guide so the agent has the tapback/typing playbook for
-            # this channel on the first turn.
-            auto_skill=(
-                ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"]
-                if message_type == MessageType.TEXT else None
-            ),
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
             timestamp=timestamp,
             media_urls=list(media_urls or []),
             media_types=list(media_types or []),
@@ -3033,16 +3137,19 @@ class InkboxAdapter(BasePlatformAdapter):
             thread_id=f"imessage:{conversation_id}" if conversation_id else None,
             message_id=target_message_id or reaction_id,
         )
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "imessage",
+            chat_id,
+            ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"],
+        )
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=envelope,
             message_id=reaction_id or target_message_id,
-            auto_skill=[
-                "inkbox:inkbox-troubleshooting",
-                "inkbox:inkbox-imessage-responder",
-            ],
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
             timestamp=timestamp,
         )
         # A "question" tapback usually expects a reply, so show the typing
@@ -3441,13 +3548,17 @@ class InkboxAdapter(BasePlatformAdapter):
                 chat_topic="voice_call",
                 message_id=f"call:{call_id}:opening",
             )
+            channel_prompt, auto_skill = self._resolve_channel_overrides(
+                "voice", contact_id, "inkbox:inkbox-troubleshooting"
+            )
             event = MessageEvent(
                 text=tagged,
                 message_type=MessageType.TEXT,
                 source=source,
                 raw_message={"synthetic": "outbound_call_opening"},
                 message_id=f"call:{call_id}:opening",
-                auto_skill="inkbox:inkbox-troubleshooting",
+                channel_prompt=channel_prompt,
+                auto_skill=auto_skill,
             )
             try:
                 await self._enqueue(event)
@@ -3517,13 +3628,17 @@ class InkboxAdapter(BasePlatformAdapter):
                         f"[inkbox:voice_call call_id={call_id} | {contact_block}]\n"
                         f"{purpose_block}{text}"
                     )
+                    channel_prompt, auto_skill = self._resolve_channel_overrides(
+                        "voice", contact_id, "inkbox:inkbox-troubleshooting"
+                    )
                     event = MessageEvent(
                         text=tagged,
                         message_type=MessageType.TEXT,
                         source=source,
                         raw_message=payload,
                         message_id=f"call:{call_id}:{payload.get('turn_id') or ''}",
-                        auto_skill="inkbox:inkbox-troubleshooting",
+                        channel_prompt=channel_prompt,
+                        auto_skill=auto_skill,
                     )
                     await self._enqueue(event)
                 elif ev == "stop":
@@ -3583,13 +3698,17 @@ class InkboxAdapter(BasePlatformAdapter):
                     chat_topic="voice_call",
                     message_id=f"call:{call_id}:ended",
                 )
+                channel_prompt, auto_skill = self._resolve_channel_overrides(
+                    "voice", contact_id, "inkbox:inkbox-troubleshooting"
+                )
                 event = MessageEvent(
                     text=tagged,
                     message_type=MessageType.TEXT,
                     source=source,
                     raw_message={"synthetic": "call_ended"},
                     message_id=f"call:{call_id}:ended",
-                    auto_skill="inkbox:inkbox-troubleshooting",
+                    channel_prompt=channel_prompt,
+                    auto_skill=auto_skill,
                 )
                 await self._enqueue(event)
                 logger.info(
@@ -3748,6 +3867,9 @@ class InkboxAdapter(BasePlatformAdapter):
             chat_topic="voice_call",
             message_id=f"call:{meta.call_id}:ended",
         )
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "voice", meta.contact_id, "inkbox:inkbox-call-review"
+        )
         event = MessageEvent(
             text=body,
             message_type=MessageType.TEXT,
@@ -3755,7 +3877,8 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_message={"event": "realtime_call_ended", "transcript": transcript},
             message_id=f"call:{meta.call_id}:ended",
             reply_to_message_id=meta.call_id,
-            auto_skill="inkbox:inkbox-call-review",
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
         )
         try:
             await self._enqueue(event)

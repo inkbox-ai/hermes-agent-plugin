@@ -49,7 +49,8 @@ if "gateway.config" not in sys.modules:
         media_urls: list[str] = field(default_factory=list)
         media_types: list[str] = field(default_factory=list)
         metadata: dict[str, Any] = field(default_factory=dict)
-        auto_skill: str | None = None
+        auto_skill: "str | list[str] | None" = None
+        channel_prompt: str | None = None
         source: Any = None
         raw_message: dict[str, Any] | None = None
         reply_to_message_id: str | None = None

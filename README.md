@@ -234,6 +234,37 @@ After the gateway starts:
 | `INKBOX_REALTIME_CONNECT_TIMEOUT_S` | no | `8` | Seconds to wait for OpenAI Realtime preflight before falling back or failing. |
 | `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
 
+## Channel Overrides
+
+Two optional blocks under the `inkbox:` platform config tailor the agent per
+channel without editing `SOUL.md` or the bundled skills. Both are keyed by
+**modality** (`email`, `sms`, `imessage`, `voice`) or by a specific **Inkbox
+contact id**, with the contact id taking precedence.
+
+- `channel_prompts` — an ephemeral system prompt injected on that channel's turns
+  (e.g. an overview the agent should lead with, or a tone instruction).
+- `channel_skill_bindings` — extra skills auto-loaded on a new session for that
+  channel. These are **merged on top of** the built-in per-channel defaults, so
+  the responder/troubleshooting skills are never dropped.
+
+```yaml
+inkbox:
+  channel_prompts:
+    imessage: "You are the Inkbox concierge. Give a one-line overview of Inkbox
+      (email, phone, and identities for AI agents) and offer a quick live demo."
+    voice: "Keep replies to one short spoken sentence."
+  channel_skill_bindings:
+    - id: imessage
+      skills: ["inkbox:inkbox-outreach-sequence"]
+    - id: voice
+      skill: "inkbox:inkbox-outbound-calling"   # single-name shorthand
+```
+
+Built-in defaults that always load (before merge): `inkbox:inkbox-troubleshooting`
+on every channel, plus `inkbox:inkbox-imessage-responder` on iMessage and
+`inkbox:inkbox-call-review` on realtime call wrap-up. Skill names use the
+qualified `inkbox:<skill>` form.
+
 ## Tools
 
 Hermes direct tools:

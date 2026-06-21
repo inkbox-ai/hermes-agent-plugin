@@ -694,7 +694,8 @@ def test_adapter_realtime_call_ended_enqueues_reflection():
     assert "[call_ended]" in events[0].text
     assert "Can you email me after this call?" in events[0].text
     assert events[0].raw_message["event"] == "realtime_call_ended"
-    assert events[0].auto_skill == "inkbox:inkbox-call-review"
+    # Channel-override resolution normalizes auto_skill to a deduped list.
+    assert events[0].auto_skill == ["inkbox:inkbox-call-review"]
 
 
 def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
