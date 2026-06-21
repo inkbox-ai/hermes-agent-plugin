@@ -110,6 +110,12 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
             extra[target] = platform_cfg[source]
     if "realtime" in platform_cfg and "realtime" not in extra:
         extra["realtime"] = platform_cfg["realtime"]
+    # Per-channel overrides: an ephemeral system prompt and/or extra skills to
+    # auto-load, keyed by Inkbox modality or contact id. Passed straight through
+    # to config.extra so the adapter can resolve them per inbound event.
+    for passthrough in ("channel_prompts", "channel_skill_bindings"):
+        if passthrough in platform_cfg and passthrough not in extra:
+            extra[passthrough] = platform_cfg[passthrough]
     return extra or None
 
 
