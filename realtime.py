@@ -20,7 +20,7 @@ The bridge:
    ``media`` frames carrying ``response.audio.delta`` payloads.
 4. Exposes realtime-only tools to the model:
 
-   - ``hermes_agent_consult`` — dispatches a synthetic SMS-mode turn through
+   - ``consult_agent`` — dispatches a synthetic SMS-mode turn through
      Hermes' main agent loop *in the background* and submits the agent's reply
      as the tool result so the realtime model can speak it. It runs off the
      audio pump so the model can keep talking (filler, small talk, barge-in)
@@ -63,7 +63,7 @@ DEFAULT_VOICE = "cedar"
 AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
 INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
-AGENT_CONSULT_TOOL_NAME = "hermes_agent_consult"
+AGENT_CONSULT_TOOL_NAME = "consult_agent"
 POST_CALL_ACTION_TOOL_NAME = "register_post_call_action"
 EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action"
 DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action"
@@ -72,7 +72,7 @@ HANG_UP_CALL_TOOL_NAME = "hang_up_call"
 # How long to wait for the agent_consult tool to complete before giving up and
 # returning an error tool result. The realtime model is sitting idle while this
 # runs; longer values risk dead air, shorter values cut off legitimate work.
-DEFAULT_CONSULT_TIMEOUT_S = 60.0
+DEFAULT_CONSULT_TIMEOUT_S = 300.0
 
 # A hang_up_call is a two-step confirm: the first call arms the hangup and asks
 # the model to say goodbye; a second call within this window actually ends the
@@ -331,7 +331,7 @@ class _BridgeState:
     # Monotonic timestamp of the first hang_up_call ("armed"). A second call
     # within HANGUP_CONFIRM_WINDOW_S fires the real hangup. None = not yet armed.
     hangup_armed_at: Optional[float] = None
-    # In-flight hermes_agent_consult dispatches. The consult tool runs the full
+    # In-flight consult_agent dispatches. The consult tool runs the full
     # main agent loop (seconds), so it is dispatched as a background task to keep
     # the OpenAI→Inkbox audio pump flowing; we track the tasks here so they can
     # be cancelled when the call tears down.
@@ -474,7 +474,7 @@ def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
 
 
 # Type alias for the agent-consult callback. The bridge calls this when the
-# realtime model invokes hermes_agent_consult; the platform supplies an
+# realtime model invokes consult_agent; the platform supplies an
 # implementation that runs a synthetic SMS-mode turn through the main agent
 # and returns the agent's reply as plain text.
 AgentConsultCallback = Callable[
@@ -893,7 +893,7 @@ async def _openai_to_inkbox_pump(
             on_agent_consult=on_agent_consult,
             inkbox_ws=inkbox_ws,
         )
-        # hermes_agent_consult runs the full main agent loop, which can take many
+        # consult_agent runs the full main agent loop, which can take many
         # seconds. Awaiting it inline here would block this read loop for the
         # whole consult — no audio deltas (not even the "one moment" filler) and
         # no barge-in would reach the caller, so the agent appears to go silent.
