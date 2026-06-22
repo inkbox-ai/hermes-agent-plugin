@@ -183,7 +183,7 @@ def test_session_update_exposes_post_call_edit_and_delete_tools():
 
     tool_names = [tool["name"] for tool in ws.sent[0]["session"]["tools"]]
     assert tool_names == [
-        "hermes_agent_consult",
+        "consult_agent",
         POST_CALL_ACTION_TOOL_NAME,
         EDIT_POST_CALL_ACTION_TOOL_NAME,
         DELETE_POST_CALL_ACTION_TOOL_NAME,
@@ -583,7 +583,7 @@ def test_agent_consult_records_result_and_guides_post_call_cleanup():
     asyncio.run(_dispatch_tool_call(
         openai_ws=openai_ws,
         call_id="consult-call",
-        name="hermes_agent_consult",
+        name="consult_agent",
         arguments_json=json.dumps({"query": 'Send SMS to +15555550101 "hello alex" now'}),
         state=state,
         config=RealtimeConfig(enabled=True, api_key="sk-test"),
@@ -627,7 +627,7 @@ def test_agent_consult_dedupes_completed_same_sms_request():
     asyncio.run(_dispatch_tool_call(
         openai_ws=openai_ws,
         call_id="consult-dupe",
-        name="hermes_agent_consult",
+        name="consult_agent",
         arguments_json=json.dumps({"query": 'Please text +15555550101 "hello alex"'}),
         state=state,
         config=RealtimeConfig(enabled=True, api_key="sk-test"),
@@ -664,7 +664,7 @@ def test_agent_consult_allows_explicit_repeat_sms_request():
     asyncio.run(_dispatch_tool_call(
         openai_ws=openai_ws,
         call_id="consult-repeat",
-        name="hermes_agent_consult",
+        name="consult_agent",
         arguments_json=json.dumps({"query": 'Send another text to +15555550101 "hello alex"'}),
         state=state,
         config=RealtimeConfig(enabled=True, api_key="sk-test"),

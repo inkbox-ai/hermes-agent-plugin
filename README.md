@@ -158,7 +158,7 @@ export INKBOX_REALTIME_ENABLED=false
 hermes gateway restart
 ```
 
-Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime model has direct access to `hermes_agent_consult`, `register_post_call_action`, `edit_post_call_action`, `delete_post_call_action`, and `hang_up_call`.
+Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime model has direct access to `consult_agent`, `register_post_call_action`, `edit_post_call_action`, `delete_post_call_action`, and `hang_up_call`.
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
@@ -289,7 +289,7 @@ Hermes direct tools:
 
 Realtime-only call tools:
 
-- `hermes_agent_consult`
+- `consult_agent`
 - `register_post_call_action`
 - `edit_post_call_action`
 - `delete_post_call_action`
