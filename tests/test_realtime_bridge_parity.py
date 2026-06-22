@@ -527,7 +527,7 @@ def test_hangup_second_call_sleeps_then_sends_frame_and_closes_sockets(monkeypat
     assert len(tool_results) == 2
     assert json.loads(tool_results[-1]["item"]["output"])["status"] == "hangup_requested"
     assert inkbox_ws.sent == [{
-        "event": "hangup",
+        "event": "stop",
         "reason": "caller said goodbye",
         "stream_id": "stream-123",
     }]
