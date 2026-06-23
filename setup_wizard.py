@@ -517,39 +517,38 @@ def _setup_signing_key(api_key: str, base_url: str, Inkbox: Any) -> None:
     print_info("  Inkbox signs outbound webhooks with an HMAC over the body.")
     print_info("  Without the matching key, the gateway cannot verify inbound Inkbox traffic.")
 
+    print_info("  A signing key is required to continue.")
+
     has_key = prompt_yes_no("  Do you already have an Inkbox signing key?", False)
     if has_key:
         key = prompt("  Paste your Inkbox signing key", password=True).strip()
-        if not key:
-            print_warning("  No key entered; leaving signature verification off.")
-            _save("INKBOX_REQUIRE_SIGNATURE", "false")
+        if key:
+            _save("INKBOX_SIGNING_KEY", key)
+            _save("INKBOX_REQUIRE_SIGNATURE", "true")
+            print_success("  Saved signing key. Signature verification enabled.")
             return
-        _save("INKBOX_SIGNING_KEY", key)
-        _save("INKBOX_REQUIRE_SIGNATURE", "true")
-        print_success("  Saved signing key. Signature verification enabled.")
-        return
+        # An empty paste can't satisfy the requirement — fall through to mint one.
+        print_warning("  No key entered; a signing key is required, so we'll mint one now.")
 
     print_info("  Minting a new key here rotates any existing key for your org.")
     print_info("  Any other gateway using the old key will fail verification until updated.")
     if not prompt_yes_no("  Generate a new signing key now?", True):
-        print_info("  Skipping; gateway will accept unsigned webhooks.")
-        print_info("  Generate later in the Inkbox console.")
-        _save("INKBOX_REQUIRE_SIGNATURE", "false")
-        return
+        print_error("  A signing key is required; cannot complete setup without one.")
+        print_info("  Re-run setup and paste an existing key, or allow key generation.")
+        raise SystemExit(1)
 
     try:
         new_key = Inkbox(api_key=api_key, base_url=base_url).create_signing_key()
     except Exception as exc:
         print_error(f"  Failed to create signing key: {exc}")
-        print_info("  Leaving signature verification off; retry later in the Inkbox console.")
-        _save("INKBOX_REQUIRE_SIGNATURE", "false")
-        return
+        print_error("  A signing key is required; aborting setup. Retry, or paste an existing key.")
+        raise SystemExit(1)
 
     signing_key = str(getattr(new_key, "signing_key", "") or "")
     if not signing_key:
         print_error("  Signing-key response did not include signing_key.")
-        _save("INKBOX_REQUIRE_SIGNATURE", "false")
-        return
+        print_error("  A signing key is required; aborting setup.")
+        raise SystemExit(1)
     _save("INKBOX_SIGNING_KEY", signing_key)
     _save("INKBOX_REQUIRE_SIGNATURE", "true")
     created_at = getattr(new_key, "created_at", None)
