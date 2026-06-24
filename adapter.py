@@ -2966,12 +2966,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
     # ── iMessage typing indicator ──────────────────────────────────────────
     #
-    # iMessage typing indicators auto-expire client-side after a short window,
-    # so a single send_imessage_typing() would fade while the agent is still
-    # thinking. We refresh every IMESSAGE_TYPING_REFRESH_SECONDS until the
-    # reply goes out (or the turn fails), mirroring the "…" a human would see.
-
-    IMESSAGE_TYPING_REFRESH_SECONDS = 2.0
+    IMESSAGE_TYPING_REFRESH_SECONDS = 40.0
     # Safety cap so a turn that errors out before send() (and thus never
     # cancels the pulse) can't leave the indicator pulsing indefinitely.
     IMESSAGE_TYPING_MAX_SECONDS = 300.0
