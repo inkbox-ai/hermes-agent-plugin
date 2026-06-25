@@ -951,6 +951,7 @@ def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[
                 note_to_human=note,
                 agent_handle=handle,
                 base_url=base_url,
+                harness="hermes",  # tag which harness drove this signup
             )
             break
         except InkboxAPIError as exc:
