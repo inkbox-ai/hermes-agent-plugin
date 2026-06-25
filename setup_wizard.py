@@ -1471,10 +1471,14 @@ def interactive_setup() -> None:
 
     _seed_identity_state(identity)
     _print_agent_summary(identity)
-    _configure_realtime_calls(identity)
 
+    # Block on the START text right after the number + QR are shown, before
+    # moving on to realtime — otherwise the "text START" prompt and its
+    # blocking wait get split by the realtime questions and it looks skipped.
     if did_provision_phone:
         _wait_for_sms_opt_in(api_key, base_url, getattr(identity, "phone_number", None), Inkbox)
+
+    _configure_realtime_calls(identity)
 
     _configure_imessage(api_key, base_url, identity.agent_handle, Inkbox)
 
