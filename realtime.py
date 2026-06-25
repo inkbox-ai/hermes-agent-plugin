@@ -39,7 +39,6 @@ The shape mirrors Inkbox's channel-plugin ``RealtimeCallWebSocket``.
 from __future__ import annotations
 
 import asyncio
-import base64
 import inspect
 import json
 import logging
@@ -908,6 +907,20 @@ async def _openai_to_inkbox_pump(
         else:
             await coro
 
+    async def _relay_transcript(party: str, text: str) -> None:
+        # Realtime runs the WS in raw-media mode (OpenAI does STT/TTS, Inkbox
+        # does neither — see ``_prepare_call_ws`` in adapter.py), so the platform
+        # never records a transcript on its own. Mirror each finalized turn back
+        # as a client ``transcript`` event so it lands in the Inkbox call record.
+        # party: local=agent, remote=caller.
+        with suppress(Exception):
+            await inkbox_ws.send_str(json.dumps({
+                "event": "transcript",
+                "party": party,
+                "text": text,
+                "is_final": True,
+            }))
+
     async for msg in openai_ws:
         if state.closed:
             return
@@ -967,11 +980,13 @@ async def _openai_to_inkbox_pump(
             text = (frame.get("transcript") or "").strip()
             if text:
                 state.transcript.append(("agent", text))
+                await _relay_transcript("local", text)
 
         elif ftype == "conversation.item.input_audio_transcription.completed":
             text = (frame.get("transcript") or "").strip()
             if text:
                 state.transcript.append(("caller", text))
+                await _relay_transcript("remote", text)
 
         # Function-call item announced — capture name/call_id by item_id.
         elif ftype == "response.output_item.added":

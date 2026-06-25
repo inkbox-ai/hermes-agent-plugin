@@ -251,6 +251,44 @@ def test_openai_audio_frames_match_inkbox_media_protocol():
     assert {"event": "clear"} in inkbox_ws.sent
 
 
+def test_realtime_transcripts_are_mirrored_into_inkbox():
+    # Raw-media realtime means Inkbox runs no STT/TTS, so the platform records
+    # no transcript on its own. The pump must mirror each finalized turn back as
+    # a `transcript` event so it lands in the Inkbox call record.
+    inkbox_ws = _FakeWS()
+    openai_ws = _FakeOpenAIWS([
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "hey can you check the build"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "sure, the build is green"},
+    ])
+    state = _BridgeState()
+    state.stream_id = "stream-xyz"
+
+    async def _noop(*_args, **_kwargs):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=inkbox_ws,
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+
+    transcripts = [f for f in inkbox_ws.sent if f.get("event") == "transcript"]
+    assert transcripts == [
+        {"event": "transcript", "party": "remote", "text": "hey can you check the build", "is_final": True},
+        {"event": "transcript", "party": "local", "text": "sure, the build is green", "is_final": True},
+    ]
+    # And still collected in-memory for consult context / post-call reflection.
+    assert state.transcript == [
+        ("caller", "hey can you check the build"),
+        ("agent", "sure, the build is green"),
+    ]
+
+
 def test_ga_function_call_events_dispatch_once_with_buffered_name():
     state = _BridgeState()
     openai_ws = _FakeOpenAIWS([

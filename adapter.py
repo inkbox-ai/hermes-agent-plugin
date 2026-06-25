@@ -87,8 +87,14 @@ import socket as _socket
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    # Used only in forward-ref annotations (the module has `from __future__
+    # import annotations`); both are imported locally where actually called.
+    import threading
+    from pathlib import Path
 
 try:
     from aiohttp import WSMsgType, web
@@ -3765,7 +3771,7 @@ class InkboxAdapter(BasePlatformAdapter):
         moment" while it runs (see ``inkbox_realtime._dispatch_tool_call``).
         """
         prompt_lines = [
-            f"You are answering a question on behalf of an in-progress phone call.",
+            "You are answering a question on behalf of an in-progress phone call.",
             f"Caller: {meta.contact_name}"
             + (f" ({meta.remote_phone_number})" if meta.remote_phone_number else ""),
             f"Call direction: {meta.direction}",

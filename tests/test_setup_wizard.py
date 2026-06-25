@@ -23,6 +23,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "/tmp/hermes/venv/bin/python",
         "inkbox>=0.4.7",
         "aiohttp>=3.9",
+        "segno>=1.5",
     ]]
 
 
@@ -31,10 +32,10 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
 
     assert setup_wizard._install_commands() == [
-        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9"]],
+        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9", "segno>=1.5"]],
         [
             ["/tmp/hermes/venv/bin/python", "-m", "ensurepip", "--upgrade"],
-            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9"],
+            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.4.7", "aiohttp>=3.9", "segno>=1.5"],
         ],
     ]
 
@@ -338,6 +339,7 @@ def test_wait_for_imessage_first_message_greets_back(monkeypatch):
     ]
 
     monkeypatch.setattr(setup_wizard.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(setup_wizard, "_show_qr", lambda _data: True)
 
     setup_wizard._wait_for_imessage_first_message(client, identity, "agent")
 
@@ -345,6 +347,58 @@ def test_wait_for_imessage_first_message_greets_back(monkeypatch):
     assert identity.sent[0]["conversation_id"] == "imconv-123"
     assert "@agent" in identity.sent[0]["text"]
     assert identity.marked_read == ["imconv-123"]
+
+
+def test_sms_opt_in_qr_uses_smsto_scheme(monkeypatch):
+    identity = types.SimpleNamespace(
+        agent_handle="agent",
+        email_address="agent@inkbox.ai",
+        mailbox=None,
+        phone_number=types.SimpleNamespace(
+            number="+16614031457",
+            type="local",
+            sms_status=None,
+        ),
+    )
+
+    captured = {}
+    monkeypatch.setattr(
+        setup_wizard,
+        "_show_qr",
+        lambda data: captured.update(payload=data) or True,
+    )
+
+    setup_wizard._print_agent_summary(identity)
+
+    assert captured["payload"] == "SMSTO:+16614031457:START"
+
+
+def test_connect_qr_uses_smsto_scheme(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    identity = _FakeIMessageIdentity(enabled=True)
+    client = _FakeIMessageClient(identity)
+    identity._inbox = [
+        types.SimpleNamespace(
+            id="im-1",
+            direction="inbound",
+            conversation_id="imconv-1",
+            remote_number="+15555550101",
+            created_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        ),
+    ]
+
+    captured = {}
+    monkeypatch.setattr(
+        setup_wizard,
+        "_show_qr",
+        lambda data: captured.update(payload=data) or True,
+    )
+    monkeypatch.setattr(setup_wizard.time, "sleep", lambda _s: None)
+
+    setup_wizard._wait_for_imessage_first_message(client, identity, "agent")
+
+    assert captured["payload"] == "SMSTO:+15550009999:connect @agent"
 
 
 def test_configure_imessage_already_connected_defaults_to_skip(monkeypatch):
@@ -371,3 +425,76 @@ def test_configure_imessage_already_connected_defaults_to_skip(monkeypatch):
     )
 
     assert prompts == [("Connect another iPhone to this agent now?", False)]
+
+
+def test_avatar_auto_attached_on_signup(monkeypatch):
+    uploaded = {}
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda _base, _key, handle, image: (
+            uploaded.update(handle=handle, size=len(image)) or (True, "ok")
+        ),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt_yes_no",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no prompt on signup")),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "_identity_has_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no probe on signup")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=True)
+
+    assert uploaded["handle"] == "dev-agent"
+    assert uploaded["size"] > 0
+
+
+def test_avatar_skipped_when_existing_agent_already_has_one(monkeypatch):
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not upload")),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt_yes_no",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
+
+
+def test_avatar_offered_and_uploaded_for_existing_agent_without_one(monkeypatch):
+    uploaded = {}
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda _base, _key, handle, _image: uploaded.update(handle=handle) or (True, "ok"),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
+
+    assert uploaded["handle"] == "dev-agent"
+
+
+def test_avatar_declined_for_existing_agent(monkeypatch):
+    monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_upload_avatar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("declined should not upload")),
+    )
+
+    identity = types.SimpleNamespace(agent_handle="dev-agent")
+    setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
