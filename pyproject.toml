@@ -2,12 +2,32 @@
 name = "hermes-agent-plugin"
 version = "0.2.0"
 description = "Inkbox platform plugin for Hermes Agent"
-requires-python = ">=3.10"
+# inkbox>=0.4.7 requires Python 3.11+, so we can't claim 3.10 support.
+requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
   "inkbox>=0.4.7",
   "segno>=1.5",
 ]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "ruff>=0.11.0",
+]
+
+[tool.uv]
+# Flat-layout Hermes plugin loaded by the gateway, not a pip-installable
+# package — keep uv from trying to build/install the project itself.
+package = false
+
+[tool.ruff]
+line-length = 125
+
+[tool.ruff.lint.per-file-ignores]
+# Tests stub the Hermes `gateway.*` host modules into sys.modules before
+# importing the plugin, so imports legitimately sit below that setup.
+"tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
