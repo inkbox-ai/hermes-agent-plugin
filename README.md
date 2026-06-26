@@ -75,7 +75,7 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.4.7` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.4.10` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -96,13 +96,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.4.7' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.4.10' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.4.7' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.4.10' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.

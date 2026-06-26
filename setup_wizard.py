@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import importlib
+import importlib.metadata
 import json
 import os
 import re
@@ -57,7 +58,8 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_REQUIREMENTS = ("inkbox>=0.4.7", "aiohttp>=3.9", "segno>=1.5")
+INKBOX_MIN_VERSION = "0.4.10"
+INKBOX_REQUIREMENTS = (f"inkbox>={INKBOX_MIN_VERSION}", "aiohttp>=3.9", "segno>=1.5")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.png"
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
@@ -290,9 +292,44 @@ def _load_inkbox_symbols() -> dict[str, Any]:
     }
 
 
+def _parse_version(value: str) -> tuple[int, ...]:
+    # Best-effort numeric parse of "X.Y.Z" so we can compare without packaging.
+    parts: list[int] = []
+    for chunk in value.split("."):
+        digits = ""
+        for char in chunk:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        if digits == "":
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def _inkbox_version_ok() -> bool:
+    try:
+        installed = importlib.metadata.version("inkbox")
+    except Exception:
+        return False
+    try:
+        from packaging.version import Version
+
+        return Version(installed) >= Version(INKBOX_MIN_VERSION)
+    except Exception:
+        # Fall back to a simple parsed-tuple comparison when packaging is unavailable.
+        return _parse_version(installed) >= _parse_version(INKBOX_MIN_VERSION)
+
+
 def _ensure_inkbox_sdk() -> dict[str, Any] | None:
     try:
-        return _load_inkbox_symbols()
+        symbols = _load_inkbox_symbols()
+        if _inkbox_version_ok():
+            return symbols
+        first_error = (
+            f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
+        )
     except Exception as exc:
         first_error = exc
 
@@ -951,6 +988,7 @@ def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[
                 note_to_human=note,
                 agent_handle=handle,
                 base_url=base_url,
+                harness="hermes",
             )
             break
         except InkboxAPIError as exc:
