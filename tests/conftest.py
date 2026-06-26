@@ -7,7 +7,24 @@ from enum import Enum
 from typing import Any
 
 
-if "gateway.config" not in sys.modules:
+def _real_host_available() -> bool:
+    """True when the real Hermes host package is importable.
+
+    CI installs ``hermes-agent`` so the suite runs against the real ``gateway.*``
+    interface; locally (and in the offline unit job) the host is absent and we
+    fall back to the stub below. This is what lets the contract tests catch real
+    host drift instead of validating against a fiction.
+    """
+    try:
+        import gateway.config  # noqa: F401
+        import gateway.platforms.base  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+if not _real_host_available() and "gateway.config" not in sys.modules:
     gateway = types.ModuleType("gateway")
     gateway.__path__ = []
     sys.modules.setdefault("gateway", gateway)

@@ -92,6 +92,8 @@ def object_summary(obj: Any) -> Any:
         "agent_handle",
         "display_name",
         "email_address",
+        "mailbox",
+        "phone_number",
         "number",
         "type",
         "sms_status",

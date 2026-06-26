@@ -10,7 +10,7 @@
 </p>
 
 <p>
-  <code>Email</code> · <code>Calls</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Tunnel</code> · <code>Skills</code>
+  <code>Email</code> · <code>Calls</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Tunnel</code>
 </p>
 
 <br clear="left">
