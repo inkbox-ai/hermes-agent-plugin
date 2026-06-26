@@ -309,7 +309,6 @@ def _parse_version(value: str) -> tuple[int, ...]:
 
 
 def _inkbox_version_ok() -> bool:
-    # Treat an outdated SDK like a missing requirement so the install/upgrade path runs.
     try:
         installed = importlib.metadata.version("inkbox")
     except Exception:
@@ -989,7 +988,7 @@ def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[
                 note_to_human=note,
                 agent_handle=handle,
                 base_url=base_url,
-                harness="hermes",  # tag which harness drove this signup
+                harness="hermes",
             )
             break
         except InkboxAPIError as exc:
