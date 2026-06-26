@@ -16,6 +16,7 @@ Model is a local mock (`mock_openai.py`), so replies are deterministic.
 - **test_agent_emails_back** — remote emails the AUT; the reply is delivered back
   (tracked by thread_id), carries the mock marker, and has no error text. Proves the
   whole pipe: inbound -> routing -> agent loop -> tool send -> real delivery.
+- **test_sms_reachability** — same, over **SMS** (agent-to-agent, no opt-in needed).
 
 ## Real leg — intelligence (real gpt-5.5 via OpenAI direct)
 Model is real, so these prove the agent reasons + uses tools. Every expected value
@@ -29,6 +30,12 @@ is looked up live via the API keys — nothing hardcoded.
 - **test_aware_of_inkbox_tools** — lists its Inkbox tools; we assert it names the
   real tools from `plugin.yaml` — a non-LLM proof the tools are truly registered.
 
+`tests/live/test_sms.py` mirrors all of the above over **SMS** (basic, own
+identity, sender details, tools). Two Inkbox agents text each other with no START
+opt-in — servers bypasses the missing-opt-in gate for inter-agent traffic. Prompts
+ask for short replies to stay clear of carrier/spam filtering; questions never name
+a tool, so the agent must choose the right tool itself.
+
 ## Concurrency
 Only one client may hold the AUT's Inkbox tunnel at a time, so every live workflow
 shares the `inkbox-live-aut-tunnel` concurrency group and runs one at a time across
@@ -41,7 +48,8 @@ workflow uses **no** GitHub environment/deployment, so nothing lingers on GitHub
 either.
 
 ## Covered today / gaps
-**Covered (email):** reachability, the agent's self-knowledge, contact awareness,
-tool awareness.
-**Not yet:** SMS, iMessage, voice; cross-channel ("email me back via SMS");
+**Covered (email + SMS):** reachability, the agent's self-knowledge, contact
+awareness, and tool awareness — over both channels, with the agent choosing its
+tools autonomously.
+**Not yet:** iMessage, voice; cross-channel ("email me back via SMS");
 outbound-initiated flows; multi-turn. Same harness — next scenarios to add.
