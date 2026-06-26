@@ -10,8 +10,9 @@ permissions:
   contents: read
 
 jobs:
-  lint_and_tests:
-    # skip draft PRs; still run on every push to main (no PR context there)
+  # Offline unit suite + lint. No Hermes host installed → conftest stubs gateway.*
+  # and the contract tests auto-skip. Fast signal on our own code.
+  unit:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     strategy:
@@ -42,3 +43,26 @@ jobs:
 
       - name: Run unit tests
         run: uv run pytest -v
+
+  # Contract suite against the REAL Hermes host at main. This is the lane that
+  # catches upstream interface drift (a renamed register_platform kwarg, a moved
+  # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
+  contract:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install test deps + real Hermes host (main)
+        run: |
+          uv sync --extra test --python 3.12
+          uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
+
+      - name: Contract tests vs real Hermes main
+        run: uv run pytest tests/contract -v

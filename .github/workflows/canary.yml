@@ -1,0 +1,45 @@
+name: Canary — plugin vs Hermes main
+
+# Hermes main moves ~14 commits/day, so it can break us even when we don't push.
+# Run the host-interface contract tests against the latest Hermes main every 6h
+# and file (or refresh) a single issue when they break. Non-blocking: this never
+# gates a merge, it just gives us ~6h of lead time before users hit it.
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # every 6h, odd minute, UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install test deps + real Hermes host (main)
+        run: |
+          uv sync --extra test --python 3.12
+          uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
+
+      - name: Contract tests vs real Hermes main
+        run: uv run pytest tests/contract -v
+
+      - name: Open/refresh issue on failure
+        if: failure()
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          filename: .github/canary-failure.md
+          update_existing: true
+          search_existing: open
