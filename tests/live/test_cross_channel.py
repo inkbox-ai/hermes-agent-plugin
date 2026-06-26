@@ -8,7 +8,15 @@ the request.
   * email -> SMS : email asks for a text; we poll SMS for the token.
   * SMS  -> email: SMS asks for an email; we poll email for the token.
 
-More channels (iMessage, voice) get added here. Real-model only.
+Voice is the odd one out: an unanswered call carries no token, so instead of
+matching content we assert that a *new inbound call from the AUT's number* lands
+on the driver's number within the window — proof the request reasoned its way to
+``inkbox_place_call`` and Inkbox actually dialed the driver.
+
+  * email -> call: email asks the agent to call; we poll the driver's calls.
+  * SMS   -> call: SMS asks the agent to call; we poll the driver's calls.
+
+More channels (iMessage) get added here. Real-model only.
 """
 
 from __future__ import annotations
@@ -143,3 +151,46 @@ def test_sms_request_gets_email_response(xc):
                 return  # cross-channel confirmed: SMS request -> email response with the token
         time.sleep(POLL_EVERY_S)
     pytest.fail(f"agent did not send an email containing {token!r} within {TIMEOUT_S:.0f}s")
+
+
+def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
+    """The driver's inbound calls originating from the AUT's number."""
+    tail = _digits(aut_phone)[-10:]
+    return [c for c in remote.calls.list(remote_pid, limit=30)
+            if (getattr(c, "direction", "") or "").lower() == "inbound"
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
+
+
+def _wait_for_new_call(remote, remote_pid: str, aut_phone: str, before: set):
+    """Block until an inbound call from the AUT with an id not in ``before`` appears.
+
+    ``before`` is the pre-request snapshot, so a stale call can't satisfy the
+    assertion — same new-id correlation the SMS/email legs use. Fails on timeout.
+    """
+    deadline = time.monotonic() + TIMEOUT_S
+    while time.monotonic() < deadline:
+        for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone):
+            if c.id not in before:
+                return  # a fresh call from the AUT landed on the driver's number
+        time.sleep(POLL_EVERY_S)
+    pytest.fail(f"agent did not place a call to the driver within {TIMEOUT_S:.0f}s")
+
+
+def test_email_request_gets_call(xc):
+    """Email asks the agent to CALL; a new inbound call must land on the driver."""
+    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
+    # Snapshot BEFORE sending so a pre-existing call can't be mistaken for the reply.
+    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+    remote.messages.send(
+        xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
+        body_text="Please place a phone call to my number now — I'd rather talk than type.",
+    )
+    _wait_for_new_call(remote, remote_pid, aut_phone, before)
+
+
+def test_sms_request_gets_call(xc):
+    """SMS asks the agent to CALL; a new inbound call must land on the driver."""
+    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
+    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+    remote.texts.send(remote_pid, to=aut_phone, text="Call me please — give me a ring now.")
+    _wait_for_new_call(remote, remote_pid, aut_phone, before)
