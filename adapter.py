@@ -1316,7 +1316,7 @@ class InkboxAdapter(BasePlatformAdapter):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self, is_reconnect: bool = False, **kwargs) -> bool:
         if not check_inkbox_requirements():
             logger.warning(
                 "[Inkbox] aiohttp or `inkbox` SDK not installed. "
