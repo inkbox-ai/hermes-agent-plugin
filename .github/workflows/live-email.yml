@@ -102,13 +102,16 @@ jobs:
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '120' }}
         run: |
-          uvx --with 'inkbox>=0.4.7' --with pytest pytest tests/live -v
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
+          "$PY" -m pytest tests/live -v
 
       - name: Gateway log + spy (always)
         if: always()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== send spy ==="; cat "$SPY_FILE" || true
+          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
 
       - name: Upload artifacts
