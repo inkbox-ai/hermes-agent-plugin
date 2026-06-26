@@ -6,6 +6,8 @@ name: Live — agent emails back
 #   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
 # Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
 on:
+  push:
+    branches: [ci/host-contract-and-canary]   # TEMP: iterate; remove before merge
   workflow_dispatch:
     inputs:
       timeout_s:
@@ -129,11 +131,12 @@ jobs:
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
+          "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
+          # One email suite; per-test gating selects what runs in each leg.
           if [ "${{ matrix.mode }}" = "real" ]; then
-            LIVE_REAL_MODEL=1 "$PY" -m pytest tests/live/test_email_intelligence.py -v
+            LIVE_REAL_MODEL=1 "$PY" -m pytest tests/live -v
           else
-            "$PY" -m pytest tests/live/test_email_reply.py -v
+            "$PY" -m pytest tests/live -v
           fi
 
       - name: Logs (always)

@@ -35,8 +35,8 @@ POLL_EVERY_S = 5.0
 ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback")
 
 pytestmark = pytest.mark.skipif(
-    not (REMOTE_KEY and AUT_KEY),
-    reason="needs REMOTE_INKBOX_API_KEY + HERMES_INKBOX_API_KEY (live two-identity test)",
+    not (REMOTE_KEY and AUT_KEY) or os.environ.get("LIVE_REAL_MODEL") == "1",
+    reason="mock-model reachability test (needs both keys; skipped in real-model mode)",
 )
 
 
