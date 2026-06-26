@@ -5,6 +5,8 @@ name: Live — agent emails back
 # Live + non-deterministic + spends tokens, so: scheduled + manual only, behind the
 # `live` environment (required reviewers inject the secrets), never gates a merge.
 on:
+  push:
+    branches: [ci/host-contract-and-canary]   # TEMP: iterate before merge; remove before merging
   workflow_dispatch:
     inputs:
       model:
