@@ -1,7 +1,7 @@
 """Live SMS suite — the same questions as the email suite, over real SMS.
 
-SMS differs from email: the remote must opt in (it texts ``START`` to the AUT
-first, because the direct ``opt_in()`` API is campaign-gated), and outbound SMS is
+SMS differs from email: the remote must opt in (agent-to-agent SMS skips the
+START opt-in — servers bypasses it for inter-agent traffic), and outbound SMS is
 subject to carrier + spam filtering — so prompts ask for SHORT replies and avoid
 spammy content.
 
@@ -58,13 +58,10 @@ def sms():
     remote = _client(REMOTE_KEY)
     aut = _client(AUT_KEY)
     aut_phone, _aut_pid = _phone(aut)
-    remote_phone, remote_pid = _phone(remote)
-    # Opt in: the remote texts START to the AUT so the AUT is allowed to text back.
-    try:
-        remote.texts.send(remote_pid, to=aut_phone, text="START")
-    except Exception:
-        pass
-    time.sleep(12)  # let the opt-in register server-side
+    _remote_phone, remote_pid = _phone(remote)
+    # No opt-in/START needed: servers bypasses the missing-opt-in gate for
+    # inter-agent traffic (recipient is a Telnyx-owned Inkbox number) — see
+    # send_text_service.py. Only an explicit STOP/opt-out would block.
     return {"remote": remote, "aut": aut, "aut_phone": aut_phone, "remote_pid": remote_pid}
 
 
