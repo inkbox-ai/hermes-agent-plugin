@@ -2,8 +2,8 @@ name: Canary — plugin vs Hermes main
 
 # Hermes main moves ~14 commits/day, so it can break us even when we don't push.
 # Run the host-interface contract tests against the latest Hermes main twice a day
-# and file (or refresh) a single issue when they break. The live channel suite
-# chains off this run, so the canary leads and live follows on the same cadence.
+# and post one Google Chat message with the result (pass or fail). The live channel
+# suite chains off this run, so the canary leads and live follows on the same cadence.
 on:
   schedule:
     # 2x/day at 8 AM and 8 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC).
@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   canary:
@@ -35,13 +34,11 @@ jobs:
       - name: Contract tests vs real Hermes main
         run: uv run pytest tests/contract -v
 
-      - name: Open/refresh issue on failure
-        if: failure()
-        uses: JasonEtco/create-an-issue@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          filename: .github/canary-failure.md
-          update_existing: true
-          search_existing: open
+      # One Google Chat message at the end of the run, pass or fail. job.status is
+      # 'success' only if the contract step passed; anything else → failure label.
+      - name: Notify Google Chat (canary result)
+        if: always()
+        run: |
+          curl -s -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": "${{ job.status == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}'

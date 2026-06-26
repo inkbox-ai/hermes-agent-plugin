@@ -164,3 +164,16 @@ jobs:
             ${{ runner.temp }}/send_spy.jsonl
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
+
+  # One Google Chat message for the WHOLE suite once both legs finish (pass or fail).
+  # needs.live.result aggregates the matrix: 'success' only if every leg passed.
+  notify:
+    needs: [live]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Google Chat (live suite result)
+        run: |
+          curl -s -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": "${{ needs.live.result == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}'
