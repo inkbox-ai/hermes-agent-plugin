@@ -2,8 +2,8 @@ name: Live — agent channels (email + SMS)
 
 # Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin, then a
 # remote Inkbox identity emails it and waits for a reply. Two matrix legs:
-#   mock — deterministic mock model; proves the pipe (per-PR, free).
-#   real — real OpenAI key; proves the agent actually reasons (tokens).
+#   mock — deterministic mock model; proves the pipe (no token spend).
+#   real — real OpenAI key; proves the agent actually reasons (spends tokens).
 # Runs on every PR into main AND on the 2x/day schedule; the repo-wide tunnel lock
 # below serializes them all. Ephemeral runner: gateway + mock torn down on job end.
 on:
@@ -17,9 +17,9 @@ on:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  # Also runs right AFTER the canary completes — the host is freshly checked and the
-  # two share the canary's 2x/day cadence. (workflow_run fires from the default
-  # branch only, i.e. on main after merge.)
+  # Also runs right AFTER the canary completes — but the job below only proceeds if
+  # that canary PASSED, so live and the host stay in lock-step on the 2x/day cadence.
+  # (workflow_run fires from the default branch only, i.e. on main after merge.)
   workflow_run:
     workflows: ["Canary — plugin vs Hermes main"]
     types: [completed]
@@ -37,10 +37,14 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
-    # Skip on fork PRs: a public repo doesn't expose secrets to forks, so the live
-    # tests can't auth. Same-repo PRs + schedule + dispatch all run (and queue on the
-    # shared tunnel lock above).
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Two guards:
+    #  - Skip fork PRs: a public repo doesn't expose secrets to forks → can't auth.
+    #  - When chained off the canary, only run if that canary PASSED. Never take the
+    #    tunnel or burn tokens against a host we already know is broken.
+    # Same-repo PRs + dispatch + a green canary all run (and queue on the lock above).
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → must run one at a time
@@ -53,7 +57,7 @@ jobs:
       - name: Set up env paths (HERMES_HOME, spy, log)
         run: |
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
-          echo "SPY_FILE=$RUNNER_TEMP/send_spy.jsonl" >> "$GITHUB_ENV"
+          echo "SPY_FILE=$RUNNER_TEMP/send_intents.jsonl" >> "$GITHUB_ENV"
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
       - name: Install Hermes (non-interactive)
@@ -142,7 +146,7 @@ jobs:
         env:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
-          INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
+          INKBOX_SPY_FILE: ${{ runner.temp }}/send_intents.jsonl
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
@@ -154,24 +158,33 @@ jobs:
             "$PY" -m pytest tests/live -v
           fi
 
-      - name: Logs (always)
-        if: always()
+      # PUBLIC repo: these logs carry live phone/email/message content, so we only
+      # DUMP them to the (world-readable) job log on failure — never on a green run.
+      - name: Dump logs (on failure only)
+        if: failure()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
-          echo "=== send spy ==="; cat "$SPY_FILE" || true
+          echo "=== send intents ==="; cat "$SPY_FILE" || true
           echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
           echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
-      - name: Upload artifacts
-        if: always()
+      # Failure only + short retention: keep debug data when something breaks, leave
+      # no live-channel content sitting in artifacts after a green run.
+      - name: Upload artifacts (on failure only)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: live-logs-${{ matrix.mode }}
+          retention-days: 5
           path: |
             ${{ runner.temp }}/gateway.log
-            ${{ runner.temp }}/send_spy.jsonl
+            ${{ runner.temp }}/send_intents.jsonl
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
 
@@ -185,7 +198,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Notify Google Chat (live suite result)
+        # Non-blocking: a flaky webhook must never flip the suite result.
         run: |
-          curl -s -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
-            -d '{"text": "${{ needs.live.result == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}'
+            -d '{"text": "${{ needs.live.result == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true

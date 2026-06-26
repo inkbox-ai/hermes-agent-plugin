@@ -38,7 +38,9 @@ jobs:
       # 'success' only if the contract step passed; anything else → failure label.
       - name: Notify Google Chat (canary result)
         if: always()
+        # Non-blocking: this step runs in-job, so a flaky webhook must not flip a
+        # green contract run to red. --retry for transient errors, || true to swallow.
         run: |
-          curl -s -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
-            -d '{"text": "${{ job.status == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}'
+            -d '{"text": "${{ job.status == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
