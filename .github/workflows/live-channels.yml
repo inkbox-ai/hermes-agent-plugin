@@ -11,11 +11,12 @@ on:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  schedule:
-    # 2x/day at 8 AM and 8 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC and
-    # cannot follow DST, so in winter these land at 7 AM / 7 PM PT).
-    - cron: "13 15 * * *"   # 08:00 PT
-    - cron: "13 3 * * *"    # 20:00 PT
+  # Always runs right AFTER the canary completes — the host is freshly checked and
+  # the two share the canary's 2x/day cadence. (workflow_run fires from the default
+  # branch only, i.e. on main after merge.)
+  workflow_run:
+    workflows: ["Canary — plugin vs Hermes main"]
+    types: [completed]
 
 permissions:
   contents: read

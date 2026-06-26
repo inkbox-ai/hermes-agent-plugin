@@ -1,12 +1,14 @@
 name: Canary — plugin vs Hermes main
 
 # Hermes main moves ~14 commits/day, so it can break us even when we don't push.
-# Run the host-interface contract tests against the latest Hermes main every 6h
-# and file (or refresh) a single issue when they break. Non-blocking: this never
-# gates a merge, it just gives us ~6h of lead time before users hit it.
+# Run the host-interface contract tests against the latest Hermes main twice a day
+# and file (or refresh) a single issue when they break. The live channel suite
+# chains off this run, so the canary leads and live follows on the same cadence.
 on:
   schedule:
-    - cron: "17 */6 * * *"   # every 6h, odd minute, UTC
+    # 2x/day at 8 AM and 8 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC).
+    - cron: "13 15 * * *"   # 08:00 PT
+    - cron: "13 3 * * *"    # 20:00 PT
   workflow_dispatch: {}
 
 permissions:
