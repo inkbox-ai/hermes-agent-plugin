@@ -54,7 +54,7 @@ jobs:
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          MODEL: ${{ inputs.model || 'gpt-4o-mini' }}
+          MODEL: ${{ github.event.inputs.model || 'gpt-4o-mini' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           # discover the AUT handle from its key
@@ -98,7 +98,7 @@ PYEOF
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
-          LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '120' }}
+          LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '120' }}
         run: |
           uvx --with 'inkbox>=0.4.7' --with pytest pytest tests/live -v
 
