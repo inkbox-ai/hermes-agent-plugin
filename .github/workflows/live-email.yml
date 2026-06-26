@@ -52,12 +52,10 @@ jobs:
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5'
 
-      - name: Configure AUT identity + model
+      - name: Configure AUT identity + model (mock OpenAI)
         env:
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          MODEL: ${{ github.event.inputs.model || 'gpt-4o-mini' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           HANDLE="$("$PY" - <<'PYEOF'
@@ -68,17 +66,30 @@ jobs:
           PYEOF
           )"
           echo "AUT handle: $HANDLE"
+          # Point the agent's OpenAI calls at the local deterministic mock (no real
+          # key, no tokens, no flakiness). The mock returns a canned reply, so this
+          # exercises the whole real pipeline without depending on a live LLM.
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
-            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+            echo "OPENAI_API_KEY=sk-mock-not-used"
+            echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
           } >> "$HERMES_HOME/.env"
-          # FIRST-RUN: confirm these provider/model keys are right for an OpenAI API key.
           hermes config set model.provider openai-api || true
-          hermes config set model.default "$MODEL" || true
-          hermes config show 2>/dev/null | grep -iE "model|provider" || true
+          hermes config set model.default mock-model || true
+
+      - name: Start mock OpenAI model
+        run: |
+          nohup "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            "$GITHUB_WORKSPACE/tests/live/mock_openai.py" 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/mock.pid"
+          for i in $(seq 1 10); do
+            curl -sf http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
+            sleep 1
+          done
+          echo "::error::mock model did not start"; cat "$RUNNER_TEMP/mock.log"; exit 1
 
       - name: Start gateway (with send-spy) and wait for readiness
         run: |
@@ -111,8 +122,10 @@ jobs:
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== send spy ==="; cat "$SPY_FILE" || true
+          echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" || true
           echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
       - name: Upload artifacts
         if: always()
