@@ -1,4 +1,4 @@
-name: Linter and Unit Tests
+name: PR checks — lint · unit · contract
 
 on:
   push:
@@ -47,7 +47,8 @@ jobs:
   # Contract suite against the REAL Hermes host at main. This is the lane that
   # catches upstream interface drift (a renamed register_platform kwarg, a moved
   # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
-  contract:
+  # Same suite the canary runs on a schedule; this is the per-PR gate version.
+  contract-pr:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
 

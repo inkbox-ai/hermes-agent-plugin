@@ -60,7 +60,7 @@ def _spy_recorded_email_to(address: str) -> bool:
     return False
 
 
-def test_agent_emails_back():
+def test_email_reachability():
     from inkbox import Inkbox
     from inkbox.mail.types import MessageDirection
 

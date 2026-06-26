@@ -13,7 +13,7 @@ picks what runs per leg). Never gates a merge; manual + weekly.
 
 ## Mock leg — reachability (deterministic, free)
 Model is a local mock (`mock_openai.py`), so replies are deterministic.
-- **test_agent_emails_back** — remote emails the AUT; the reply is delivered back
+- **test_email_reachability** — remote emails the AUT; the reply is delivered back
   (tracked by thread_id), carries the mock marker, and has no error text. Proves the
   whole pipe: inbound -> routing -> agent loop -> tool send -> real delivery.
 - **test_sms_reachability** — same, over **SMS** (agent-to-agent, no opt-in needed).
