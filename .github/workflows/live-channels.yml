@@ -4,12 +4,15 @@ name: Live — agent channels (email + SMS)
 # remote Inkbox identity emails it and waits for a reply. Two matrix legs:
 #   mock — deterministic mock model; proves the pipe (no token spend).
 #   real — real OpenAI key; proves the agent actually reasons (spends tokens).
-# Runs on every PR into main AND on the 2x/day schedule; the repo-wide tunnel lock
-# below serializes them all. Ephemeral runner: gateway + mock torn down on job end.
+# This suite is expensive (real gateway + tunnel + OpenAI tokens), so on PRs it runs
+# only once the PR is READY (non-draft) — the job `if` gates on draft==false, and
+# `ready_for_review` makes flipping a draft to ready fire it. Also runs on the 2x/day
+# schedule; the repo-wide tunnel lock below serializes them all. Ephemeral runner:
+# gateway + mock torn down on job end.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       timeout_s:
@@ -34,13 +37,14 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
-    # Two guards:
+    # Three guards:
     #  - Skip fork PRs: a public repo doesn't expose secrets to forks → can't auth.
+    #  - Skip DRAFT PRs: this suite is expensive — only spend on ready-for-review PRs.
     #  - When chained off the canary, only run if that canary PASSED. Never take the
     #    tunnel or burn tokens against a host we already know is broken.
-    # Same-repo PRs + dispatch + a green canary all run (and queue on the lock above).
+    # Ready same-repo PRs + dispatch + a green canary all run (and queue on the lock).
     if: >-
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false)) &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     strategy:
       fail-fast: false
