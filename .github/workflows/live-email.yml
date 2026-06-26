@@ -83,7 +83,7 @@ jobs:
               echo "OPENAI_BASE_URL=https://api.openai.com/v1"
             } >> "$HERMES_HOME/.env"
             hermes config set model.provider openai-api || true
-            hermes config set model.default gpt-4o-mini || true
+            hermes config set model.default gpt-5.5 || true
           else
             {
               echo "OPENAI_API_KEY=sk-mock-not-used"
