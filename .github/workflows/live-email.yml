@@ -6,15 +6,16 @@ name: Live — agent channels (email + SMS)
 #   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
 # Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
 on:
-  push:
-    branches: [ci/host-contract-and-canary]   # TEMP: iterate; remove before merge
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
   schedule:
-    - cron: "33 7 * * 1"   # weekly, Monday 07:33 UTC
+    # 2x/day at 8 AM and 8 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC and
+    # cannot follow DST, so in winter these land at 7 AM / 7 PM PT).
+    - cron: "13 15 * * *"   # 08:00 PT
+    - cron: "13 3 * * *"    # 20:00 PT
 
 permissions:
   contents: read

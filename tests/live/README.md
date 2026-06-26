@@ -36,6 +36,11 @@ opt-in — servers bypasses the missing-opt-in gate for inter-agent traffic. Pro
 ask for short replies to stay clear of carrier/spam filtering; questions never name
 a tool, so the agent must choose the right tool itself.
 
+`tests/live/test_cross_channel.py` tests **cross-channel** replies, correlated by a
+6-char token: an email asks the agent to *text* the token (poll SMS for it), and an
+SMS asks the agent to *email* the token (poll email for it). The agent must find the
+sender's other-channel address from the contact card. iMessage/voice get added here.
+
 ## Concurrency
 Only one client may hold the AUT's Inkbox tunnel at a time, so every live workflow
 shares the `inkbox-live-aut-tunnel` concurrency group and runs one at a time across
@@ -48,8 +53,7 @@ workflow uses **no** GitHub environment/deployment, so nothing lingers on GitHub
 either.
 
 ## Covered today / gaps
-**Covered (email + SMS):** reachability, the agent's self-knowledge, contact
-awareness, and tool awareness — over both channels, with the agent choosing its
-tools autonomously.
-**Not yet:** iMessage, voice; cross-channel ("email me back via SMS");
-outbound-initiated flows; multi-turn. Same harness — next scenarios to add.
+**Covered (email + SMS):** reachability, self-knowledge, contact awareness, tool
+awareness, and **cross-channel** (email->SMS, SMS->email) — with the agent choosing
+its tools and target channel autonomously.
+**Not yet:** iMessage, voice; outbound-initiated flows; multi-turn. Same harness.
