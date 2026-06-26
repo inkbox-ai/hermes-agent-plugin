@@ -34,11 +34,11 @@ Only one client may hold the AUT's Inkbox tunnel at a time, so every live workfl
 shares the `inkbox-live-aut-tunnel` concurrency group and runs one at a time across
 all triggers (PRs + the main schedule queue behind each other).
 
-## Cleanup
-`conftest.py` tears down after the suite (best-effort): deletes the `smoke-*` email
-threads in both mailboxes and any contact the suite seeded. To **keep** the
-artifacts (e.g. to inspect a run in the Inkbox console), dispatch the workflow with
-`keep_artifacts: true` (or set `LIVE_KEEP_ARTIFACTS=1`).
+## Artifacts (kept for debugging)
+The suite does **not** delete anything from Inkbox — the test emails and any
+contacts stay in the test identities so you can inspect a run in the console. The
+workflow uses **no** GitHub environment/deployment, so nothing lingers on GitHub
+either.
 
 ## Covered today / gaps
 **Covered (email):** reachability, the agent's self-knowledge, contact awareness,

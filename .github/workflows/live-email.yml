@@ -11,10 +11,6 @@ on:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-      keep_artifacts:
-        description: "Keep test emails + seeded contact (to inspect in the console)"
-        type: boolean
-        default: false
   schedule:
     - cron: "33 7 * * 1"   # weekly, Monday 07:33 UTC
 
@@ -134,7 +130,6 @@ jobs:
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
-          LIVE_KEEP_ARTIFACTS: ${{ github.event.inputs.keep_artifacts }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
