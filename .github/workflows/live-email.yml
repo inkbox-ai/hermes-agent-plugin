@@ -46,6 +46,7 @@ jobs:
 
       - name: Install plugin into the gateway
         run: |
+          mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
