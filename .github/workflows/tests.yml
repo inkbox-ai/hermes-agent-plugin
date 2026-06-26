@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   # Offline unit suite + lint. No Hermes host installed → conftest stubs gateway.*
-  # and the contract tests auto-skip. Fast signal on our own code.
+  # and the contract tests auto-skip. Fast signal on our own code — cheap enough to
+  # run on every push, including draft PRs (the heavy live suite is what we gate).
   unit:
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,7 +49,6 @@ jobs:
   # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
   # Same suite the canary runs on a schedule; this is the per-PR gate version.
   contract-pr:
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
 
     steps:
