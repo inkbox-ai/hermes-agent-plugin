@@ -3,16 +3,22 @@ name: Live — agent channels (email + SMS)
 # Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin, then a
 # remote Inkbox identity emails it and waits for a reply. Two matrix legs:
 #   mock — deterministic mock model; proves the pipe (per-PR, free).
-#   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
-# Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
+#   real — real OpenAI key; proves the agent actually reasons (tokens).
+# Runs on every PR into main AND on the 2x/day schedule; the repo-wide tunnel lock
+# below serializes them all. Ephemeral runner: gateway + mock torn down on job end.
 on:
+  # Every PR targeting main. Same-repo branches only — fork PRs get no secrets on a
+  # public repo, so the job below skips them (the tunnel lock still queues the rest).
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  # Always runs right AFTER the canary completes — the host is freshly checked and
-  # the two share the canary's 2x/day cadence. (workflow_run fires from the default
+  # Also runs right AFTER the canary completes — the host is freshly checked and the
+  # two share the canary's 2x/day cadence. (workflow_run fires from the default
   # branch only, i.e. on main after merge.)
   workflow_run:
     workflows: ["Canary — plugin vs Hermes main"]
@@ -31,6 +37,10 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
+    # Skip on fork PRs: a public repo doesn't expose secrets to forks, so the live
+    # tests can't auth. Same-repo PRs + schedule + dispatch all run (and queue on the
+    # shared tunnel lock above).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → must run one at a time
@@ -167,9 +177,11 @@ jobs:
 
   # One Google Chat message for the WHOLE suite once both legs finish (pass or fail).
   # needs.live.result aggregates the matrix: 'success' only if every leg passed.
+  # Only on unattended runs (schedule/dispatch) — on a PR you see the check inline,
+  # so no Chat spam. Skipped when 'live' itself was skipped (fork PR).
   notify:
     needs: [live]
-    if: always()
+    if: always() && needs.live.result != 'skipped' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Notify Google Chat (live suite result)
