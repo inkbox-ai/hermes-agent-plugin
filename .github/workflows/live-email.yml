@@ -3,7 +3,7 @@ name: Live — agent emails back
 # Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin and a
 # real OpenAI model, then a remote Inkbox identity emails it and waits for a reply.
 # Live + non-deterministic + spends tokens, so: scheduled + manual only, behind the
-# `live` environment, never gates a merge.
+never gates a merge. Ephemeral runner: everything is torn down when the job ends.
 on:
   push:
     branches: [ci/host-contract-and-canary]   # TEMP: iterate before merge; remove before merging
@@ -28,7 +28,6 @@ concurrency:
 jobs:
   email-reply:
     runs-on: ubuntu-latest
-    environment: live         # secrets injected only after reviewer approval (once configured)
 
     steps:
       - uses: actions/checkout@v4
