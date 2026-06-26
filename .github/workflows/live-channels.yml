@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set paths
+      - name: Set up env paths (HERMES_HOME, spy, log)
         run: |
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
           echo "SPY_FILE=$RUNNER_TEMP/send_spy.jsonl" >> "$GITHUB_ENV"
