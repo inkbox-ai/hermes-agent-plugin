@@ -7,8 +7,6 @@ name: Live — agent channels (email + SMS)
 # Runs on every PR into main AND on the 2x/day schedule; the repo-wide tunnel lock
 # below serializes them all. Ephemeral runner: gateway + mock torn down on job end.
 on:
-  # Every PR targeting main. Same-repo branches only — fork PRs get no secrets on a
-  # public repo, so the job below skips them (the tunnel lock still queues the rest).
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -17,9 +15,8 @@ on:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  # Also runs right AFTER the canary completes — but the job below only proceeds if
-  # that canary PASSED, so live and the host stay in lock-step on the 2x/day cadence.
-  # (workflow_run fires from the default branch only, i.e. on main after merge.)
+  # Chains off the canary (fires only from the default branch). The job's `if` gates
+  # on a PASSING canary, so live and the host stay in lock-step on the 2x/day cadence.
   workflow_run:
     workflows: ["Canary — plugin vs Hermes main"]
     types: [completed]
@@ -151,15 +148,14 @@ jobs:
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
-          # One email suite; per-test gating selects what runs in each leg.
           if [ "${{ matrix.mode }}" = "real" ]; then
             LIVE_REAL_MODEL=1 "$PY" -m pytest tests/live -v
           else
             "$PY" -m pytest tests/live -v
           fi
 
-      # PUBLIC repo: these logs carry live phone/email/message content, so we only
-      # DUMP them to the (world-readable) job log on failure — never on a green run.
+      # Failure-only: these logs carry live phone/email/message content and this repo
+      # (and its Action logs/artifacts) is public.
       - name: Dump logs (on failure only)
         if: failure()
         run: |
@@ -174,8 +170,6 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
-      # Failure only + short retention: keep debug data when something breaks, leave
-      # no live-channel content sitting in artifacts after a green run.
       - name: Upload artifacts (on failure only)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -188,10 +182,8 @@ jobs:
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
 
-  # One Google Chat message for the WHOLE suite once both legs finish (pass or fail).
-  # needs.live.result aggregates the matrix: 'success' only if every leg passed.
-  # Only on unattended runs (schedule/dispatch) — on a PR you see the check inline,
-  # so no Chat spam. Skipped when 'live' itself was skipped (fork PR).
+  # One Chat message for the whole suite (needs.live.result is 'success' only if every
+  # matrix leg passed). Unattended runs only — on a PR the check is visible inline.
   notify:
     needs: [live]
     if: always() && needs.live.result != 'skipped' && github.event_name != 'pull_request'

@@ -34,12 +34,10 @@ jobs:
       - name: Contract tests vs real Hermes main
         run: uv run pytest tests/contract -v
 
-      # One Google Chat message at the end of the run, pass or fail. job.status is
-      # 'success' only if the contract step passed; anything else → failure label.
+      # One message at run end, pass or fail (job.status reflects the contract step).
+      # Non-blocking (--retry + || true) so a flaky webhook can't flip the result.
       - name: Notify Google Chat (canary result)
         if: always()
-        # Non-blocking: this step runs in-job, so a flaky webhook must not flip a
-        # green contract run to red. --retry for transient errors, || true to swallow.
         run: |
           curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
