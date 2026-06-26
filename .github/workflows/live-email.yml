@@ -6,6 +6,8 @@ name: Live — agent channels (email + SMS)
 #   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
 # Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
 on:
+  push:
+    branches: [ci/host-contract-and-canary]   # TEMP: iterate; remove before merge
   workflow_dispatch:
     inputs:
       timeout_s:
