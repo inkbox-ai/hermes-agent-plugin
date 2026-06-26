@@ -141,8 +141,7 @@ def test_reports_sender_details(ctx):
     phones = [p.value for p in getattr(contact, "phones", [])]
 
     body = _ask(ctx["remote"], ctx["aut_email"], remote_email,
-                "Who am I to you? Reply with the name, phone number, and email address "
-                "you have on file for me.")
+                "Who am I to you? Tell me everything you have on file about me.")
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
     assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"

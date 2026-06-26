@@ -120,7 +120,7 @@ def test_sms_reports_sender_details(sms):
     if not matches:
         pytest.skip("no contact card for the sender to report")
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
-    body = _ask_sms(sms, "Who am I to you? Reply with just my name on file.")
+    body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:200]}"
 
