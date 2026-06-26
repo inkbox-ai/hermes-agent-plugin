@@ -3,7 +3,7 @@ name: Live — agent emails back
 # Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin and a
 # real OpenAI model, then a remote Inkbox identity emails it and waits for a reply.
 # Live + non-deterministic + spends tokens, so: scheduled + manual only, behind the
-# `live` environment (required reviewers inject the secrets), never gates a merge.
+# `live` environment, never gates a merge.
 on:
   push:
     branches: [ci/host-contract-and-canary]   # TEMP: iterate before merge; remove before merging
@@ -28,13 +28,16 @@ concurrency:
 jobs:
   email-reply:
     runs-on: ubuntu-latest
-    environment: live         # secrets injected only after reviewer approval
-    env:
-      HERMES_HOME: ${{ github.workspace }}/.hermes
-      SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
+    environment: live         # secrets injected only after reviewer approval (once configured)
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set paths
+        run: |
+          echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
+          echo "SPY_FILE=$RUNNER_TEMP/send_spy.jsonl" >> "$GITHUB_ENV"
+          echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
       - name: Install Hermes (non-interactive)
         run: |
@@ -45,7 +48,6 @@ jobs:
         run: |
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
-          # plugin runtime deps into the Hermes venv
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5'
 
@@ -57,14 +59,13 @@ jobs:
           MODEL: ${{ github.event.inputs.model || 'gpt-4o-mini' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          # discover the AUT handle from its key
           HANDLE="$("$PY" - <<'PYEOF'
-import os
-from inkbox import Inkbox
-c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
-print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
-PYEOF
-)"
+          import os
+          from inkbox import Inkbox
+          c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PYEOF
+          )"
           echo "AUT handle: $HANDLE"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
@@ -76,13 +77,13 @@ PYEOF
           # FIRST-RUN: confirm these provider/model keys are right for an OpenAI API key.
           hermes config set model.provider openai-api || true
           hermes config set model.default "$MODEL" || true
+          hermes config show 2>/dev/null | grep -iE "model|provider" || true
 
       - name: Start gateway (with send-spy) and wait for readiness
         run: |
           : > "$SPY_FILE"
-          # sitecustomize spy auto-loads into the gateway process via PYTHONPATH
           PYTHONPATH="$GITHUB_WORKSPACE/tests/live/spy_path" INKBOX_SPY_FILE="$SPY_FILE" \
-            hermes gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
+            hermes gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
           for i in $(seq 1 36); do      # up to ~180s
@@ -91,7 +92,7 @@ PYEOF
             fi
             sleep 5
           done
-          echo "::error::gateway did not become ready"; cat "$RUNNER_TEMP/gateway.log"; exit 1
+          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
 
       - name: Run the live email-reply test
         env:
@@ -105,7 +106,7 @@ PYEOF
       - name: Gateway log + spy (always)
         if: always()
         run: |
-          echo "=== gateway.log ==="; cat "$RUNNER_TEMP/gateway.log" || true
+          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== send spy ==="; cat "$SPY_FILE" || true
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
 
