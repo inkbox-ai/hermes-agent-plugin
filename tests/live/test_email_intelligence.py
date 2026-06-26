@@ -110,8 +110,9 @@ def test_reports_own_identity(ctx):
     assert aut_phone, "AUT identity has no phone number to report"
 
     body = _ask(ctx["remote"], aut_email, ctx["remote_email"],
-                "What is your Inkbox identity? Include ALL known info: your handle, "
-                "your display name, your email address, and your phone number.")
+                "Use your inkbox_whoami tool to look up your full Inkbox identity, then "
+                "reply with ALL of it: your handle, display name, email address, and "
+                "phone number (include the digits).")
     assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
     assert _digits(aut_phone)[-10:] in _digits(body), f"reply missing phone {aut_phone!r}\n{body[:400]}"
