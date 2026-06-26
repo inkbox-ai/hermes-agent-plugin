@@ -1,0 +1,118 @@
+name: Live — agent emails back
+
+# Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin and a
+# real OpenAI model, then a remote Inkbox identity emails it and waits for a reply.
+# Live + non-deterministic + spends tokens, so: scheduled + manual only, behind the
+# `live` environment (required reviewers inject the secrets), never gates a merge.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "OpenAI model the agent thinks with"
+        default: "gpt-4o-mini"
+      timeout_s:
+        description: "Seconds to wait for the reply"
+        default: "120"
+  schedule:
+    - cron: "33 7 * * 1"   # weekly, Monday 07:33 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-email          # one live run at a time — no crosstalk between identities
+  cancel-in-progress: false
+
+jobs:
+  email-reply:
+    runs-on: ubuntu-latest
+    environment: live         # secrets injected only after reviewer approval
+    env:
+      HERMES_HOME: ${{ github.workspace }}/.hermes
+      SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Hermes (non-interactive)
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install plugin into the gateway
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
+          hermes plugins enable inkbox
+          # plugin runtime deps into the Hermes venv
+          "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5'
+
+      - name: Configure AUT identity + model
+        env:
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MODEL: ${{ inputs.model || 'gpt-4o-mini' }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          # discover the AUT handle from its key
+          HANDLE="$("$PY" - <<'PYEOF'
+import os
+from inkbox import Inkbox
+c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+PYEOF
+)"
+          echo "AUT handle: $HANDLE"
+          {
+            echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
+            echo "INKBOX_IDENTITY=$HANDLE"
+            echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
+            echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+          } >> "$HERMES_HOME/.env"
+          # FIRST-RUN: confirm these provider/model keys are right for an OpenAI API key.
+          hermes config set model.provider openai-api || true
+          hermes config set model.default "$MODEL" || true
+
+      - name: Start gateway (with send-spy) and wait for readiness
+        run: |
+          : > "$SPY_FILE"
+          # sitecustomize spy auto-loads into the gateway process via PYTHONPATH
+          PYTHONPATH="$GITHUB_WORKSPACE/tests/live/spy_path" INKBOX_SPY_FILE="$SPY_FILE" \
+            hermes gateway run > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
+          for i in $(seq 1 36); do      # up to ~180s
+            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+              echo "Gateway ready."; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"; cat "$RUNNER_TEMP/gateway.log"; exit 1
+
+      - name: Run the live email-reply test
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
+          LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '120' }}
+        run: |
+          uvx --with 'inkbox>=0.4.7' --with pytest pytest tests/live -v
+
+      - name: Gateway log + spy (always)
+        if: always()
+        run: |
+          echo "=== gateway.log ==="; cat "$RUNNER_TEMP/gateway.log" || true
+          echo "=== send spy ==="; cat "$SPY_FILE" || true
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-email-logs
+          path: |
+            ${{ runner.temp }}/gateway.log
+            ${{ runner.temp }}/send_spy.jsonl
+          if-no-files-found: ignore
