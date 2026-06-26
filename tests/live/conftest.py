@@ -43,6 +43,11 @@ def _sweep_threads(client) -> None:
 @pytest.fixture(scope="module", autouse=True)
 def _cleanup_live_artifacts():
     yield
+    # Opt out (e.g. to inspect a run in the Inkbox console) by setting
+    # LIVE_KEEP_ARTIFACTS=1 — the test emails + seeded contact are then left behind.
+    if os.environ.get("LIVE_KEEP_ARTIFACTS", "").lower() in ("1", "true", "yes"):
+        print("[live-cleanup] LIVE_KEEP_ARTIFACTS set — keeping test emails + contacts")
+        return
     if not (_REMOTE and _AUT):
         return
     try:
@@ -52,6 +57,7 @@ def _cleanup_live_artifacts():
     remote = Inkbox(api_key=_REMOTE, base_url=_BASE)
     aut = Inkbox(api_key=_AUT, base_url=_BASE)
 
+    print("[live-cleanup] sweeping smoke-* threads from both mailboxes + seeded contacts")
     _sweep_threads(remote)
     _sweep_threads(aut)
 

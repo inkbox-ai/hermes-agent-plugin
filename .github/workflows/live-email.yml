@@ -6,13 +6,15 @@ name: Live — agent emails back
 #   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
 # Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
 on:
-  push:
-    branches: [ci/host-contract-and-canary]   # TEMP: iterate; remove before merge
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
+      keep_artifacts:
+        description: "Keep test emails + seeded contact (to inspect in the console)"
+        type: boolean
+        default: false
   schedule:
     - cron: "33 7 * * 1"   # weekly, Monday 07:33 UTC
 
@@ -20,7 +22,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: live-email          # one live run at a time — no crosstalk between identities
+  # Only ONE client may hold the AUT's Inkbox tunnel at a time, so EVERY live tunnel
+  # workflow (this + any future one) MUST use this exact group → they run one at a
+  # time across all triggers (PRs + the main schedule queue behind each other).
+  group: inkbox-live-aut-tunnel
   cancel-in-progress: false
 
 jobs:
@@ -129,6 +134,7 @@ jobs:
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
+          LIVE_KEEP_ARTIFACTS: ${{ github.event.inputs.keep_artifacts }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
