@@ -14,7 +14,7 @@ permissions:
   issues: write
 
 jobs:
-  contract:
+  canary:
     runs-on: ubuntu-latest
 
     steps:

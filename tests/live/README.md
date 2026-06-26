@@ -3,7 +3,7 @@
 End-to-end tests that boot a **real Hermes gateway** running this plugin and have a
 separate Inkbox identity message it for real, over email. They prove the agent is
 reachable, replies, reasons, and uses its tools — not just that units pass. Run by
-`.github/workflows/live-email.yml` as a two-leg matrix (one suite; per-test gating
+`.github/workflows/live-channels.yml` as a two-leg matrix (one suite; per-test gating
 picks what runs per leg). Never gates a merge; manual + weekly.
 
 ## Actors
