@@ -1,20 +1,18 @@
 name: Live — agent emails back
 
-# Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin and a
-# real OpenAI model, then a remote Inkbox identity emails it and waits for a reply.
-# Live + non-deterministic + spends tokens, so: scheduled + manual only, behind the
-never gates a merge. Ephemeral runner: everything is torn down when the job ends.
+# Boots the agent-under-test (AUT) as a real Hermes gateway with the plugin, then a
+# remote Inkbox identity emails it and waits for a reply. Two matrix legs:
+#   mock — deterministic mock model; proves the pipe (per-PR, free).
+#   real — real OpenAI key; proves the agent actually reasons (tokens; manual/weekly).
+# Never gates a merge. Ephemeral runner: gateway + mock are torn down when the job ends.
 on:
   push:
     branches: [ci/host-contract-and-canary]   # TEMP: iterate before merge; remove before merging
   workflow_dispatch:
     inputs:
-      model:
-        description: "OpenAI model the agent thinks with"
-        default: "gpt-4o-mini"
       timeout_s:
         description: "Seconds to wait for the reply"
-        default: "120"
+        default: "150"
   schedule:
     - cron: "33 7 * * 1"   # weekly, Monday 07:33 UTC
 
@@ -26,8 +24,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  email-reply:
+  live:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1          # legs share the AUT identity → must run one at a time
+      matrix:
+        mode: [mock, real]
 
     steps:
       - uses: actions/checkout@v4
@@ -51,10 +54,11 @@ jobs:
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5'
 
-      - name: Configure AUT identity + model (mock OpenAI)
+      - name: Configure AUT identity + model (${{ matrix.mode }})
         env:
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           HANDLE="$("$PY" - <<'PYEOF'
@@ -65,21 +69,32 @@ jobs:
           PYEOF
           )"
           echo "AUT handle: $HANDLE"
-          # Point the agent's OpenAI calls at the local deterministic mock (no real
-          # key, no tokens, no flakiness). The mock returns a canned reply, so this
-          # exercises the whole real pipeline without depending on a live LLM.
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
-            echo "OPENAI_API_KEY=sk-mock-not-used"
-            echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
           } >> "$HERMES_HOME/.env"
-          hermes config set model.provider openai-api || true
-          hermes config set model.default mock-model || true
+          if [ "${{ matrix.mode }}" = "real" ]; then
+            # Real OpenAI: set OPENAI_BASE_URL explicitly so Hermes uses the openai-api
+            # provider (and attaches the key) instead of falling back to OpenRouter.
+            {
+              echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+              echo "OPENAI_BASE_URL=https://api.openai.com/v1"
+            } >> "$HERMES_HOME/.env"
+            hermes config set model.provider openai-api || true
+            hermes config set model.default gpt-4o-mini || true
+          else
+            {
+              echo "OPENAI_API_KEY=sk-mock-not-used"
+              echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
+            } >> "$HERMES_HOME/.env"
+            hermes config set model.provider openai-api || true
+            hermes config set model.default mock-model || true
+          fi
 
       - name: Start mock OpenAI model
+        if: matrix.mode == 'mock'
         run: |
           nohup "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             "$GITHUB_WORKSPACE/tests/live/mock_openai.py" 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
@@ -105,23 +120,27 @@ jobs:
           done
           echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
 
-      - name: Run the live email-reply test
+      - name: Run live test (${{ matrix.mode }})
         env:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_spy.jsonl
-          LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '120' }}
+          LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
-          "$PY" -m pytest tests/live -v
+          if [ "${{ matrix.mode }}" = "real" ]; then
+            LIVE_REAL_MODEL=1 "$PY" -m pytest tests/live/test_email_intelligence.py -v
+          else
+            "$PY" -m pytest tests/live/test_email_reply.py -v
+          fi
 
-      - name: Gateway log + spy (always)
+      - name: Logs (always)
         if: always()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== send spy ==="; cat "$SPY_FILE" || true
-          echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" || true
+          echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
           echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
@@ -130,8 +149,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-email-logs
+          name: live-logs-${{ matrix.mode }}
           path: |
             ${{ runner.temp }}/gateway.log
             ${{ runner.temp }}/send_spy.jsonl
+            ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
