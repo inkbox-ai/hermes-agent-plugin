@@ -1,0 +1,163 @@
+name: Live — voice calls (Inkbox TTS/STT + realtime)
+
+# Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
+# other side of a real phone call over its own Inkbox tunnel. Two matrix legs:
+#   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
+#   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
+# Each leg verifies the stored call transcript shows the agent spoke to the caller.
+# Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
+# shares the AUT tunnel lock with the other live suites. During development it also
+# runs on pushes to its feature branch.
+on:
+  push:
+    branches: [feat/live-voice-calls]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the call/transcript"
+        default: "220"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as the other live suites: only one holder of the AUT tunnel at a time.
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive). Pushes + dispatch always run.
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+    strategy:
+      fail-fast: false
+      max-parallel: 1          # legs share the AUT identity → one at a time
+      matrix:
+        scenario: [inbound_inkbox, outbound_realtime]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up env paths
+        run: |
+          echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
+          echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
+          echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
+          echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
+
+      - name: Install Hermes (non-interactive)
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install plugin into the gateway
+        run: |
+          mkdir -p "$HERMES_HOME/plugins"
+          ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
+          hermes plugins enable inkbox
+          "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
+
+      - name: Configure AUT identity + model + speech path (${{ matrix.scenario }})
+        env:
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          HANDLE="$("$PY" - <<'PYEOF'
+          import os
+          from inkbox import Inkbox
+          c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PYEOF
+          )"
+          echo "AUT handle: $HANDLE"
+          {
+            echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
+            echo "INKBOX_IDENTITY=$HANDLE"
+            echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
+            echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+            echo "OPENAI_BASE_URL=https://api.openai.com/v1"
+          } >> "$HERMES_HOME/.env"
+          # The agent's reasoning (deciding to place a call, composing replies) uses
+          # the chat model; send it straight to OpenAI as-is.
+          hermes config set model.provider custom || true
+          hermes config set model.base_url https://api.openai.com/v1 || true
+          hermes config set model.default gpt-5.5 || true
+          if [ "${{ matrix.scenario }}" = "outbound_realtime" ]; then
+            echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
+          else
+            echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
+          fi
+
+      - name: Start gateway and wait for readiness
+        run: |
+          hermes gateway run > "$GATEWAY_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          echo "Waiting for the gateway (tunnel + webhooks)…"
+          for i in $(seq 1 36); do
+            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+              echo "Gateway ready."; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+
+      - name: Start voice driver and wait for its tunnel
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
+            "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/driver.pid"
+          for i in $(seq 1 30); do      # up to ~90s
+            if [ -s "$DRIVER_STATE" ]; then echo "driver ready:"; cat "$DRIVER_STATE"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::driver did not become ready"; cat "$DRIVER_LOG"; exit 1
+
+      - name: Run voice test (${{ matrix.scenario }})
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          VOICE_SCENARIO: ${{ matrix.scenario }}
+          LIVE_VOICE_TIMEOUT: ${{ github.event.inputs.timeout_s || '220' }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
+          LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
+            "$PY" -m pytest tests/live/test_voice.py -v
+
+      # Failure-only: these logs carry live call content and this repo is public.
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
+          echo "=== driver.log ==="; cat "$DRIVER_LOG" || true
+          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/driver.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          sleep 3   # let the driver revert its number on exit
+
+  notify:
+    needs: [voice]
+    if: always() && needs.voice.result == 'failure' && github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Google Chat on scheduled failure
+        run: |
+          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"text": "⚠️ *FAILED* — Live voice-call suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
