@@ -58,6 +58,38 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     assert "aiohttp>=3.9" in out
 
 
+def test_api_key_flow_rejects_unknown_auth_subtype(monkeypatch, capsys):
+    class FakeWhoamiApiKeyResponse:
+        auth_subtype = "future_scope"
+        organization_id = "org_123"
+
+    class FakeInkbox:
+        def __init__(self, **_kwargs):
+            pass
+
+        def whoami(self):
+            return FakeWhoamiApiKeyResponse()
+
+        def list_identities(self):
+            raise AssertionError("unknown subtypes must not fall back to identity listing")
+
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: "ApiKey_test")
+
+    result = setup_wizard._api_key_flow(
+        "https://inkbox.ai",
+        FakeInkbox,
+        Exception,
+        FakeWhoamiApiKeyResponse,
+        "admin_scoped",
+        "agent_scoped_claimed",
+        "agent_scoped_unclaimed",
+        object,
+    )
+
+    assert result == (None, "", False)
+    assert "Unsupported API-key subtype" in capsys.readouterr().out
+
+
 def test_plugin_install_does_not_prompt_for_inkbox_env():
     text = (ROOT / "plugin.yaml").read_text()
 
