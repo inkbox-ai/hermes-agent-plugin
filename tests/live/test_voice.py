@@ -85,6 +85,21 @@ def _wait_for_two_way_call(remote, number_id, call_id):
     pytest.fail(f"agent never held a two-way call within {TIMEOUT_S:.0f}s ({last})")
 
 
+def _aut_speech_mode(aut, direction, driver_number):
+    """(use_inkbox_tts, use_inkbox_stt) of the agent's most recent answered call
+    in `direction` with the driver. Tells Inkbox STT/TTS (True/True) from realtime
+    (False/False), so each leg can prove it ran the speech path it claims."""
+    num_id = str(aut.phone_numbers.list()[0].id)
+    tail = _digits(driver_number)[-10:]
+    answered = [c for c in aut.calls.list(num_id, limit=10)
+                if (getattr(c, "direction", "") or "").lower() == direction
+                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
+                and c.use_inkbox_tts is not None]
+    assert answered, f"no answered {direction} agent call with the driver found"
+    c = answered[0]  # newest first
+    return c.use_inkbox_tts, c.use_inkbox_stt
+
+
 @pytest.mark.skipif(SCENARIO != "inbound_inkbox", reason="inbound Inkbox STT/TTS leg only")
 def test_inbound_call_inkbox_tts_stt():
     """Driver calls the agent; the agent answers via Inkbox STT/TTS and replies."""
@@ -98,6 +113,9 @@ def test_inbound_call_inkbox_tts_stt():
     )
     agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
     assert agent_said, "agent produced no speech on the inbound call"
+
+    tts, stt = _aut_speech_mode(aut, "inbound", st["number"])
+    assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
 
 
 @pytest.mark.skipif(SCENARIO != "outbound_realtime", reason="outbound realtime leg only")
@@ -129,3 +147,7 @@ def test_outbound_call_realtime():
 
     agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
     assert agent_said, "agent produced no speech on the outbound call"
+
+    tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
+    assert tts is False and stt is False, \
+        f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"

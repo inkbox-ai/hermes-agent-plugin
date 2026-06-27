@@ -49,6 +49,9 @@ LINE = os.environ.get(
 )
 # Speak shortly after the pipeline is ready so the agent's greeting lands first.
 SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "3"))
+# Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
+# must send an explicit stop or the leg lingers until the server max-duration cap.
+LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
 
 app = FastAPI()
 
@@ -69,19 +72,27 @@ async def phone_media_ws(ws: WebSocket) -> None:
         (b"x-use-inkbox-speech-to-text", b"true"),
     ])
     log.info("call WS accepted")
-    spoke = False
+    spoke = asyncio.Event()
+    convo: asyncio.Task | None = None
 
     async def _speak(text: str) -> None:
+        if spoke.is_set():
+            return
+        spoke.set()
         await ws.send_text(json.dumps({"event": "text", "delta": text}))
         await ws.send_text(json.dumps({"event": "text", "done": True}))
         log.info("spoke: %s", text)
 
-    async def _speak_after_delay() -> None:
+    async def _run_turn() -> None:
+        # Speak one line, give the agent a turn, then hang up so the call ends fast.
         await asyncio.sleep(SPEAK_AFTER_S)
-        nonlocal spoke
-        if not spoke:
-            spoke = True
-            await _speak(LINE)
+        await _speak(LINE)
+        await asyncio.sleep(LISTEN_S)
+        try:
+            await ws.send_text(json.dumps({"event": "stop"}))
+            log.info("sent stop (hangup)")
+        except Exception:
+            pass
 
     try:
         while True:
@@ -90,19 +101,18 @@ async def phone_media_ws(ws: WebSocket) -> None:
             kind = ev.get("event")
             if kind == "start":
                 log.info("call start: %s", ev.get("stream_id"))
-                asyncio.create_task(_speak_after_delay())
+                convo = asyncio.create_task(_run_turn())
             elif kind == "transcript" and ev.get("is_final"):
                 log.info("heard (final): %s", ev.get("text"))
-                # Make sure the agent got a turn even if the greeting was slow.
-                if not spoke:
-                    spoke = True
-                    await _speak(LINE)
+                await _speak(LINE)  # speak now if the greeting beat our timer
             elif kind == "stop":
                 log.info("call stop: %s", ev.get("reason"))
                 break
     except Exception as exc:  # noqa: BLE001 — never let the bridge crash the process
         log.info("WS loop ended: %r", exc)
     finally:
+        if convo:
+            convo.cancel()
         if ws.client_state != WebSocketState.DISCONNECTED:
             try:
                 await ws.close()
