@@ -406,6 +406,10 @@ def test_inbound_imessage_starts_typing_pulse(monkeypatch):
     assert response.status == 200
 
 
+def test_imessage_typing_safety_cap_is_ten_minutes():
+    assert InkboxAdapter.IMESSAGE_TYPING_MAX_SECONDS == 600.0
+
+
 def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     identity = FakeIdentity()
 

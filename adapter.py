@@ -2975,7 +2975,7 @@ class InkboxAdapter(BasePlatformAdapter):
     IMESSAGE_TYPING_REFRESH_SECONDS = 40.0
     # Safety cap so a turn that errors out before send() (and thus never
     # cancels the pulse) can't leave the indicator pulsing indefinitely.
-    IMESSAGE_TYPING_MAX_SECONDS = 300.0
+    IMESSAGE_TYPING_MAX_SECONDS = 600.0
 
     def _typing_tasks(self) -> Dict[str, "asyncio.Task"]:
         """Lazily-initialized typing-task registry.
