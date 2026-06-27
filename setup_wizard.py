@@ -1184,9 +1184,9 @@ def _api_key_flow(
     if subtype == _enum_value(ADMIN_SCOPED):
         return _pick_admin_scoped(client, api_key, IdentityPhoneNumberCreateOptions, InkboxAPIError)
 
-    print_warning(f"  Unrecognized API-key subtype: {subtype!r}.")
-    print_info("  Falling back to list_identities().")
-    return _pick_admin_scoped(client, api_key, IdentityPhoneNumberCreateOptions, InkboxAPIError)
+    print_error(f"  Unsupported API-key subtype: {subtype!r}.")
+    print_info("  Use an admin-scoped or agent-scoped Inkbox API key.")
+    return None, "", False
 
 
 def _pick_agent_scoped(client: Any, api_key: str) -> tuple[Any | None, str, bool]:
