@@ -6,11 +6,8 @@ name: Live — voice calls (Inkbox TTS/STT + realtime)
 #   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
 # Each leg verifies the stored call transcript shows the agent spoke to the caller.
 # Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
-# shares the AUT tunnel lock with the other live suites. During development it also
-# runs on pushes to its feature branch.
+# shares the AUT tunnel lock with the other live suites.
 on:
-  push:
-    branches: [feat/live-voice-calls]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
