@@ -186,16 +186,20 @@ jobs:
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
 
-  # One Chat message for the whole suite (needs.live.result is 'success' only if every
-  # matrix leg passed). Unattended runs only — on a PR the check is visible inline.
+  # Alert only when an unattended run fails — no success pings; PRs + manual
+  # dispatch stay silent (the check is visible inline there). This suite has no
+  # direct `schedule` trigger; its unattended cadence arrives as a `workflow_run`
+  # chained off the scheduled canary, so that event is the "scheduled failure"
+  # trigger here. `always()` lets this job run despite the failed `live`
+  # dependency; needs.live.result is 'failure' if any matrix leg failed.
   notify:
     needs: [live]
-    if: always() && needs.live.result != 'skipped' && github.event_name != 'pull_request'
+    if: always() && needs.live.result == 'failure' && github.event_name == 'workflow_run'
     runs-on: ubuntu-latest
     steps:
-      - name: Notify Google Chat (live suite result)
+      - name: Notify Google Chat on scheduled failure
         # Non-blocking: a flaky webhook must never flip the suite result.
         run: |
           curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
-            -d '{"text": "${{ needs.live.result == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
+            -d '{"text": "⚠️ *FAILED* — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
