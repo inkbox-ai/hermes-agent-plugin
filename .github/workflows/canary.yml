@@ -34,11 +34,12 @@ jobs:
       - name: Contract tests vs real Hermes main
         run: uv run pytest tests/contract -v
 
-      # One message at run end, pass or fail (job.status reflects the contract step).
-      # Non-blocking (--retry + || true) so a flaky webhook can't flip the result.
-      - name: Notify Google Chat (canary result)
-        if: always()
+      # Alert only when an unattended (scheduled) run fails — no success pings,
+      # and manual dispatch stays silent (you're watching it). Non-blocking
+      # (--retry + || true) so a flaky webhook can't flip the result.
+      - name: Notify Google Chat on scheduled failure
+        if: failure() && github.event_name == 'schedule'
         run: |
           curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
             -H 'Content-Type: application/json' \
-            -d '{"text": "${{ job.status == 'success' && '✅ *PASSED*' || '🔴 *FAILED*' }} — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
+            -d '{"text": "⚠️ *FAILED* — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
