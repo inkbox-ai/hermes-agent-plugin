@@ -287,6 +287,58 @@ def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
     assert adapter._last_inbound_imessage["contact-123|imessage:imconv-123"]["remote_number"] == "+15555550101"
 
 
+def test_unknown_inbound_imessage_uses_conversation_session_key(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    events = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+
+    response = asyncio.run(adapter._on_imessage_received({
+        "event_type": "imessage.received",
+        "data": {
+            "message": {
+                "id": "im-in",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-unknown",
+                "content": "Dinner moved to 7.",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert events[0].source.chat_id == "imessage:imconv-unknown"
+    assert events[0].source.thread_id == "imessage:imconv-unknown"
+    assert adapter._last_inbound_modality["imessage:imconv-unknown"] == "imessage"
+    assert (
+        adapter._last_inbound_imessage["imessage:imconv-unknown"]["conversation_id"]
+        == "imconv-unknown"
+    )
+
+
 def test_inbound_imessage_ignores_outbound_echo(monkeypatch):
     events = []
 
@@ -507,6 +559,55 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     # Reply target is stashed so a follow-up send lands in the right thread.
     assert adapter._last_inbound_imessage["contact-123"]["conversation_id"] == "imconv-123"
     assert adapter._last_inbound_modality["contact-123"] == "imessage"
+
+
+def test_unknown_imessage_reaction_uses_conversation_session_key(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    enqueued = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+
+    response = asyncio.run(adapter._on_imessage_reaction({
+        "event_type": "imessage.reaction_received",
+        "data": {
+            "reaction": {
+                "id": "react-in-2",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-unknown",
+                "target_message_id": "im-target-10",
+                "reaction": "like",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert enqueued[0].source.chat_id == "imessage:imconv-unknown"
+    assert enqueued[0].source.thread_id == "imessage:imconv-unknown"
+    assert adapter._last_inbound_modality["imessage:imconv-unknown"] == "imessage"
+    assert (
+        adapter._last_inbound_imessage["imessage:imconv-unknown"]["conversation_id"]
+        == "imconv-unknown"
+    )
 
 
 def test_inbound_non_question_reaction_does_not_type(monkeypatch):

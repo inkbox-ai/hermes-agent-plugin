@@ -281,6 +281,23 @@ def _sms_state_key(chat_id: Any, thread_id: Any = None) -> str:
     return f"{chat}|{thread}" if thread else chat
 
 
+def _channel_thread_key(prefix: str, value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    return f"{prefix}:{raw}" if raw else None
+
+
+def _chat_id_for_route(
+    contact: Optional[Dict[str, Any]],
+    thread_key: Optional[str],
+    fallback: str,
+) -> str:
+    if contact and contact.get("id"):
+        return str(contact["id"])
+    if thread_key:
+        return thread_key
+    return fallback
+
+
 def _field(obj: Any, *names: str) -> Any:
     if obj is None:
         return None
@@ -1994,7 +2011,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 return _sms_send_failure(exc, to_number=conversation_id or to_number)
 
         if mode == "email":
-            to_addr = (meta.get("to_email") or "").strip()
+            stash = self._last_inbound_email.get(str(chat_id), {})
+            to_addr = (meta.get("to_email") or stash.get("from_address") or "").strip()
             if not to_addr:
                 # If the chat_id already looks like an email address, use it
                 # directly — this is the unknown-sender path where the
@@ -2017,7 +2035,6 @@ class InkboxAdapter(BasePlatformAdapter):
             # when replying to a known thread, ``(no subject)`` when sending
             # cold.  Mail clients use both signals (header + subject) to group
             # the message into the original conversation.
-            stash = self._last_inbound_email.get(str(chat_id), {})
             in_reply_to = (
                 meta.get("in_reply_to_message_id")
                 or reply_to
@@ -2290,10 +2307,14 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return web.Response(status=200, text="ok")
 
-        contact = await self._resolve_contact_full(kind="email", value=from_address)
-        chat_id = (contact["id"] if contact else from_address)
-        contact_name = contact["name"] if contact and contact.get("name") else None
         thread_id = message.get("thread_id")
+        contact = await self._resolve_contact_full(kind="email", value=from_address)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("email", thread_id),
+            from_address,
+        )
+        contact_name = contact["name"] if contact and contact.get("name") else None
         rfc_message_id = message.get("message_id")  # RFC 5322 Message-ID for threading
         subject = message.get("subject") or ""
 
@@ -2748,7 +2769,11 @@ class InkboxAdapter(BasePlatformAdapter):
         )
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("sms", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         raw_body = text_msg.get("text") or ""
         body = raw_body
@@ -2923,7 +2948,11 @@ class InkboxAdapter(BasePlatformAdapter):
         ).strip()
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("imessage", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         raw_body = message.get("content") or ""
         body = raw_body
@@ -3129,7 +3158,11 @@ class InkboxAdapter(BasePlatformAdapter):
         timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("imessage", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         contact_block = self._contact_marker(contact)
 
