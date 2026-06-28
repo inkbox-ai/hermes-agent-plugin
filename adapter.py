@@ -919,7 +919,7 @@ def _sms_too_long_fields(content: str, *, max_chars: int = SMS_MAX_LENGTH) -> Di
     return {
         "status_code": None,
         "error_code": "sms_too_long",
-        "message": f"SMS content is {char_count} characters; maximum is {max_chars}.",
+        "message": f"SMS text is {char_count} characters; maximum is {max_chars}. Shorten it or split it into smaller SMS messages.",
         "detail": None,
         "category": "content_length",
         "retryable": False,

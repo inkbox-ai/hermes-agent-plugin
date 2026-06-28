@@ -15,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
+SMS_MAX_LENGTH = 1600
 IMESSAGE_MAX_LENGTH = 18995
 
 
@@ -200,8 +201,8 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
         text = str(args.get("text") or "")
         if not text:
             return _json({"error": "`text` is required"})
-        if len(text) > 1600:
-            return _json({"error": "SMS text exceeds Inkbox 1600 character limit", "char_count": len(text)})
+        if len(text) > SMS_MAX_LENGTH:
+            return _json(_message_too_long_payload("SMS", text, SMS_MAX_LENGTH))
 
         conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
         to_list = _normalize_recipients(args.get("to"))
