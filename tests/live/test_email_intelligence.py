@@ -41,6 +41,22 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+def _phone_present(phone: str, body: str) -> bool:
+    """True if the agent reported ``phone`` in ``body``.
+
+    Accepts either the full number (all digits present) or a privacy-masked
+    form the model tends to emit in formal identity listings, where it keeps a
+    leading prefix + the last 4 and masks the middle (e.g. ``+192****3235``).
+    The masked branch requires a run of mask chars immediately followed by the
+    real last-4, so it won't false-match on markdown bold (``**name:**``).
+    """
+    want = _digits(phone)
+    if want[-10:] in _digits(body):
+        return True
+    tail = re.escape(want[-4:])
+    return bool(re.search(r"[*xX•·]{2,}\D{0,2}" + tail, body))
+
+
 def _mailbox(client) -> str:
     boxes = client.mailboxes.list()
     assert boxes, "identity has no mailbox"
@@ -111,10 +127,13 @@ def test_reports_own_identity(ctx):
 
     body = _ask(ctx["remote"], aut_email, ctx["remote_email"],
                 "What is your full Inkbox identity? Reply with your handle, display "
-                "name, email address, and phone number (include the digits).")
+                "name, email address, and phone number. Write the phone number in "
+                "full — every digit, with no masking, asterisks, or abbreviation.")
     assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
-    assert _digits(aut_phone)[-10:] in _digits(body), f"reply missing phone {aut_phone!r}\n{body[:400]}"
+    # Accept a privacy-masked phone (the model self-redacts the middle digits in
+    # formal listings even with Hermes secret redaction off) as well as full.
+    assert _phone_present(aut_phone, body), f"reply missing phone {aut_phone!r}\n{body[:400]}"
 
 
 def test_reports_sender_details(ctx):
@@ -141,12 +160,15 @@ def test_reports_sender_details(ctx):
     phones = [p.value for p in getattr(contact, "phones", [])]
 
     body = _ask(ctx["remote"], ctx["aut_email"], remote_email,
-                "Who am I to you? Tell me everything you have on file about me.")
+                "Who am I to you? Tell me everything you have on file about me. "
+                "Include my phone number in full — every digit, with no masking, "
+                "asterisks, or abbreviation.")
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
     assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"
     if phones:
-        assert any(_digits(p)[-10:] in _digits(body) for p in phones), \
+        # Accept full or privacy-masked (see _phone_present).
+        assert any(_phone_present(p, body) for p in phones), \
             f"reply missing sender phone {phones}\n{body[:400]}"
 
 
