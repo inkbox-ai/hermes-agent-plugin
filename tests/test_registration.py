@@ -45,6 +45,22 @@ class DummyContext:
         self.skills.append((args, kwargs))
 
 
+def _manifest_provides_tools() -> set[str]:
+    tools: set[str] = set()
+    in_block = False
+    for raw_line in (ROOT / "plugin.yaml").read_text().splitlines():
+        if raw_line.startswith("provides_tools:"):
+            in_block = True
+            continue
+        if in_block and raw_line and not raw_line.startswith(" "):
+            break
+        if in_block:
+            line = raw_line.strip()
+            if line.startswith("- "):
+                tools.add(line[2:].strip())
+    return tools
+
+
 def test_registers_inkbox_platform_tools_commands_and_skills():
     entry = _load_entry_module()
     ctx = DummyContext()
@@ -79,6 +95,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_mark_imessage_conversation_read",
         "inkbox_place_call",
     }
+    assert _manifest_provides_tools() == tool_names
 
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
