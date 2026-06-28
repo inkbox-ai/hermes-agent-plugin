@@ -32,7 +32,7 @@ The Inkbox plugin exposes persistent notes scoped by the configured Inkbox ident
 ## Access semantics
 
 - Note reads are filtered server-side by the Inkbox identity's access grants.
-- Notes are persistent Inkbox records. They are different from Hermes workspace notes/memory and should be used whenever the user specifically refers to Inkbox notes.
+- Notes are persistent Inkbox records. They are different from host workspace notes/memory and should be used whenever the user specifically refers to Inkbox notes.
 
 ## When you need more - raw Inkbox docs
 
