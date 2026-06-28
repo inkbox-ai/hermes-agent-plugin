@@ -328,3 +328,45 @@ python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.p
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
 - Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main Hermes agent after hangup.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.
+
+## Recommended Configuration
+
+The plugin runs out of the box, but a few Hermes overrides noticeably improve the
+experience for an Inkbox agent. Apply them in `~/.hermes/.env` (or via
+`hermes config set`) and `hermes gateway restart`.
+
+**Decide how outbound content is redacted.** Hermes ships a redactor that masks
+secrets — API keys, tokens — *and* E.164 phone numbers in the agent's outbound
+content by default (`HERMES_REDACT_SECRETS=true`), rewriting `+19255550123` as
+`+192****0123`. For a communications agent whose own number is meant to be
+shared, that masking can get in the way; remove the Hermes layer with:
+
+```bash
+HERMES_REDACT_SECRETS=false
+```
+
+Equivalently, `hermes config set security.redact_secrets false`. Note this only
+disables *Hermes'* masking — the model may still abbreviate or mask a number on
+its own when composing a formal reply, so don't rely on this alone to guarantee
+full digits. Leave redaction on if the agent handles third-party secrets you do
+not want echoed into messages or logs.
+
+**Use OpenAI Realtime for voice.** Inkbox STT/TTS is the zero-config fallback,
+but realtime calls are noticeably more natural. Provide a key and let the
+plugin auto-enable it:
+
+```bash
+OPENAI_API_KEY=sk-...
+INKBOX_REALTIME_ENABLED=true
+```
+
+See [Realtime Calls](#realtime-calls) for the full credential resolution order
+and voice/model overrides.
+
+**Admit everyone Inkbox already vetted.** The setup wizard writes this, but if
+you configured by hand, let Inkbox's contact rules be the gate rather than a
+local allowlist:
+
+```bash
+INKBOX_ALLOW_ALL_USERS=true
+```
