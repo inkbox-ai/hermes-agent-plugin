@@ -3371,6 +3371,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     contact_name=str(contact_name),
                     remote_phone_number=remote_phone_number,
                     direction=direction or "inbound",
+                    agent_identity_handle=self._identity_handle,
                     agent_identity_email=getattr(
                         getattr(identity_for_meta, "mailbox", None),
                         "email_address",
