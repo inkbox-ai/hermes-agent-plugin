@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
-    from .config import object_summary, public_call_ws_url, read_config
+    from .config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from config import object_summary, public_call_ws_url, read_config
+    from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
 
 def _json(data: Dict[str, Any]) -> str:
@@ -33,7 +33,7 @@ def _client_and_identity():
         raise RuntimeError("INKBOX_API_KEY is not set")
     if not cfg.identity:
         raise RuntimeError("INKBOX_IDENTITY is not set")
-    client = Inkbox(api_key=cfg.api_key, base_url=cfg.base_url)
+    client = Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url))
     return cfg, client, client.get_identity(cfg.identity)
 
 

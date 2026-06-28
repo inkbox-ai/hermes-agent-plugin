@@ -19,7 +19,7 @@ optional_env:
     prompt: "Inkbox signing key"
     secret: true
   - name: INKBOX_BASE_URL
-    description: "Inkbox API base URL. Defaults to https://inkbox.ai."
+    description: "Optional Inkbox API base URL override. Defaults to the SDK default."
     prompt: "Inkbox base URL"
     secret: false
   - name: INKBOX_PUBLIC_URL

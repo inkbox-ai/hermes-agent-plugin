@@ -121,7 +121,7 @@ INKBOX_ALLOW_ALL_USERS=true
 Optional:
 
 ```bash
-INKBOX_BASE_URL=https://inkbox.ai
+INKBOX_BASE_URL=https://your-inkbox-api.example
 INKBOX_PUBLIC_URL=https://your-public-hermes-host.example
 INKBOX_TUNNEL_NAME=my-agent-handle
 INKBOX_HOME_CHANNEL=contact-or-phone
@@ -220,7 +220,7 @@ After the gateway starts:
 | `INKBOX_IDENTITY` | yes | - | Inkbox agent identity handle. |
 | `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, iMessage, and calls. |
 | `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound webhooks unless set to `false`. |
-| `INKBOX_BASE_URL` | no | `https://inkbox.ai` | Override Inkbox API base URL. |
+| `INKBOX_BASE_URL` | no | SDK default | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `INKBOX_TUNNEL_NAME` | no | identity handle | Override Inkbox tunnel name. |
 | `INKBOX_HOME_CHANNEL` | no | - | Default Inkbox chat/contact id for cron or notification delivery. |

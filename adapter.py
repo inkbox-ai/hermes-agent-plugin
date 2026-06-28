@@ -132,6 +132,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
+    from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -143,6 +144,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -156,7 +158,6 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
 
 logger = logging.getLogger(__name__)
 
-INKBOX_BASE_URL_DEFAULT = "https://inkbox.ai"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 DEFAULT_WEBHOOK_PATH = "/webhook"
@@ -1357,7 +1358,7 @@ class InkboxAdapter(BasePlatformAdapter):
             pass
 
         try:
-            self._inkbox = Inkbox(api_key=self._api_key, base_url=self._base_url)
+            self._inkbox = Inkbox(**inkbox_client_kwargs(self._api_key, self._base_url))
         except Exception as exc:
             logger.error("[Inkbox] Failed to construct SDK client: %s", exc)
             self._release_platform_lock()
@@ -4155,7 +4156,7 @@ async def send_inkbox_direct(
         return _sms_too_long_failure_dict(message)
 
     def _do_send() -> Dict[str, Any]:
-        with Inkbox(api_key=api_key, base_url=base_url) as client:
+        with Inkbox(**inkbox_client_kwargs(api_key, base_url)) as client:
             identity = client.get_identity(handle)
 
             if chosen_mode == "sms":

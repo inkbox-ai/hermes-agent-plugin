@@ -11,6 +11,11 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import setup_wizard
 
 
+def test_avatar_base_url_defaults_to_public_api():
+    assert setup_wizard._avatar_base_url("") == "https://inkbox.ai"
+    assert setup_wizard._avatar_base_url("https://proxy.example/") == "https://proxy.example"
+
+
 def test_install_command_prefers_uv_when_available(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)

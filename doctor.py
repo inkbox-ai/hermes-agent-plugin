@@ -6,9 +6,9 @@ import json
 from typing import Any, Dict, List
 
 try:
-    from .config import object_summary, read_config
+    from .config import inkbox_client_kwargs, object_summary, read_config
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from config import object_summary, read_config
+    from config import inkbox_client_kwargs, object_summary, read_config
 
 
 def run_doctor() -> Dict[str, Any]:
@@ -57,7 +57,7 @@ def run_doctor() -> Dict[str, Any]:
 
     if sdk_available and cfg.api_key:
         try:
-            client = Inkbox(api_key=cfg.api_key, base_url=cfg.base_url)
+            client = Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url))
             summary["whoami"] = object_summary(client.whoami())
             if cfg.identity:
                 identity = client.get_identity(cfg.identity)
