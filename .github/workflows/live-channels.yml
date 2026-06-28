@@ -131,7 +131,15 @@ jobs:
       - name: Start gateway (with send-spy) and wait for readiness
         run: |
           : > "$SPY_FILE"
+          # Disable Hermes's built-in PII/secret redactor for this smoke gateway.
+          # By default (HERMES_REDACT_SECRETS=true) Hermes masks E.164 phone numbers
+          # in outbound assistant content (+19254093235 -> +192****3235) before the
+          # gateway delivers the reply, which breaks the identity tests that assert
+          # the agent can report full phone digits. These are throwaway test
+          # identities, so turning it off is safe. Set on the process env (not just
+          # ~/.hermes/.env) because agent.redact snapshots the flag at import time.
           PYTHONPATH="$GITHUB_WORKSPACE/tests/live/spy_path" INKBOX_SPY_FILE="$SPY_FILE" \
+          HERMES_REDACT_SECRETS=false \
             hermes gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
