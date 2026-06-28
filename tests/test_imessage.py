@@ -98,6 +98,20 @@ def test_send_imessage_tool_prefers_conversation_id(monkeypatch):
     assert identity.sent_imessages == [{"text": "hello", "conversation_id": "imconv-123"}]
 
 
+def test_send_imessage_tool_rejects_text_over_limit(monkeypatch):
+    identity = FakeIdentity()
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "conversationId": "imconv-123",
+        "text": "x" * (tools.IMESSAGE_MAX_LENGTH + 1),
+    }))
+
+    assert out["error_code"] == "imessage_too_long"
+    assert out["char_count"] == tools.IMESSAGE_MAX_LENGTH + 1
+    assert identity.sent_imessages == []
+
+
 def test_send_imessage_tool_requires_exactly_one_target(monkeypatch):
     identity = FakeIdentity()
     monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
@@ -164,6 +178,30 @@ def test_adapter_imessage_reply_uses_last_inbound_conversation_id(monkeypatch):
 
     assert result.success is True
     assert identity.sent_imessages == [{"conversation_id": "imconv-123", "text": "reply"}]
+
+
+def test_adapter_imessage_reply_rejects_text_over_limit():
+    identity = FakeIdentity()
+    adapter = object.__new__(InkboxAdapter)
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {}
+    adapter._last_inbound_modality = {"contact-123": "imessage"}
+    adapter._last_inbound_imessage = {
+        "contact-123": {
+            "conversation_id": "imconv-123",
+            "remote_number": "+15555550101",
+            "message_id": "im-in",
+        },
+    }
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    result = asyncio.run(adapter.send("contact-123", "x" * (adapter_mod.IMESSAGE_MAX_LENGTH + 1)))
+
+    assert result.success is False
+    assert result.raw_response["error_code"] == "imessage_too_long"
+    assert result.raw_response["char_count"] == adapter_mod.IMESSAGE_MAX_LENGTH + 1
+    assert identity.sent_imessages == []
 
 
 def test_adapter_imessage_reply_uses_thread_conversation_id(monkeypatch):

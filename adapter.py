@@ -165,6 +165,7 @@ DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
+IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
 SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
 SMS_TEXT_BATCH_MAX_MESSAGES = 8
 SMS_TEXT_BATCH_MAX_CHARS = 4000
@@ -945,6 +946,42 @@ def _sms_too_long_failure_dict(content: str, *, max_chars: int = SMS_MAX_LENGTH)
         "platform": "inkbox",
         "mode": "sms",
         "error": _format_inkbox_sms_error(fields),
+        **fields,
+    }
+
+
+def _imessage_too_long_fields(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> Dict[str, Any]:
+    char_count = len(content or "")
+    return {
+        "status_code": None,
+        "error_code": "imessage_too_long",
+        "message": f"iMessage text is {char_count} characters; maximum is {max_chars}. Shorten it or split it into smaller iMessages.",
+        "detail": None,
+        "category": "content_length",
+        "retryable": False,
+        "char_count": char_count,
+        "max_chars": max_chars,
+        "fallback_allowed": False,
+    }
+
+
+def _imessage_too_long_failure(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> SendResult:
+    fields = _imessage_too_long_fields(content, max_chars=max_chars)
+    return SendResult(
+        success=False,
+        error=_format_inkbox_imessage_error(fields),
+        raw_response={"platform": "inkbox", "mode": "imessage", **fields},
+        retryable=False,
+    )
+
+
+def _imessage_too_long_failure_dict(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> Dict[str, Any]:
+    fields = _imessage_too_long_fields(content, max_chars=max_chars)
+    return {
+        "success": False,
+        "platform": "inkbox",
+        "mode": "imessage",
+        "error": _format_inkbox_imessage_error(fields),
         **fields,
     }
 
@@ -1788,6 +1825,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
         if mode == "sms" and len(content or "") > SMS_MAX_LENGTH:
             return _sms_too_long_failure(content)
+        if mode == "imessage" and len(content or "") > IMESSAGE_MAX_LENGTH:
+            return _imessage_too_long_failure(content)
 
         # Voice replies ride the per-call WebSocket the WS handler keeps
         # open for the duration of the call.  No SDK round-trip.
@@ -4155,6 +4194,8 @@ async def send_inkbox_direct(
             chosen_mode = "sms" if str(chat_id).startswith("+") or _sms_conversation_target(chat_id) else "email"
     if chosen_mode == "sms" and len(message or "") > SMS_MAX_LENGTH:
         return _sms_too_long_failure_dict(message)
+    if chosen_mode == "imessage" and len(message or "") > IMESSAGE_MAX_LENGTH:
+        return _imessage_too_long_failure_dict(message)
 
     def _do_send() -> Dict[str, Any]:
         with Inkbox(**inkbox_client_kwargs(api_key, base_url)) as client:

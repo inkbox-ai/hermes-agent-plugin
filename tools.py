@@ -15,9 +15,24 @@ try:
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
+IMESSAGE_MAX_LENGTH = 18995
+
 
 def _json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _message_too_long_payload(channel: str, content: str, max_chars: int) -> Dict[str, Any]:
+    char_count = len(content or "")
+    return {
+        "error": (
+            f"{channel} text is {char_count} characters; maximum is {max_chars}. "
+            f"Shorten it or split it into smaller {channel} messages."
+        ),
+        "error_code": f"{channel.lower()}_too_long",
+        "char_count": char_count,
+        "max_chars": max_chars,
+    }
 
 
 def _configured() -> bool:
@@ -370,6 +385,8 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
         media_urls = _normalize_recipients(args.get("mediaUrls") or args.get("media_urls"))
         if not text and not media_urls:
             return _json({"error": "Provide `text`, `mediaUrls`, or both."})
+        if len(text) > IMESSAGE_MAX_LENGTH:
+            return _json(_message_too_long_payload("iMessage", text, IMESSAGE_MAX_LENGTH))
         if media_urls and len(media_urls) > 1:
             return _json({"error": "Inkbox iMessage supports at most one media URL per message."})
 
@@ -708,7 +725,7 @@ SEND_IMESSAGE_SCHEMA = {
         "properties": {
             "conversationId": {"type": "string", "description": "Existing Inkbox iMessage conversation UUID. Preferred for replies. Mutually exclusive with `to`."},
             "to": {"type": "string", "description": "Recipient phone number in E.164 format. Only works after that person has messaged this agent. Mutually exclusive with `conversationId`."},
-            "text": {"type": "string", "description": "Message body."},
+            "text": {"type": "string", "maxLength": IMESSAGE_MAX_LENGTH, "description": "Message body, max 18995 chars."},
             "mediaUrls": {"type": "array", "items": {"type": "string"}, "maxItems": 1, "description": "Optional media URL (at most one per message)."},
             "sendStyle": {
                 "type": "string",
