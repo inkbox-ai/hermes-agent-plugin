@@ -12,10 +12,13 @@ Use this skill whenever the user asks for **multi-step outbound communication** 
 
 - `inkbox_send_email` — primary outbound for longer-form steps
 - `inkbox_send_sms` — short nudges; respects opt-in/opt-out
+- `inkbox_list_contacts` — find a named recipient before starting
+- `inkbox_lookup_contact` — resolve a known email/phone to a contact
+- `inkbox_get_contact` — inspect a specific contact returned by list/lookup
 - `inkbox_list_text_conversations` — check whether the recipient has replied to past SMS
 - `inkbox_get_text_conversation` — inspect a specific SMS thread when the conversation id is known
 
-Hermes does not expose contact lookup, historical email-read, note, or email-forwarding tools. Use literal email addresses/phone numbers supplied by the user or resolved contact context from the current Inkbox turn. If the recipient is only named and no address/number is available, ask the user for the concrete destination before starting.
+Hermes does not expose contact write, historical email-read, note, or email-forwarding tools. Use contact lookup/list/get or literal email addresses/phone numbers supplied by the user. If a named recipient lookup is ambiguous or does not include a usable destination, ask the user for the concrete destination before starting.
 
 ## Workflow
 
@@ -24,7 +27,7 @@ A sequence is a small state machine: a fixed list of steps, each with a channel 
 ### 1. Plan before doing
 
 Ask the user enough to fill in:
-- **Who** is the recipient (literal email address/phone number, or resolved current-contact context)
+- **Who** is the recipient (contact lookup result, literal email address/phone number, or resolved current-contact context)
 - **Steps:** ordered list, each with channel (email/SMS), copy, and delay from previous step
 - **Exit condition:** typically "any reply"; sometimes "specific keyword in reply"
 

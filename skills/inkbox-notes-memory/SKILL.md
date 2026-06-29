@@ -18,7 +18,7 @@ OpenClaw exposes persistent Inkbox notes. Hermes social-tier does not register I
 
 1. **Clarify storage target.** If the user says "remember this", ask whether host-local memory is acceptable when no memory tool is visible.
 2. **Do not fake persistence.** Do not say you saved an Inkbox note unless an actual note tool completed successfully.
-3. **For contact facts, use the contact guidance.** Hermes cannot create Inkbox contacts either; ask for concrete details to use in the current conversation.
+3. **For contact facts, use the contact guidance.** Hermes can read visible Inkbox contacts, but cannot create or update them.
 
 ## Access semantics
 

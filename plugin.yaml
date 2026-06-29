@@ -72,6 +72,9 @@ optional_env:
     secret: false
 provides_tools:
   - inkbox_whoami
+  - inkbox_lookup_contact
+  - inkbox_list_contacts
+  - inkbox_get_contact
   - inkbox_send_email
   - inkbox_send_sms
   - inkbox_list_text_conversations

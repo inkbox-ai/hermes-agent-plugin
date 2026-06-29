@@ -79,6 +79,9 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     tool_names = {args[0] for args, _kwargs in ctx.tools}
     assert tool_names == {
         "inkbox_whoami",
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
+        "inkbox_get_contact",
         "inkbox_send_email",
         "inkbox_send_sms",
         "inkbox_list_text_conversations",

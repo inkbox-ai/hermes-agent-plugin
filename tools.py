@@ -157,6 +157,77 @@ def inkbox_whoami(args: dict, **kwargs) -> str:
         return _json({"error": str(exc)})
 
 
+def _contact_arg(args: dict, snake_name: str, camel_name: Optional[str] = None) -> Optional[str]:
+    value = args.get(snake_name)
+    if value is None and camel_name:
+        value = args.get(camel_name)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def inkbox_lookup_contact(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        fields = (
+            ("email", "email"),
+            ("phone", "phone"),
+            ("email_domain", "emailDomain"),
+            ("email_contains", "emailContains"),
+            ("phone_contains", "phoneContains"),
+        )
+        supplied = {
+            snake_name: value
+            for snake_name, camel_name in fields
+            if (value := _contact_arg(args, snake_name, camel_name))
+        }
+        if len(supplied) != 1:
+            return _json({"error": "Specify exactly one of email, phone, emailDomain, emailContains, or phoneContains."})
+        contacts = client.contacts.lookup(**supplied)
+        return _json({
+            "ok": True,
+            "query": supplied,
+            "count": len(contacts or []),
+            "contacts": _json_safe(contacts or []),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_contacts(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        contacts = client.contacts.list(
+            q=_contact_arg(args, "q"),
+            order=_contact_arg(args, "order"),
+            limit=int(args.get("limit") or 25),
+            offset=int(args.get("offset") or 0),
+        )
+        return _json({
+            "ok": True,
+            "count": len(contacts or []),
+            "contacts": _json_safe(contacts or []),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_contact(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        contact_id = _contact_arg(args, "contact_id", "contactId")
+        if not contact_id:
+            return _json({"error": "`contactId` is required"})
+        contact = client.contacts.get(contact_id)
+        return _json({"ok": True, "contact": _json_safe(contact)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
 def inkbox_send_email(args: dict, **kwargs) -> str:
     del kwargs
     try:
@@ -600,6 +671,47 @@ WHOAMI_SCHEMA = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+LOOKUP_CONTACT_SCHEMA = {
+    "name": "inkbox_lookup_contact",
+    "description": "Reverse-lookup Inkbox contacts by exactly one email/phone filter. Returns contacts visible to this configured identity.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "email": {"type": "string", "description": "Exact email address."},
+            "phone": {"type": "string", "description": "Exact E.164 phone number."},
+            "emailDomain": {"type": "string", "description": "Email domain, e.g. example.com."},
+            "emailContains": {"type": "string", "description": "Substring match on email address."},
+            "phoneContains": {"type": "string", "description": "Substring match on phone number."},
+        },
+    },
+}
+
+LIST_CONTACTS_SCHEMA = {
+    "name": "inkbox_list_contacts",
+    "description": "Search/list Inkbox contacts visible to this configured identity. Use for name-based queries like 'who is Alex?'.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "q": {"type": "string", "description": "Optional free-text search across contact names, emails, phones, company, and notes."},
+            "order": {"type": "string", "enum": ["recent", "name"], "description": "Sort order. Defaults to the Inkbox SDK default."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+}
+
+GET_CONTACT_SCHEMA = {
+    "name": "inkbox_get_contact",
+    "description": "Fetch a single Inkbox contact by contact UUID, including names, emails, phones, company, and notes.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "contactId": {"type": "string", "description": "UUID of the Inkbox contact."},
+        },
+        "required": ["contactId"],
+    },
+}
+
 SEND_EMAIL_SCHEMA = {
     "name": "inkbox_send_email",
     "description": "Send an email from the configured Inkbox identity.",
@@ -824,6 +936,9 @@ PLACE_CALL_SCHEMA = {
 
 def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)
+    ctx.register_tool("inkbox_lookup_contact", "inkbox", LOOKUP_CONTACT_SCHEMA, inkbox_lookup_contact, check_fn=_configured)
+    ctx.register_tool("inkbox_list_contacts", "inkbox", LIST_CONTACTS_SCHEMA, inkbox_list_contacts, check_fn=_configured)
+    ctx.register_tool("inkbox_get_contact", "inkbox", GET_CONTACT_SCHEMA, inkbox_get_contact, check_fn=_configured)
     ctx.register_tool("inkbox_send_email", "inkbox", SEND_EMAIL_SCHEMA, inkbox_send_email, check_fn=_configured)
     ctx.register_tool("inkbox_send_sms", "inkbox", SEND_SMS_SCHEMA, inkbox_send_sms, check_fn=_configured)
     ctx.register_tool("inkbox_list_text_conversations", "inkbox", LIST_TEXT_CONVERSATIONS_SCHEMA, inkbox_list_text_conversations, check_fn=_configured)
