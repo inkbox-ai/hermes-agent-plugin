@@ -60,8 +60,9 @@ def _env_enablement() -> dict | None:
     seed: dict[str, Any] = {
         "api_key": cfg.api_key,
         "identity": cfg.identity,
-        "base_url": cfg.base_url,
     }
+    if cfg.base_url:
+        seed["base_url"] = cfg.base_url
     if cfg.signing_key:
         seed["signing_key"] = cfg.signing_key
     if cfg.public_url:

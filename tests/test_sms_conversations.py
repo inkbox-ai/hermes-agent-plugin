@@ -71,6 +71,20 @@ def test_send_sms_tool_prefers_conversation_id(monkeypatch):
     assert identity.sent_texts == [{"text": "hello", "conversation_id": "conv-123"}]
 
 
+def test_send_sms_tool_rejects_text_over_limit(monkeypatch):
+    identity = FakeIdentity()
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_sms({
+        "conversationId": "conv-123",
+        "text": "x" * (tools.SMS_MAX_LENGTH + 1),
+    }))
+
+    assert out["error_code"] == "sms_too_long"
+    assert out["char_count"] == tools.SMS_MAX_LENGTH + 1
+    assert identity.sent_texts == []
+
+
 def test_sms_conversation_read_tools_use_conversation_id(monkeypatch):
     identity = FakeIdentity()
     monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
@@ -114,6 +128,30 @@ def test_adapter_sms_reply_uses_last_inbound_conversation_id(monkeypatch):
 
     assert result.success is True
     assert identity.sent_texts == [{"conversation_id": "conv-123", "text": "reply"}]
+
+
+def test_adapter_sms_reply_rejects_text_over_limit():
+    identity = FakeIdentity()
+    adapter = object.__new__(InkboxAdapter)
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {}
+    adapter._last_inbound_modality = {"contact-123": "sms"}
+    adapter._last_inbound_sms = {
+        "contact-123": {
+            "conversation_id": "conv-123",
+            "remote_phone_number": "+15555550101",
+            "text_id": "txt-in",
+        },
+    }
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    result = asyncio.run(adapter.send("contact-123", "x" * (adapter_mod.SMS_MAX_LENGTH + 1), metadata={"mode": "sms"}))
+
+    assert result.success is False
+    assert result.raw_response["error_code"] == "sms_too_long"
+    assert result.raw_response["char_count"] == adapter_mod.SMS_MAX_LENGTH + 1
+    assert identity.sent_texts == []
 
 
 def test_adapter_sms_reply_uses_thread_conversation_id(monkeypatch):
@@ -200,6 +238,104 @@ def test_inbound_group_sms_injects_silence_policy(monkeypatch):
     assert events[0].source.thread_id == "sms:conv-123"
     assert adapter._last_inbound_sms["contact-123"]["conversation_id"] == "conv-123"
     assert adapter._last_inbound_sms["contact-123|sms:conv-123"]["conversation_kind"] == "group"
+
+
+def test_unknown_inbound_sms_uses_conversation_session_key(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    events = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_sms = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+
+    response = asyncio.run(adapter._on_text_received({
+        "event_type": "text.received",
+        "data": {
+            "text_message": {
+                "id": "txt-direct",
+                "direction": "inbound",
+                "remote_phone_number": "+15555550101",
+                "conversation_id": "conv-direct",
+                "text": "Hello.",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert events[0].source.chat_id == "sms:conv-direct"
+    assert events[0].source.thread_id == "sms:conv-direct"
+    assert adapter._last_inbound_modality["sms:conv-direct"] == "sms"
+    assert adapter._last_inbound_sms["sms:conv-direct"]["conversation_id"] == "conv-direct"
+
+
+def test_duplicate_inbound_sms_event_id_does_not_enqueue_twice(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    events = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_sms = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+    envelope = {
+        "event_type": "text.received",
+        "data": {
+            "text_message": {
+                "id": "txt-direct",
+                "direction": "inbound",
+                "remote_phone_number": "+15555550101",
+                "conversation_id": "conv-direct",
+                "text": "Hello.",
+            },
+        },
+    }
+
+    first = asyncio.run(adapter._on_text_received(envelope))
+    second = asyncio.run(adapter._on_text_received(envelope))
+
+    assert first.status == 200
+    assert second.text == "duplicate"
+    assert len(events) == 1
 
 
 def test_direct_send_accepts_sms_conversation_target(monkeypatch):

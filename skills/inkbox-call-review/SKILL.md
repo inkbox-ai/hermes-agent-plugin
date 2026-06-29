@@ -1,26 +1,27 @@
 ---
 name: inkbox-call-review
-description: Use when the user asks to review recent Inkbox calls, inspect missed calls, fetch call transcripts, summarize a past call, or prepare follow-up work based on call history.
+description: Use when the user asks about Inkbox calls, call transcripts, missed calls, or follow-up work. Hermes can use current live/post-call context, but does not expose historical call-read tools.
 user-invocable: false
 ---
 
 # Inkbox call review
 
-Use this skill when the user asks about previous Inkbox phone calls, missed calls, transcripts, or post-call summaries.
+Use this skill when the user asks about Inkbox phone calls, transcripts, or post-call summaries.
 
-## Required tools
+## Hermes tool availability
 
-- `inkbox_list_calls` — recent inbound + outbound calls, newest first
-- `inkbox_list_call_transcripts` — transcript segments for a call
+- Hermes exposes `inkbox_place_call` for outbound calls.
+- Hermes Realtime calls provide live transcript and post-call context to the agent during call wrap-up.
+- Hermes does not register historical call-read tools such as `inkbox_list_calls` or `inkbox_list_call_transcripts`.
 
 ## Workflow
 
-1. **Find calls.** Call `inkbox_list_calls` with a `limit` matching the requested window. Each call has `id`, `direction`, `remotePhoneNumber`, `status`, and timing fields.
-2. **Fetch transcripts.** For any call worth summarizing, call `inkbox_list_call_transcripts` with the call `id`. Segments are ordered by `seq`; `remote` is the outside caller/callee and `local` is the agent side.
-3. **Summarize carefully.** Transcripts are speech-to-text output, not exact quotes. Hedge appropriately unless the user asks for exact transcript text.
-4. **Prepare follow-ups.** If the user asks for a follow-up email/SMS/note after a past call, use the transcript and then the appropriate Inkbox tool.
+1. **Current call wrap-up.** If the current Realtime call just ended and transcript/context is present in the turn, use that supplied context. Do not claim to have fetched historical call data.
+2. **Past call requests.** If the user asks to inspect old calls, missed calls, or transcripts, explain that this Hermes installation does not expose historical call-read tools.
+3. **Prepare follow-ups from supplied context.** If the user gives the transcript or call summary in the conversation, use that text and the available Inkbox send tools for follow-up.
+4. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.
 
 ## Caveats
 
-- Very short or dropped calls may have no transcript segments.
-- Contact-rule-blocked calls may be hidden from identity-scoped API keys.
+- Historical call review is available in the OpenClaw power tier, not in the Hermes social tier.
+- Contact-rule-blocked calls may be rejected before Hermes sees an event.

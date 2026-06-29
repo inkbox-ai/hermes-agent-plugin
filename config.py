@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 
-INKBOX_BASE_URL_DEFAULT = "https://inkbox.ai"
+# Empty means "do not override"; the Inkbox SDK owns its API default.
+INKBOX_BASE_URL_DEFAULT = ""
 INKBOX_WS_PATH = "/phone/media/ws"
 
 
@@ -23,6 +24,15 @@ class InkboxPluginConfig:
     realtime_api_key: str = ""
     realtime_model: str = "gpt-realtime-2"
     realtime_voice: str = "cedar"
+
+
+def inkbox_base_url_kwargs(base_url: str | None = None) -> Dict[str, str]:
+    normalized = str(base_url or "").strip()
+    return {"base_url": normalized} if normalized else {}
+
+
+def inkbox_client_kwargs(api_key: str, base_url: str | None = None) -> Dict[str, str]:
+    return {"api_key": api_key, **inkbox_base_url_kwargs(base_url)}
 
 
 def env_flag(name: str, default: bool = False) -> bool:

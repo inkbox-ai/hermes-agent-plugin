@@ -19,7 +19,7 @@ optional_env:
     prompt: "Inkbox signing key"
     secret: true
   - name: INKBOX_BASE_URL
-    description: "Inkbox API base URL. Defaults to https://inkbox.ai."
+    description: "Optional Inkbox API base URL override. Defaults to the SDK default."
     prompt: "Inkbox base URL"
     secret: false
   - name: INKBOX_PUBLIC_URL
@@ -46,12 +46,38 @@ optional_env:
     description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted. If omitted, calls use Inkbox STT/TTS."
     prompt: "Realtime API key"
     secret: true
+  - name: INKBOX_REALTIME_ENABLED
+    description: "Use raw phone media with OpenAI Realtime when credentials exist. Set false to force Inkbox STT/TTS."
+    prompt: "Enable Realtime"
+    secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."
     prompt: "Realtime model"
     secret: false
+  - name: INKBOX_REALTIME_VOICE
+    description: "Realtime voice name. Defaults to cedar."
+    prompt: "Realtime voice"
+    secret: false
+  - name: INKBOX_REALTIME_CONNECT_TIMEOUT_S
+    description: "Seconds to wait for OpenAI Realtime preflight before falling back or failing."
+    prompt: "Realtime connect timeout"
+    secret: false
+  - name: INKBOX_REALTIME_CONSULT_TIMEOUT_S
+    description: "Seconds the Realtime voice agent waits for a Hermes consult before continuing."
+    prompt: "Realtime consult timeout"
+    secret: false
+  - name: INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS
+    description: "Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept."
+    prompt: "Realtime fallback"
+    secret: false
 provides_tools:
   - inkbox_whoami
+  - inkbox_lookup_contact
+  - inkbox_list_contacts
+  - inkbox_get_contact
+  - inkbox_create_contact
+  - inkbox_update_contact
+  - inkbox_delete_contact
   - inkbox_send_email
   - inkbox_send_sms
   - inkbox_list_text_conversations
@@ -60,4 +86,11 @@ provides_tools:
   - inkbox_get_text
   - inkbox_mark_text_read
   - inkbox_mark_text_conversation_read
+  - inkbox_imessage_triage_number
+  - inkbox_send_imessage
+  - inkbox_list_imessage_assignments
+  - inkbox_list_imessage_conversations
+  - inkbox_get_imessage_conversation
+  - inkbox_send_imessage_reaction
+  - inkbox_mark_imessage_conversation_read
   - inkbox_place_call

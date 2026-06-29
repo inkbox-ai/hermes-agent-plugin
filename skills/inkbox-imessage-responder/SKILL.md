@@ -17,7 +17,7 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 
 ## Required tools
 
-- `inkbox_list_imessage_conversations` — start here for triage; returns conversation IDs, latest-message previews, unread counts, and `assignment_status`
+- `inkbox_list_imessage_conversations` — start here for triage; returns conversation IDs, latest-message previews, unread counts, and assignment status
 - `inkbox_get_imessage_conversation` — pull message history (includes live tapback reactions on each message)
 - `inkbox_send_imessage` — outbound by `conversationId` (preferred) or `to` E.164
 
@@ -30,7 +30,7 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 
 ## Workflow
 
-1. **Pull conversations.** Call `inkbox_list_imessage_conversations` (defaults: `limit: 25`). Each row shows `id`, `remote_number`, `latest_text`, `unread_count`, `total_count`, and `assignment_status` — `released` means that person disconnected, so a reply will fail until they reconnect through the router; tell them how instead of retrying.
+1. **Pull conversations.** Call `inkbox_list_imessage_conversations` (defaults: `limit: 25`). Each row includes the conversation ID, remote number, latest text, unread count, total count, and assignment status. Field names may be snake_case or camelCase depending on the host. `released` means that person disconnected, so a reply will fail until they reconnect through the router; tell them how instead of retrying.
 
 2. **Pick a conversation to handle.** If you need history, call `inkbox_get_imessage_conversation` with `conversationId: row.id`. Inbound messages may carry `reactions` — live tapbacks the person put on a message.
 
@@ -42,9 +42,9 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 
 ## Inbound markers
 
-Inbound iMessages arrive prefixed `[inkbox:imessage from=+1555… conversation_id=… | contact…]` (bursts arrive as `[inkbox:imessage_burst …]` with one line per fragment). Use the marker for routing context; never echo it back.
+Inbound iMessages arrive prefixed `[inkbox:imessage from=+1555… conversation_id=… | contact…]`. Bursts may arrive as `[inkbox:imessage_burst …]`, and attachments may add `[inkbox:imessage_attachment …]` lines. Use the marker for routing context; never echo it back.
 
-While you compose a reply, the recipient automatically sees a typing indicator (the adapter pulses it until your message sends), so there is no separate "I'm typing" tool to call.
+While you compose a reply, the recipient automatically sees a typing indicator (the Inkbox bridge pulses it until your message sends), so there is no separate "I'm typing" tool to call.
 
 ## Reacting to your messages (tapbacks)
 
@@ -54,4 +54,4 @@ When someone puts a tapback on one of **your** messages, you receive a turn pref
 - `emphasize` may invite a brief acknowledgement or follow-up.
 - `love` / `like` / `laugh` / `dislike` are usually just acknowledgements that need no response.
 
-Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the adapter drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
+Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the Inkbox bridge drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.

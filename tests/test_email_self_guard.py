@@ -142,3 +142,80 @@ def test_inbound_email_from_same_agent_identity_marker_does_not_wake_agent(monke
 
     assert response.status == 200
     assert calls == {"resolve": 0, "enqueue": 0}
+
+
+def test_unknown_inbound_email_uses_thread_session_key(monkeypatch):
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    events = []
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    async def _enqueue(event):
+        events.append(event)
+
+    adapter = _adapter_for_self_mail_check()
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+    adapter._last_inbound_email = {}
+    adapter._last_inbound_modality = {}
+    adapter._resolve_channel_overrides = lambda *_args, **_kwargs: (None, None)
+
+    response = asyncio.run(adapter._on_mail_received(_mail_envelope("person@example.com")))
+
+    assert response.status == 200
+    assert events[0].source.chat_id == "email:thread-1"
+    assert events[0].source.thread_id == "email:thread-1"
+    assert adapter._last_inbound_modality["email:thread-1"] == "email"
+    assert adapter._last_inbound_email["email:thread-1"]["from_address"] == "person@example.com"
+
+
+def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class FakeIdentity:
+        def __init__(self):
+            self.sent = []
+
+        def send_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return types.SimpleNamespace(id="msg-out")
+
+    class FakeInkbox:
+        def __init__(self, identity):
+            self.identity = identity
+
+        def get_identity(self, _handle):
+            return self.identity
+
+    identity = FakeIdentity()
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+
+    adapter = object.__new__(InkboxAdapter)
+    adapter._identity_handle = "agent"
+    adapter._inkbox = FakeInkbox(identity)
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {}
+    adapter._last_inbound_modality = {"email:thread-1": "email"}
+    adapter._last_inbound_email = {
+        "email:thread-1": {
+            "subject": "Loop test",
+            "rfc_message_id": "<mail-in-1@example.com>",
+            "from_address": "person@example.com",
+        },
+    }
+
+    result = asyncio.run(adapter.send("email:thread-1", "Reply body"))
+
+    assert result.success is True
+    assert identity.sent == [{
+        "to": ["person@example.com"],
+        "subject": "Re: Loop test",
+        "body_text": "Reply body",
+        "in_reply_to_message_id": "<mail-in-1@example.com>",
+    }]

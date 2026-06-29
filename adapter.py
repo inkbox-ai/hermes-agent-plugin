@@ -132,6 +132,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
+    from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -143,6 +144,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -156,7 +158,6 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
 
 logger = logging.getLogger(__name__)
 
-INKBOX_BASE_URL_DEFAULT = "https://inkbox.ai"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 DEFAULT_WEBHOOK_PATH = "/webhook"
@@ -164,6 +165,7 @@ DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
+IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
 SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
 SMS_TEXT_BATCH_MAX_MESSAGES = 8
 SMS_TEXT_BATCH_MAX_CHARS = 4000
@@ -277,6 +279,23 @@ def _sms_state_key(chat_id: Any, thread_id: Any = None) -> str:
     chat = str(chat_id or "").strip()
     thread = str(thread_id or "").strip()
     return f"{chat}|{thread}" if thread else chat
+
+
+def _channel_thread_key(prefix: str, value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    return f"{prefix}:{raw}" if raw else None
+
+
+def _chat_id_for_route(
+    contact: Optional[Dict[str, Any]],
+    thread_key: Optional[str],
+    fallback: str,
+) -> str:
+    if contact and contact.get("id"):
+        return str(contact["id"])
+    if thread_key:
+        return thread_key
+    return fallback
 
 
 def _field(obj: Any, *names: str) -> Any:
@@ -917,7 +936,7 @@ def _sms_too_long_fields(content: str, *, max_chars: int = SMS_MAX_LENGTH) -> Di
     return {
         "status_code": None,
         "error_code": "sms_too_long",
-        "message": f"SMS content is {char_count} characters; maximum is {max_chars}.",
+        "message": f"SMS text is {char_count} characters; maximum is {max_chars}. Shorten it or split it into smaller SMS messages.",
         "detail": None,
         "category": "content_length",
         "retryable": False,
@@ -944,6 +963,42 @@ def _sms_too_long_failure_dict(content: str, *, max_chars: int = SMS_MAX_LENGTH)
         "platform": "inkbox",
         "mode": "sms",
         "error": _format_inkbox_sms_error(fields),
+        **fields,
+    }
+
+
+def _imessage_too_long_fields(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> Dict[str, Any]:
+    char_count = len(content or "")
+    return {
+        "status_code": None,
+        "error_code": "imessage_too_long",
+        "message": f"iMessage text is {char_count} characters; maximum is {max_chars}. Shorten it or split it into smaller iMessages.",
+        "detail": None,
+        "category": "content_length",
+        "retryable": False,
+        "char_count": char_count,
+        "max_chars": max_chars,
+        "fallback_allowed": False,
+    }
+
+
+def _imessage_too_long_failure(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> SendResult:
+    fields = _imessage_too_long_fields(content, max_chars=max_chars)
+    return SendResult(
+        success=False,
+        error=_format_inkbox_imessage_error(fields),
+        raw_response={"platform": "inkbox", "mode": "imessage", **fields},
+        retryable=False,
+    )
+
+
+def _imessage_too_long_failure_dict(content: str, *, max_chars: int = IMESSAGE_MAX_LENGTH) -> Dict[str, Any]:
+    fields = _imessage_too_long_fields(content, max_chars=max_chars)
+    return {
+        "success": False,
+        "platform": "inkbox",
+        "mode": "imessage",
+        "error": _format_inkbox_imessage_error(fields),
         **fields,
     }
 
@@ -1279,6 +1334,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._contact_cache: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str], float]] = {}
         # Webhook dedup by ``X-Inkbox-Request-Id`` (Inkbox retries on timeout).
         self._seen_request_ids: Dict[str, float] = {}
+        self._inflight_request_ids: Dict[str, float] = {}
         # session_key → pending inbound SMS fragments waiting for a quiet
         # window. Human SMS users often send fragments/corrections in bursts;
         # batching keeps one thought from becoming several self-interrupting
@@ -1357,7 +1413,7 @@ class InkboxAdapter(BasePlatformAdapter):
             pass
 
         try:
-            self._inkbox = Inkbox(api_key=self._api_key, base_url=self._base_url)
+            self._inkbox = Inkbox(**inkbox_client_kwargs(self._api_key, self._base_url))
         except Exception as exc:
             logger.error("[Inkbox] Failed to construct SDK client: %s", exc)
             self._release_platform_lock()
@@ -1787,6 +1843,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
         if mode == "sms" and len(content or "") > SMS_MAX_LENGTH:
             return _sms_too_long_failure(content)
+        if mode == "imessage" and len(content or "") > IMESSAGE_MAX_LENGTH:
+            return _imessage_too_long_failure(content)
 
         # Voice replies ride the per-call WebSocket the WS handler keeps
         # open for the duration of the call.  No SDK round-trip.
@@ -1954,7 +2012,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 return _sms_send_failure(exc, to_number=conversation_id or to_number)
 
         if mode == "email":
-            to_addr = (meta.get("to_email") or "").strip()
+            stash = self._last_inbound_email.get(str(chat_id), {})
+            to_addr = (meta.get("to_email") or stash.get("from_address") or "").strip()
             if not to_addr:
                 # If the chat_id already looks like an email address, use it
                 # directly — this is the unknown-sender path where the
@@ -1977,7 +2036,6 @@ class InkboxAdapter(BasePlatformAdapter):
             # when replying to a known thread, ``(no subject)`` when sending
             # cold.  Mail clients use both signals (header + subject) to group
             # the message into the original conversation.
-            stash = self._last_inbound_email.get(str(chat_id), {})
             in_reply_to = (
                 meta.get("in_reply_to_message_id")
                 or reply_to
@@ -2151,50 +2209,88 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=401, text="invalid signature")
 
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
-        if request_id and self._is_duplicate(request_id):
+        if request_id and self._dedup_begin(request_id):
             return web.Response(status=200, text="duplicate")
 
         try:
             envelope = json.loads(body or b"{}")
         except json.JSONDecodeError:
+            self._dedup_rollback(request_id)
             return web.Response(status=400, text="invalid json")
 
-        # Mail / SMS webhooks come wrapped in {event_type, data:{...}}; the
-        # incoming-call webhook is delivered as a flat object with a
-        # ``phone_number_id`` field at the top level (no envelope).
-        event_type = envelope.get("event_type")
-        if event_type == "message.received":
-            return await self._on_mail_received(envelope)
-        if event_type and event_type.startswith("message."):
-            # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
-            return web.Response(status=200, text="ok")
-        if event_type == "text.received":
-            return await self._on_text_received(envelope)
-        if event_type and event_type.startswith("text."):
-            return await self._on_text_lifecycle(envelope)
-        if event_type == "imessage.received":
-            return await self._on_imessage_received(envelope)
-        if event_type == "imessage.reaction_received":
-            return await self._on_imessage_reaction(envelope)
-        if event_type and event_type.startswith("imessage."):
-            return await self._on_imessage_lifecycle(envelope)
-        if "phone_number_id" in envelope and "remote_phone_number" in envelope:
-            return await self._on_incoming_call(envelope)
-        return web.Response(status=200, text="ignored")
+        try:
+            # Mail / SMS webhooks come wrapped in {event_type, data:{...}}; the
+            # incoming-call webhook is delivered as a flat object with a
+            # ``phone_number_id`` field at the top level (no envelope).
+            event_type = envelope.get("event_type")
+            if event_type == "message.received":
+                response = await self._on_mail_received(envelope)
+            elif event_type and event_type.startswith("message."):
+                # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
+                response = web.Response(status=200, text="ok")
+            elif event_type == "text.received":
+                response = await self._on_text_received(envelope)
+            elif event_type and event_type.startswith("text."):
+                response = await self._on_text_lifecycle(envelope)
+            elif event_type == "imessage.received":
+                response = await self._on_imessage_received(envelope)
+            elif event_type == "imessage.reaction_received":
+                response = await self._on_imessage_reaction(envelope)
+            elif event_type and event_type.startswith("imessage."):
+                response = await self._on_imessage_lifecycle(envelope)
+            elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
+                response = await self._on_incoming_call(envelope)
+            else:
+                response = web.Response(status=200, text="ignored")
+        except Exception:
+            self._dedup_rollback(request_id)
+            raise
+        self._dedup_commit(request_id)
+        return response
 
-    def _is_duplicate(self, request_id: str) -> bool:
+    def _prune_dedup_ids(self) -> None:
+        if not hasattr(self, "_seen_request_ids"):
+            self._seen_request_ids = {}
+        if not hasattr(self, "_inflight_request_ids"):
+            self._inflight_request_ids = {}
         now = time.time()
         # Prune expired entries opportunistically.
+        for store in (self._seen_request_ids, self._inflight_request_ids):
+            for rid, ts in list(store.items()):
+                if now - ts >= WEBHOOK_DEDUP_TTL_SECONDS:
+                    store.pop(rid, None)
         if len(self._seen_request_ids) > 2000:
-            self._seen_request_ids = {
-                rid: ts
-                for rid, ts in self._seen_request_ids.items()
-                if now - ts < WEBHOOK_DEDUP_TTL_SECONDS
-            }
+            oldest = sorted(self._seen_request_ids.items(), key=lambda item: item[1])
+            for rid, _ts in oldest[: len(self._seen_request_ids) - 2000]:
+                self._seen_request_ids.pop(rid, None)
+
+    def _dedup_begin(self, request_id: str) -> bool:
+        if not request_id:
+            return False
+        self._prune_dedup_ids()
         prior = self._seen_request_ids.get(request_id)
-        if prior is not None and now - prior < WEBHOOK_DEDUP_TTL_SECONDS:
+        if prior is not None:
             return True
-        self._seen_request_ids[request_id] = now
+        if request_id in self._inflight_request_ids:
+            return True
+        self._inflight_request_ids[request_id] = time.time()
+        return False
+
+    def _dedup_commit(self, request_id: str) -> None:
+        if not request_id:
+            return
+        self._prune_dedup_ids()
+        self._inflight_request_ids.pop(request_id, None)
+        self._seen_request_ids[request_id] = time.time()
+
+    def _dedup_rollback(self, request_id: str) -> None:
+        if request_id:
+            self._inflight_request_ids.pop(request_id, None)
+
+    def _is_duplicate(self, request_id: str) -> bool:
+        if self._dedup_begin(request_id):
+            return True
+        self._dedup_commit(request_id)
         return False
 
     async def _is_self_mail_received(
@@ -2250,10 +2346,14 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return web.Response(status=200, text="ok")
 
-        contact = await self._resolve_contact_full(kind="email", value=from_address)
-        chat_id = (contact["id"] if contact else from_address)
-        contact_name = contact["name"] if contact and contact.get("name") else None
         thread_id = message.get("thread_id")
+        contact = await self._resolve_contact_full(kind="email", value=from_address)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("email", thread_id),
+            from_address,
+        )
+        contact_name = contact["name"] if contact and contact.get("name") else None
         rfc_message_id = message.get("message_id")  # RFC 5322 Message-ID for threading
         subject = message.get("subject") or ""
 
@@ -2667,10 +2767,22 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _on_text_received(self, envelope: Dict[str, Any]) -> "web.Response":
         text_msg = (envelope.get("data") or {}).get("text_message") or {}
+        text_id = str(text_msg.get("id") or "").strip()
+        event_key = f"text:{text_id}" if text_id else ""
+        if self._dedup_begin(event_key):
+            return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_text_received_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_text_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        text_msg = (envelope.get("data") or {}).get("text_message") or {}
         data = envelope.get("data") or {}
         text_id = str(text_msg.get("id") or "").strip()
-        if text_id and self._is_duplicate(f"text:{text_id}"):
-            return web.Response(status=200, text="duplicate")
         direction = str(text_msg.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
@@ -2708,7 +2820,11 @@ class InkboxAdapter(BasePlatformAdapter):
         )
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("sms", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         raw_body = text_msg.get("text") or ""
         body = raw_body
@@ -2868,8 +2984,20 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
-        if message_id and self._is_duplicate(f"imessage:{message_id}"):
+        event_key = f"imessage:{message_id}" if message_id else ""
+        if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_imessage_received_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_imessage_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        message = (envelope.get("data") or {}).get("message") or {}
+        message_id = str(message.get("id") or "").strip()
         direction = str(message.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
@@ -2883,7 +3011,11 @@ class InkboxAdapter(BasePlatformAdapter):
         ).strip()
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("imessage", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         raw_body = message.get("content") or ""
         body = raw_body
@@ -2975,7 +3107,7 @@ class InkboxAdapter(BasePlatformAdapter):
     IMESSAGE_TYPING_REFRESH_SECONDS = 40.0
     # Safety cap so a turn that errors out before send() (and thus never
     # cancels the pulse) can't leave the indicator pulsing indefinitely.
-    IMESSAGE_TYPING_MAX_SECONDS = 300.0
+    IMESSAGE_TYPING_MAX_SECONDS = 600.0
 
     def _typing_tasks(self) -> Dict[str, "asyncio.Task"]:
         """Lazily-initialized typing-task registry.
@@ -3068,8 +3200,20 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         reaction = (envelope.get("data") or {}).get("reaction") or {}
         reaction_id = str(reaction.get("id") or "").strip()
-        if reaction_id and self._is_duplicate(f"imessage_reaction:{reaction_id}"):
+        event_key = f"imessage_reaction:{reaction_id}" if reaction_id else ""
+        if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_imessage_reaction_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_imessage_reaction_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        reaction = (envelope.get("data") or {}).get("reaction") or {}
+        reaction_id = str(reaction.get("id") or "").strip()
         direction = str(reaction.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             # The agent's own outbound tapbacks echo back as a webhook too.
@@ -3089,7 +3233,11 @@ class InkboxAdapter(BasePlatformAdapter):
         timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = (contact["id"] if contact else remote)
+        chat_id = _chat_id_for_route(
+            contact,
+            _channel_thread_key("imessage", conversation_id),
+            remote,
+        )
         contact_name = contact["name"] if contact and contact.get("name") else None
         contact_block = self._contact_marker(contact)
 
@@ -3370,6 +3518,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     contact_name=str(contact_name),
                     remote_phone_number=remote_phone_number,
                     direction=direction or "inbound",
+                    agent_identity_handle=self._identity_handle,
                     agent_identity_email=getattr(
                         getattr(identity_for_meta, "mailbox", None),
                         "email_address",
@@ -4153,9 +4302,11 @@ async def send_inkbox_direct(
             chosen_mode = "sms" if str(chat_id).startswith("+") or _sms_conversation_target(chat_id) else "email"
     if chosen_mode == "sms" and len(message or "") > SMS_MAX_LENGTH:
         return _sms_too_long_failure_dict(message)
+    if chosen_mode == "imessage" and len(message or "") > IMESSAGE_MAX_LENGTH:
+        return _imessage_too_long_failure_dict(message)
 
     def _do_send() -> Dict[str, Any]:
-        with Inkbox(api_key=api_key, base_url=base_url) as client:
+        with Inkbox(**inkbox_client_kwargs(api_key, base_url)) as client:
             identity = client.get_identity(handle)
 
             if chosen_mode == "sms":

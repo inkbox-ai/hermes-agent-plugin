@@ -1,57 +1,42 @@
 ---
 name: inkbox-credential-use
-description: Use when the user asks the agent to "log into X", "get the API key for Y", "fetch the SSH key for Z", or "give me the TOTP code for service A". Covers the credential vault path through the Inkbox plugin. Always list-then-get; never enumerate plaintext.
+description: Use when the user asks the agent to "log into X", "get the API key for Y", "fetch the SSH key for Z", or "give me the TOTP code for service A". Hermes does not expose Inkbox vault tools; explain the limitation and do not invent credential access.
 user-invocable: false
 ---
 
 # Inkbox credential use
 
-When an action requires plaintext credentials (a password, an API key, an SSH key, a TOTP code), use this skill to retrieve them through the Inkbox vault. The vault tools are **all optional** — the user must opt them into `tools.allow` before this skill can do anything.
+OpenClaw exposes Inkbox vault tools. Hermes social-tier does not register credential vault tools, so this plugin cannot list, fetch, or generate credentials/TOTP codes through Inkbox.
 
-## Required tools (all optional, must be allowlisted)
+## Hermes tool availability
 
-- `inkbox_credentials_list` — metadata only (id, name, secretType). Safe to call freely.
-- `inkbox_credentials_get_login` — plaintext login (username + password + optional URL)
-- `inkbox_credentials_get_api_key` — plaintext API key
-- `inkbox_credentials_get_ssh_key` — plaintext SSH private key (+ public, fingerprint, passphrase)
-- `inkbox_totp_code` — current TOTP code for a login that has TOTP configured
+- There is no `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, or `inkbox_totp_code` tool in Hermes.
+- Do not claim that you checked the vault or retrieved a credential.
+- If the user needs vault access, direct them to Inkbox Console or a host/plugin tier that exposes the Inkbox vault tools.
 
 ## Prerequisites
 
-- The vault must be initialized in the Inkbox Console.
-- The vault unlock key must be available in the `INKBOX_VAULT_KEY` env var (or a custom env var if `vault.keyEnvVar` is configured).
-- The identity must have access grants to the secrets in question (admin-set via the Inkbox Console).
-
-If `INKBOX_VAULT_KEY` is not set, the very first credential tool call returns "Vault is locked." Direct the user to export the env var in the shell launching Hermes, then retry.
+- The user must provide credentials through an approved host mechanism outside this Hermes Inkbox plugin.
+- Do not ask the user to paste secrets into chat unless they explicitly choose that path and the current host policy allows it.
 
 ## Workflow
 
-1. **List first.** Call `inkbox_credentials_list` (optionally filter by `type`). Read the metadata to find the right `id` by `name`. Never guess UUIDs.
-
-2. **Confirm with the user when stakes are high.** If the user said "log into AWS production," verify the matching secret's `name` and `description` look right before fetching plaintext. The agent should not silently pull production credentials.
-
-3. **Fetch the typed plaintext.** Call the matching get tool:
-   - Login → `inkbox_credentials_get_login`
-   - API key → `inkbox_credentials_get_api_key`
-   - SSH key → `inkbox_credentials_get_ssh_key`
-
-   Each returns the payload as JSON. Use the fields directly in the action the user asked for; do not echo the plaintext back to the user unless they explicitly asked to see it.
-
-4. **TOTP** is a separate flow. Call `inkbox_totp_code` with the login secret's UUID — returns `{ code, secondsRemaining }`. The code is valid for `secondsRemaining` seconds; if it's <5, regenerate before using.
+1. **State the limitation.** Say that this Hermes installation does not expose Inkbox vault tools.
+2. **Offer a safe path.** Ask the user to configure the needed credential through the host's supported secret mechanism or Inkbox Console.
+3. **Avoid plaintext echo.** If credentials arrive through another tool, use them for the requested action and do not repeat plaintext unless the user explicitly asked to see it.
 
 ## Hygiene
 
-- **Don't list-then-dump.** `credentials_list` returns metadata only by design. Don't call all three `get_*` tools in a loop trying to enumerate the vault.
-- **Don't paste plaintext into chat.** When the user asks "use the GitHub PAT to push," fetch it and use it — don't repeat it back to them.
-- **Don't store outside this call.** The plugin caches the unlocked vault in-process; you don't need to (and shouldn't) keep plaintext in session memory.
+- **Don't fake vault access.** No Inkbox vault tool is available in Hermes.
+- **Don't paste plaintext into chat.** When another approved credential source exists, use it without repeating secrets.
+- **Don't store secrets in session memory.** Treat credentials as transient.
 
 ## Errors
 
 | Error | Meaning |
 |---|---|
-| `Vault is locked. Set the INKBOX_VAULT_KEY...` | Env var missing — direct the user to set it. |
-| `404` on get_* | Wrong secret id, or this identity doesn't have access. |
-| `TypeError` on get_login/get_api_key/get_ssh_key | Caller picked the wrong typed getter for the secret's type. Re-list to see `secretType`. |
+| Missing credential tool | This Hermes plugin tier does not expose Inkbox vault tools. |
+| User asks for a secret by name | Ask them to configure it through the host's supported secret path or Inkbox Console. |
 
 ## What this skill does NOT cover
 

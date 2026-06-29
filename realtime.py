@@ -254,6 +254,7 @@ class RealtimeCallMeta:
     contact_name: str
     remote_phone_number: Optional[str]
     direction: str  # "inbound" or "outbound"
+    agent_identity_handle: Optional[str] = None
     agent_identity_email: Optional[str] = None
     agent_identity_phone: Optional[str] = None
     # True only when a real Inkbox contact resolved. When false, contact_name
@@ -357,10 +358,12 @@ def build_realtime_instructions(
         "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
         "Do not mention implementation details unless the caller asks.",
     ]
+    if meta.agent_identity_handle:
+        lines.append(f"Your Inkbox identity handle: {meta.agent_identity_handle}.")
     if meta.agent_identity_email:
-        lines.append(f"Your email identity: {meta.agent_identity_email}.")
+        lines.append(f"Your Inkbox agent email address: {meta.agent_identity_email}.")
     if meta.agent_identity_phone:
-        lines.append(f"Your phone number: {meta.agent_identity_phone}.")
+        lines.append(f"Your Inkbox agent phone number: {meta.agent_identity_phone}.")
     if meta.remote_phone_number:
         lines.append(f"Caller is calling from: {meta.remote_phone_number}.")
     if meta.contact_known and meta.contact_name and meta.contact_name not in ("unknown", ""):

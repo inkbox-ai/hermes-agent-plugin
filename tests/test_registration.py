@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +46,22 @@ class DummyContext:
         self.skills.append((args, kwargs))
 
 
+def _manifest_provides_tools() -> set[str]:
+    tools: set[str] = set()
+    in_block = False
+    for raw_line in (ROOT / "plugin.yaml").read_text().splitlines():
+        if raw_line.startswith("provides_tools:"):
+            in_block = True
+            continue
+        if in_block and raw_line and not raw_line.startswith(" "):
+            break
+        if in_block:
+            line = raw_line.strip()
+            if line.startswith("- "):
+                tools.add(line[2:].strip())
+    return tools
+
+
 def test_registers_inkbox_platform_tools_commands_and_skills():
     entry = _load_entry_module()
     ctx = DummyContext()
@@ -62,6 +79,12 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     tool_names = {args[0] for args, _kwargs in ctx.tools}
     assert tool_names == {
         "inkbox_whoami",
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
+        "inkbox_get_contact",
+        "inkbox_create_contact",
+        "inkbox_update_contact",
+        "inkbox_delete_contact",
         "inkbox_send_email",
         "inkbox_send_sms",
         "inkbox_list_text_conversations",
@@ -79,7 +102,19 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_mark_imessage_conversation_read",
         "inkbox_place_call",
     }
+    assert _manifest_provides_tools() == tool_names
 
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
+
+
+def test_skill_required_tools_match_runtime_tools():
+    available = _manifest_provides_tools()
+    for skill_md in (ROOT / "skills").glob("*/SKILL.md"):
+        text = skill_md.read_text()
+        match = re.search(r"## Required tools(?P<section>.*?)(?:\n## |\Z)", text, flags=re.S)
+        if not match:
+            continue
+        required = set(re.findall(r"`(inkbox_[A-Za-z0-9_]+)`", match.group("section")))
+        assert required <= available, f"{skill_md} requires unavailable tools: {required - available}"

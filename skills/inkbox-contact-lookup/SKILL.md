@@ -1,55 +1,46 @@
 ---
 name: inkbox-contact-lookup
-description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs to resolve, create, or update an Inkbox contact record. Also use as a prereq before sending email/SMS to a name (rather than a literal address).
+description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs contact context. Hermes can read and write Inkbox contacts visible to this identity, but does not expose contact admin tools.
 user-invocable: false
 ---
 
 # Inkbox contact lookup
 
-The Inkbox plugin gives the agent access to contacts visible to the configured identity. Use this skill to resolve "who is X", find recipient details, or save contact details into Inkbox contacts.
+Hermes is the Inkbox social-assistant tier. It receives contact context on inbound email, SMS, iMessage, and calls when Inkbox resolves the sender, and it can read or update contacts visible to the configured identity.
 
-## Required tools
+## Hermes tool availability
 
-- `inkbox_lookup_contact` — reverse-lookup by exactly one filter (email, phone, emailDomain, emailContains, phoneContains)
-- `inkbox_get_contact` — fetch a full contact record by UUID
-- `inkbox_list_contacts` — free-text search via `q`, with `order: "recent" | "name"`
-- `inkbox_create_contact` — create an Inkbox address-book contact when the user asks to save a person/contact
-
-## Optional (allowlist needed)
-
-- `inkbox_update_contact` — update an existing contact after lookup/get confirms the target UUID
-- `inkbox_export_contact_vcard` — vCard 4.0 string export
+- Use `inkbox_list_contacts` for name-based searches like "who is Alex?".
+- Use `inkbox_lookup_contact` when you have an exact or partial email/phone filter.
+- Use `inkbox_get_contact` to fetch a full contact by UUID after list/lookup returns one.
+- Use `inkbox_create_contact` when the user asks you to save a new person or contact card.
+- Use `inkbox_update_contact` when the user asks you to change an existing contact; look up the contact first if you do not already have its UUID.
+- Use `inkbox_delete_contact` only after the target contact is explicit and confirmed.
+- There is no vCard export/import, contact access, or contact rule tool in Hermes.
+- If an inbound message includes a resolved contact marker, treat that marker as the source of truth for the current sender.
+- If the user asks for broad contact administration, direct them to Inkbox Console or to a host/plugin that exposes the Inkbox power-assistant admin tools.
 
 ## Workflow
 
-1. **Lookup-first.** If the user mentions an email or phone, try `inkbox_lookup_contact` first — it's the cheapest path. Pass exactly one filter:
-   - `{ "email": "ada@example.com" }`
-   - `{ "phone": "+15551234567" }`
-   - `{ "emailDomain": "example.com" }`
-   - `{ "emailContains": "ada" }`
-   - `{ "phoneContains": "555" }`
-
-2. **Fall back to free-text search.** For name-based queries ("find Ada Lovelace"), use `inkbox_list_contacts` with `q: "Ada"`. Match by `givenName` + `familyName` in the results.
-
-3. **Save contact details in Inkbox.** If the user asks to save a contact, do not use workspace notes. First try `inkbox_lookup_contact` with any known phone/email. If nothing exists, call `inkbox_create_contact` with known name/email/phone fields and put loose context in the contact `notes` field.
-
-4. **Update existing contacts when allowed.** If lookup/list returns the intended person and `inkbox_update_contact` is available, use it to add/correct phone, email, name, company, job title, or notes. If update is unavailable, tell the user the existing contact was found but update is not allowlisted.
-
-5. **Pull the full record when you need it.** If lookup/list returns a contact and you need addresses, vCard fields, or all phone/email entries, call `inkbox_get_contact` with the `id`.
-
-6. **Then act.** Use the resolved email or phone to call `inkbox_send_email`, `inkbox_send_sms`, etc.
+1. **Use resolved inbound context first.** If the message starts with an `[inkbox:...]` marker containing contact fields, use those fields and do not invent missing identity details.
+2. **Look up named people.** If the user asks about a named person, call `inkbox_list_contacts` with the name before saying you do not know.
+3. **Use literal addresses when supplied.** If the user gives an email address or phone number, use it directly with `inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`, or `inkbox_place_call`; optionally call `inkbox_lookup_contact` if the user asks who it belongs to.
+4. **Create contacts when asked.** If the user asks you to save someone new and provides at least one useful field, call `inkbox_create_contact`.
+5. **Update contacts by UUID.** If the user asks you to edit a contact, resolve the contact with list/lookup/get first, then call `inkbox_update_contact` with only the fields that should change. Omitted fields remain unchanged.
+6. **Delete cautiously.** If the user asks to delete a contact, confirm the exact target when there is any ambiguity, then call `inkbox_delete_contact` with the UUID.
+7. **Ask when the target is ambiguous.** If lookup returns multiple plausible contacts, ask which contact the user means before sending, calling, updating, or deleting.
 
 ## Access semantics
 
-- Contact reads are **filtered server-side** by per-identity grants. If a contact doesn't appear in your list/lookup results, this identity doesn't have access — not necessarily that the contact doesn't exist.
-- Contacts created through `inkbox_create_contact` are Inkbox address-book records, not workspace memories.
-- Lookup may return zero results. Don't retry with the same filter; either widen (try `emailDomain` instead of `email`) or fall back to a free-text `list` query.
+- Contact context is **filtered server-side** by per-identity grants. If Inkbox does not include a resolved contact marker, this identity may not have access or the sender may be unknown.
+- Hermes contact tools operate only on contacts visible/writable to the configured identity.
 - Grant management is handled by the `inkbox-identity-access` skill when the user asks to share contacts across Inkbox identities.
 
 ## What this skill does NOT cover
 
 - Bulk vCard import — that's an admin flow, not exposed as an agent tool.
-- Arbitrary workspace memory. Use Inkbox notes for persistent notes and Inkbox contacts for address-book facts.
+- vCard export — not exposed as an agent tool.
+- Arbitrary workspace memory. Use the host's available memory/note tools only when they are actually registered.
 
 ## When you need more — raw Inkbox docs
 

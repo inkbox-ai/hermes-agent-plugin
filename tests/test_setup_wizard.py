@@ -11,6 +11,11 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import setup_wizard
 
 
+def test_avatar_base_url_defaults_to_public_api():
+    assert setup_wizard._avatar_base_url("") == "https://inkbox.ai"
+    assert setup_wizard._avatar_base_url("https://proxy.example/") == "https://proxy.example"
+
+
 def test_install_command_prefers_uv_when_available(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
@@ -56,6 +61,185 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     assert "uv pip install --python" in out
     assert "inkbox>=0.4.10" in out
     assert "aiohttp>=3.9" in out
+
+
+def test_api_key_flow_rejects_unknown_auth_subtype(monkeypatch, capsys):
+    class FakeWhoamiApiKeyResponse:
+        auth_subtype = "future_scope"
+        organization_id = "org_123"
+
+    class FakeInkbox:
+        def __init__(self, **_kwargs):
+            pass
+
+        def whoami(self):
+            return FakeWhoamiApiKeyResponse()
+
+        def list_identities(self):
+            raise AssertionError("unknown subtypes must not fall back to identity listing")
+
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: "ApiKey_test")
+
+    result = setup_wizard._api_key_flow(
+        "https://inkbox.ai",
+        FakeInkbox,
+        Exception,
+        FakeWhoamiApiKeyResponse,
+        "admin_scoped",
+        "agent_scoped_claimed",
+        "agent_scoped_unclaimed",
+        object,
+    )
+
+    assert result == (None, "", False)
+    assert "Unsupported API-key subtype" in capsys.readouterr().out
+
+
+def test_admin_api_key_flow_selects_existing_identity_and_mints_agent_key(monkeypatch):
+    class FakeWhoamiApiKeyResponse:
+        auth_subtype = "admin_scoped"
+        organization_id = "org_123"
+
+    class FakeApiKeys:
+        def __init__(self):
+            self.created = []
+
+        def create(self, **kwargs):
+            self.created.append(kwargs)
+            return types.SimpleNamespace(api_key="ApiKey_agent_selected")
+
+    class FakeInkbox:
+        instance = None
+
+        def __init__(self, **_kwargs):
+            self.api_keys = FakeApiKeys()
+            self.phone_numbers = types.SimpleNamespace()
+            self.identities = [
+                types.SimpleNamespace(agent_handle="first-agent", email_address=None),
+                types.SimpleNamespace(agent_handle="selected-agent", email_address=None),
+            ]
+            self.details = {
+                "first-agent": types.SimpleNamespace(
+                    id="identity-1",
+                    agent_handle="first-agent",
+                    email_address="first@example.com",
+                    phone_number=types.SimpleNamespace(number="+15550000001", type="local"),
+                ),
+                "selected-agent": types.SimpleNamespace(
+                    id="identity-2",
+                    agent_handle="selected-agent",
+                    email_address="selected@example.com",
+                    phone_number=types.SimpleNamespace(number="+15550000002", type="local"),
+                ),
+            }
+            FakeInkbox.instance = self
+
+        def whoami(self):
+            return FakeWhoamiApiKeyResponse()
+
+        def list_identities(self):
+            return self.identities
+
+        def get_identity(self, handle):
+            return self.details[handle]
+
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: "ApiKey_admin")
+    monkeypatch.setattr(setup_wizard, "prompt_choice", lambda *_args, **_kwargs: 1)
+
+    identity, agent_key, did_provision_phone = setup_wizard._api_key_flow(
+        "https://inkbox.ai",
+        FakeInkbox,
+        Exception,
+        FakeWhoamiApiKeyResponse,
+        "admin_scoped",
+        "agent_scoped_claimed",
+        "agent_scoped_unclaimed",
+        object,
+    )
+
+    assert identity.agent_handle == "selected-agent"
+    assert agent_key == "ApiKey_agent_selected"
+    assert did_provision_phone is False
+    assert FakeInkbox.instance.api_keys.created == [
+        {
+            "label": "Hermes gateway - selected-agent",
+            "description": (
+                "Auto-minted by hermes inkbox setup. Scoped to one agent "
+                "identity so the gateway never stores the admin key."
+            ),
+            "scoped_identity_id": "identity-2",
+        }
+    ]
+
+
+def test_admin_api_key_flow_can_create_identity_and_mint_agent_key(monkeypatch):
+    class FakeWhoamiApiKeyResponse:
+        auth_subtype = "admin_scoped"
+        organization_id = "org_123"
+
+    class FakeApiKeys:
+        def __init__(self):
+            self.created = []
+
+        def create(self, **kwargs):
+            self.created.append(kwargs)
+            return types.SimpleNamespace(api_key="ApiKey_agent_new")
+
+    class FakeInkbox:
+        instance = None
+
+        def __init__(self, **_kwargs):
+            self.api_keys = FakeApiKeys()
+            self.phone_numbers = types.SimpleNamespace()
+            self.created_identities = []
+            FakeInkbox.instance = self
+
+        def whoami(self):
+            return FakeWhoamiApiKeyResponse()
+
+        def list_identities(self):
+            return []
+
+        def create_identity(self, handle, **kwargs):
+            self.created_identities.append((handle, kwargs))
+            return types.SimpleNamespace(
+                id="identity-new",
+                agent_handle=handle,
+                email_address=f"{handle}@example.com",
+                phone_number=None,
+            )
+
+    answers = iter(["ApiKey_admin", "new-agent", "New Agent"])
+    monkeypatch.setattr(setup_wizard, "prompt", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+
+    identity, agent_key, did_provision_phone = setup_wizard._api_key_flow(
+        "https://inkbox.ai",
+        FakeInkbox,
+        Exception,
+        FakeWhoamiApiKeyResponse,
+        "admin_scoped",
+        "agent_scoped_claimed",
+        "agent_scoped_unclaimed",
+        object,
+    )
+
+    assert identity.agent_handle == "new-agent"
+    assert agent_key == "ApiKey_agent_new"
+    assert did_provision_phone is False
+    assert FakeInkbox.instance.created_identities == [
+        ("new-agent", {"display_name": "New Agent", "phone_number": None})
+    ]
+    assert FakeInkbox.instance.api_keys.created == [
+        {
+            "label": "Hermes gateway - new-agent",
+            "description": (
+                "Auto-minted by hermes inkbox setup. Scoped to one agent "
+                "identity so the gateway never stores the admin key."
+            ),
+            "scoped_identity_id": "identity-new",
+        }
+    ]
 
 
 def test_plugin_install_does_not_prompt_for_inkbox_env():
