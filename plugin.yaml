@@ -46,9 +46,29 @@ optional_env:
     description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted. If omitted, calls use Inkbox STT/TTS."
     prompt: "Realtime API key"
     secret: true
+  - name: INKBOX_REALTIME_ENABLED
+    description: "Use raw phone media with OpenAI Realtime when credentials exist. Set false to force Inkbox STT/TTS."
+    prompt: "Enable Realtime"
+    secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."
     prompt: "Realtime model"
+    secret: false
+  - name: INKBOX_REALTIME_VOICE
+    description: "Realtime voice name. Defaults to cedar."
+    prompt: "Realtime voice"
+    secret: false
+  - name: INKBOX_REALTIME_CONNECT_TIMEOUT_S
+    description: "Seconds to wait for OpenAI Realtime preflight before falling back or failing."
+    prompt: "Realtime connect timeout"
+    secret: false
+  - name: INKBOX_REALTIME_CONSULT_TIMEOUT_S
+    description: "Seconds the Realtime voice agent waits for a Hermes consult before continuing."
+    prompt: "Realtime consult timeout"
+    secret: false
+  - name: INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS
+    description: "Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept."
+    prompt: "Realtime fallback"
     secret: false
 provides_tools:
   - inkbox_whoami

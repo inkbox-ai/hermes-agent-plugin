@@ -289,6 +289,55 @@ def test_unknown_inbound_sms_uses_conversation_session_key(monkeypatch):
     assert adapter._last_inbound_sms["sms:conv-direct"]["conversation_id"] == "conv-direct"
 
 
+def test_duplicate_inbound_sms_event_id_does_not_enqueue_twice(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    events = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_sms = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+    envelope = {
+        "event_type": "text.received",
+        "data": {
+            "text_message": {
+                "id": "txt-direct",
+                "direction": "inbound",
+                "remote_phone_number": "+15555550101",
+                "conversation_id": "conv-direct",
+                "text": "Hello.",
+            },
+        },
+    }
+
+    first = asyncio.run(adapter._on_text_received(envelope))
+    second = asyncio.run(adapter._on_text_received(envelope))
+
+    assert first.status == 200
+    assert second.text == "duplicate"
+    assert len(events) == 1
+
+
 def test_direct_send_accepts_sms_conversation_target(monkeypatch):
     identity = FakeIdentity()
 

@@ -1334,6 +1334,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._contact_cache: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str], float]] = {}
         # Webhook dedup by ``X-Inkbox-Request-Id`` (Inkbox retries on timeout).
         self._seen_request_ids: Dict[str, float] = {}
+        self._inflight_request_ids: Dict[str, float] = {}
         # session_key → pending inbound SMS fragments waiting for a quiet
         # window. Human SMS users often send fragments/corrections in bursts;
         # batching keeps one thought from becoming several self-interrupting
@@ -2208,50 +2209,88 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=401, text="invalid signature")
 
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
-        if request_id and self._is_duplicate(request_id):
+        if request_id and self._dedup_begin(request_id):
             return web.Response(status=200, text="duplicate")
 
         try:
             envelope = json.loads(body or b"{}")
         except json.JSONDecodeError:
+            self._dedup_rollback(request_id)
             return web.Response(status=400, text="invalid json")
 
-        # Mail / SMS webhooks come wrapped in {event_type, data:{...}}; the
-        # incoming-call webhook is delivered as a flat object with a
-        # ``phone_number_id`` field at the top level (no envelope).
-        event_type = envelope.get("event_type")
-        if event_type == "message.received":
-            return await self._on_mail_received(envelope)
-        if event_type and event_type.startswith("message."):
-            # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
-            return web.Response(status=200, text="ok")
-        if event_type == "text.received":
-            return await self._on_text_received(envelope)
-        if event_type and event_type.startswith("text."):
-            return await self._on_text_lifecycle(envelope)
-        if event_type == "imessage.received":
-            return await self._on_imessage_received(envelope)
-        if event_type == "imessage.reaction_received":
-            return await self._on_imessage_reaction(envelope)
-        if event_type and event_type.startswith("imessage."):
-            return await self._on_imessage_lifecycle(envelope)
-        if "phone_number_id" in envelope and "remote_phone_number" in envelope:
-            return await self._on_incoming_call(envelope)
-        return web.Response(status=200, text="ignored")
+        try:
+            # Mail / SMS webhooks come wrapped in {event_type, data:{...}}; the
+            # incoming-call webhook is delivered as a flat object with a
+            # ``phone_number_id`` field at the top level (no envelope).
+            event_type = envelope.get("event_type")
+            if event_type == "message.received":
+                response = await self._on_mail_received(envelope)
+            elif event_type and event_type.startswith("message."):
+                # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
+                response = web.Response(status=200, text="ok")
+            elif event_type == "text.received":
+                response = await self._on_text_received(envelope)
+            elif event_type and event_type.startswith("text."):
+                response = await self._on_text_lifecycle(envelope)
+            elif event_type == "imessage.received":
+                response = await self._on_imessage_received(envelope)
+            elif event_type == "imessage.reaction_received":
+                response = await self._on_imessage_reaction(envelope)
+            elif event_type and event_type.startswith("imessage."):
+                response = await self._on_imessage_lifecycle(envelope)
+            elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
+                response = await self._on_incoming_call(envelope)
+            else:
+                response = web.Response(status=200, text="ignored")
+        except Exception:
+            self._dedup_rollback(request_id)
+            raise
+        self._dedup_commit(request_id)
+        return response
 
-    def _is_duplicate(self, request_id: str) -> bool:
+    def _prune_dedup_ids(self) -> None:
+        if not hasattr(self, "_seen_request_ids"):
+            self._seen_request_ids = {}
+        if not hasattr(self, "_inflight_request_ids"):
+            self._inflight_request_ids = {}
         now = time.time()
         # Prune expired entries opportunistically.
+        for store in (self._seen_request_ids, self._inflight_request_ids):
+            for rid, ts in list(store.items()):
+                if now - ts >= WEBHOOK_DEDUP_TTL_SECONDS:
+                    store.pop(rid, None)
         if len(self._seen_request_ids) > 2000:
-            self._seen_request_ids = {
-                rid: ts
-                for rid, ts in self._seen_request_ids.items()
-                if now - ts < WEBHOOK_DEDUP_TTL_SECONDS
-            }
+            oldest = sorted(self._seen_request_ids.items(), key=lambda item: item[1])
+            for rid, _ts in oldest[: len(self._seen_request_ids) - 2000]:
+                self._seen_request_ids.pop(rid, None)
+
+    def _dedup_begin(self, request_id: str) -> bool:
+        if not request_id:
+            return False
+        self._prune_dedup_ids()
         prior = self._seen_request_ids.get(request_id)
-        if prior is not None and now - prior < WEBHOOK_DEDUP_TTL_SECONDS:
+        if prior is not None:
             return True
-        self._seen_request_ids[request_id] = now
+        if request_id in self._inflight_request_ids:
+            return True
+        self._inflight_request_ids[request_id] = time.time()
+        return False
+
+    def _dedup_commit(self, request_id: str) -> None:
+        if not request_id:
+            return
+        self._prune_dedup_ids()
+        self._inflight_request_ids.pop(request_id, None)
+        self._seen_request_ids[request_id] = time.time()
+
+    def _dedup_rollback(self, request_id: str) -> None:
+        if request_id:
+            self._inflight_request_ids.pop(request_id, None)
+
+    def _is_duplicate(self, request_id: str) -> bool:
+        if self._dedup_begin(request_id):
+            return True
+        self._dedup_commit(request_id)
         return False
 
     async def _is_self_mail_received(
@@ -2728,10 +2767,22 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _on_text_received(self, envelope: Dict[str, Any]) -> "web.Response":
         text_msg = (envelope.get("data") or {}).get("text_message") or {}
+        text_id = str(text_msg.get("id") or "").strip()
+        event_key = f"text:{text_id}" if text_id else ""
+        if self._dedup_begin(event_key):
+            return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_text_received_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_text_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        text_msg = (envelope.get("data") or {}).get("text_message") or {}
         data = envelope.get("data") or {}
         text_id = str(text_msg.get("id") or "").strip()
-        if text_id and self._is_duplicate(f"text:{text_id}"):
-            return web.Response(status=200, text="duplicate")
         direction = str(text_msg.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
@@ -2933,8 +2984,20 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
-        if message_id and self._is_duplicate(f"imessage:{message_id}"):
+        event_key = f"imessage:{message_id}" if message_id else ""
+        if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_imessage_received_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_imessage_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        message = (envelope.get("data") or {}).get("message") or {}
+        message_id = str(message.get("id") or "").strip()
         direction = str(message.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
@@ -3137,8 +3200,20 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         reaction = (envelope.get("data") or {}).get("reaction") or {}
         reaction_id = str(reaction.get("id") or "").strip()
-        if reaction_id and self._is_duplicate(f"imessage_reaction:{reaction_id}"):
+        event_key = f"imessage_reaction:{reaction_id}" if reaction_id else ""
+        if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
+        try:
+            response = await self._on_imessage_reaction_once(envelope)
+        except Exception:
+            self._dedup_rollback(event_key)
+            raise
+        self._dedup_commit(event_key)
+        return response
+
+    async def _on_imessage_reaction_once(self, envelope: Dict[str, Any]) -> "web.Response":
+        reaction = (envelope.get("data") or {}).get("reaction") or {}
+        reaction_id = str(reaction.get("id") or "").strip()
         direction = str(reaction.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             # The agent's own outbound tapbacks echo back as a webhook too.

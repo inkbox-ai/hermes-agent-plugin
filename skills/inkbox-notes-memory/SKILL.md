@@ -1,38 +1,29 @@
 ---
 name: inkbox-notes-memory
-description: Use when the user asks to save, remember, list, retrieve, update, or delete notes in Inkbox. This is for persistent Inkbox notes, not workspace-local memory.
+description: Use when the user asks to save, remember, list, retrieve, update, or delete notes in Inkbox. Hermes does not expose Inkbox note tools; explain the limitation or use host memory only if available outside this plugin.
 user-invocable: false
 ---
 
 # Inkbox notes memory
 
-The Inkbox plugin exposes persistent notes scoped by the configured Inkbox identity. Use these tools when a user asks to save a note, remember free-form context in Inkbox, or retrieve prior Inkbox notes.
+OpenClaw exposes persistent Inkbox notes. Hermes social-tier does not register Inkbox note tools, so do not claim you can create, list, retrieve, update, or delete Inkbox notes from this plugin.
 
-## Required tools
+## Hermes tool availability
 
-- `inkbox_list_notes` — list/search notes visible to this identity
-- `inkbox_get_note` — fetch a full note by UUID
-- `inkbox_create_note` — create a persistent Inkbox note
-
-## Optional (allowlist needed)
-
-- `inkbox_update_note` — update an existing note by UUID
-- `inkbox_delete_note` — delete a note by UUID
+- There is no `inkbox_list_notes`, `inkbox_get_note`, `inkbox_create_note`, `inkbox_update_note`, or `inkbox_delete_note` tool in Hermes.
+- If the host provides a separate memory/notes feature, use it only when it is actually available in the current tool list.
+- If the user specifically asks for Inkbox notes, explain that this Hermes installation cannot manage them directly.
 
 ## Workflow
 
-1. **Use Inkbox notes for free-form memory.** When the user says "save a note", "remember this in Inkbox", or asks for durable non-contact context, call `inkbox_create_note`.
-
-2. **Do not store contact details as notes.** If the user asks to save a person, phone number, email, address-book entry, or "my contact", use the contact workflow: lookup first, then create or update an Inkbox contact.
-
-3. **Search before editing.** For "update the note about X", call `inkbox_list_notes` with a focused query, then `inkbox_get_note` if needed before using `inkbox_update_note`.
-
-4. **Be explicit about optional tools.** If update/delete is not available, say that the note was found but the update/delete tool is not allowlisted.
+1. **Clarify storage target.** If the user says "remember this", ask whether host-local memory is acceptable when no memory tool is visible.
+2. **Do not fake persistence.** Do not say you saved an Inkbox note unless an actual note tool completed successfully.
+3. **For contact facts, use the contact guidance.** Hermes cannot create Inkbox contacts either; ask for concrete details to use in the current conversation.
 
 ## Access semantics
 
-- Note reads are filtered server-side by the Inkbox identity's access grants.
-- Notes are persistent Inkbox records. They are different from host workspace notes/memory and should be used whenever the user specifically refers to Inkbox notes.
+- Inkbox note reads/writes are not available through this Hermes tool tier.
+- Host workspace notes/memory, if present, are different from Inkbox notes.
 
 ## When you need more - raw Inkbox docs
 

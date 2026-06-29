@@ -1,0 +1,70 @@
+import asyncio
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+pkg = types.ModuleType("inkbox_plugin")
+pkg.__path__ = [str(ROOT)]
+sys.modules.setdefault("inkbox_plugin", pkg)
+
+from inkbox_plugin import adapter as adapter_mod
+from inkbox_plugin.adapter import InkboxAdapter
+
+
+class _FakeRequest:
+    def __init__(self, body, *, request_id="req-1"):
+        self._body = body
+        self.headers = {"X-Inkbox-Request-Id": request_id}
+
+    async def read(self):
+        return self._body
+
+
+@pytest.fixture(autouse=True)
+def fake_web(monkeypatch):
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+
+
+def _adapter():
+    adapter = object.__new__(InkboxAdapter)
+    adapter._require_signature = False
+    adapter._seen_request_ids = {}
+    adapter._inflight_request_ids = {}
+    return adapter
+
+
+def test_request_id_commits_after_success():
+    adapter = _adapter()
+    body = b'{"event_type":"unknown.event"}'
+
+    first = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+    second = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+
+    assert first.text == "ignored"
+    assert second.text == "duplicate"
+
+
+def test_request_id_rolls_back_after_dispatch_failure(monkeypatch):
+    adapter = _adapter()
+    calls = {"count": 0}
+
+    async def fail_once(_envelope):
+        calls["count"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(adapter, "_on_text_received", fail_once)
+    body = b'{"event_type":"text.received","data":{"text_message":{"id":"t1"}}}'
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+    with pytest.raises(RuntimeError):
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+
+    assert calls["count"] == 2

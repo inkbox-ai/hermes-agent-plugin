@@ -339,6 +339,55 @@ def test_unknown_inbound_imessage_uses_conversation_session_key(monkeypatch):
     )
 
 
+def test_duplicate_inbound_imessage_event_id_does_not_enqueue_twice(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    events = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+    envelope = {
+        "event_type": "imessage.received",
+        "data": {
+            "message": {
+                "id": "im-in",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-unknown",
+                "content": "Dinner moved to 7.",
+            },
+        },
+    }
+
+    first = asyncio.run(adapter._on_imessage_received(envelope))
+    second = asyncio.run(adapter._on_imessage_received(envelope))
+
+    assert first.status == 200
+    assert second.text == "duplicate"
+    assert len(events) == 1
+
+
 def test_inbound_imessage_ignores_outbound_echo(monkeypatch):
     events = []
 
@@ -608,6 +657,52 @@ def test_unknown_imessage_reaction_uses_conversation_session_key(monkeypatch):
         adapter._last_inbound_imessage["imessage:imconv-unknown"]["conversation_id"]
         == "imconv-unknown"
     )
+
+
+def test_duplicate_imessage_reaction_event_id_does_not_enqueue_twice(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    enqueued = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = object.__new__(InkboxAdapter)
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+    envelope = {
+        "event_type": "imessage.reaction_received",
+        "data": {
+            "reaction": {
+                "id": "react-in-2",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-unknown",
+                "target_message_id": "im-target-10",
+                "reaction": "like",
+            },
+        },
+    }
+
+    first = asyncio.run(adapter._on_imessage_reaction(envelope))
+    second = asyncio.run(adapter._on_imessage_reaction(envelope))
+
+    assert first.status == 200
+    assert second.text == "duplicate"
+    assert len(enqueued) == 1
 
 
 def test_inbound_non_question_reaction_does_not_type(monkeypatch):

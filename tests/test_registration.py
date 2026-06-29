@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -100,3 +101,14 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
+
+
+def test_skill_required_tools_match_runtime_tools():
+    available = _manifest_provides_tools()
+    for skill_md in (ROOT / "skills").glob("*/SKILL.md"):
+        text = skill_md.read_text()
+        match = re.search(r"## Required tools(?P<section>.*?)(?:\n## |\Z)", text, flags=re.S)
+        if not match:
+            continue
+        required = set(re.findall(r"`(inkbox_[A-Za-z0-9_]+)`", match.group("section")))
+        assert required <= available, f"{skill_md} requires unavailable tools: {required - available}"

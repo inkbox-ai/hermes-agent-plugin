@@ -232,6 +232,7 @@ After the gateway starts:
 | `INKBOX_REALTIME_MODEL` | no | `gpt-realtime-2` | Realtime voice model. |
 | `INKBOX_REALTIME_VOICE` | no | `cedar` | Realtime voice name. |
 | `INKBOX_REALTIME_CONNECT_TIMEOUT_S` | no | `8` | Seconds to wait for OpenAI Realtime preflight before falling back or failing. |
+| `INKBOX_REALTIME_CONSULT_TIMEOUT_S` | no | plugin default | Seconds the Realtime voice agent waits for a Hermes consult before continuing. |
 | `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
 
 ## Channel Overrides
@@ -302,16 +303,16 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 | Skill | Trigger |
 |---|---|
 | `inkbox-troubleshooting` | Runtime/config errors, failed tools, readiness issues |
-| `inkbox-email-triage` | Checking or replying to Inkbox email |
+| `inkbox-email-triage` | Current inbound email and explicit outbound/reply sends |
 | `inkbox-sms-responder` | Sending, replying to, or triaging SMS |
 | `inkbox-imessage-responder` | Sending, replying to, or triaging iMessage |
 | `inkbox-outbound-calling` | Placing calls to numbers or contacts |
-| `inkbox-call-review` | Reviewing calls and transcripts |
-| `inkbox-contact-lookup` | Resolving, creating, or updating contacts |
-| `inkbox-contact-rules` | Managing mail/phone allow and block rules |
-| `inkbox-identity-access` | Granting/revoking contact or note visibility |
-| `inkbox-notes-memory` | Saving, retrieving, or updating Inkbox notes |
-| `inkbox-credential-use` | Fetching vault credentials or TOTP codes |
+| `inkbox-call-review` | Current-call/post-call context; historical call reads are not exposed in Hermes |
+| `inkbox-contact-lookup` | Using resolved inbound contact context; contact CRUD tools are not exposed in Hermes |
+| `inkbox-contact-rules` | Explaining server-side contact rules; rule edit tools are not exposed in Hermes |
+| `inkbox-identity-access` | Explaining identity access; grant/revoke tools are not exposed in Hermes |
+| `inkbox-notes-memory` | Explaining note limitations; Inkbox note tools are not exposed in Hermes |
+| `inkbox-credential-use` | Explaining vault limitations; Inkbox vault tools are not exposed in Hermes |
 | `inkbox-outreach-sequence` | Multi-step outreach over email/SMS |
 
 ## Development Commands
