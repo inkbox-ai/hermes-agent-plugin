@@ -167,6 +167,77 @@ def _contact_arg(args: dict, snake_name: str, camel_name: Optional[str] = None) 
     return text or None
 
 
+def _contact_raw_arg(args: dict, snake_name: str, camel_name: Optional[str] = None) -> tuple[bool, Any]:
+    if snake_name in args:
+        return True, args.get(snake_name)
+    if camel_name and camel_name in args:
+        return True, args.get(camel_name)
+    return False, None
+
+
+def _contact_write_fields(args: dict) -> Dict[str, str]:
+    fields = (
+        ("preferred_name", "preferredName"),
+        ("given_name", "givenName"),
+        ("family_name", "familyName"),
+        ("company_name", "companyName"),
+        ("job_title", "jobTitle"),
+        ("notes", "notes"),
+    )
+    payload: Dict[str, str] = {}
+    for snake_name, camel_name in fields:
+        value = _contact_arg(args, snake_name, camel_name)
+        if value is not None:
+            payload[snake_name] = value
+    return payload
+
+
+def _contact_entries(raw: Any, kind: str) -> list[Any]:
+    from inkbox import ContactEmail, ContactPhone
+
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError(f"`{kind}` must be a list of strings or objects")
+
+    cls = ContactEmail if kind == "emails" else ContactPhone
+    value_key = "email" if kind == "emails" else "phone"
+    entries = []
+    for index, item in enumerate(raw):
+        if isinstance(item, str):
+            value = item.strip()
+            label = None
+            is_primary = index == 0
+        elif isinstance(item, dict):
+            value = str(item.get("value") or item.get(value_key) or "").strip()
+            label_raw = item.get("label")
+            label = str(label_raw).strip() if label_raw is not None else None
+            if "isPrimary" in item:
+                is_primary = bool(item.get("isPrimary"))
+            elif "is_primary" in item:
+                is_primary = bool(item.get("is_primary"))
+            else:
+                is_primary = index == 0
+        else:
+            raise ValueError(f"`{kind}` entries must be strings or objects")
+        if value:
+            entries.append(cls(label=label or None, value=value, is_primary=is_primary))
+    return entries
+
+
+def _contact_payload(args: dict, *, require_any: bool) -> Dict[str, Any]:
+    payload: Dict[str, Any] = dict(_contact_write_fields(args))
+    for key in ("emails", "phones"):
+        provided, raw = _contact_raw_arg(args, key)
+        if provided:
+            payload[key] = _contact_entries(raw, key)
+    if require_any and not payload:
+        raise ValueError("Provide at least one contact field to write.")
+    return payload
+
+
 def inkbox_lookup_contact(args: dict, **kwargs) -> str:
     del kwargs
     try:
@@ -224,6 +295,44 @@ def inkbox_get_contact(args: dict, **kwargs) -> str:
             return _json({"error": "`contactId` is required"})
         contact = client.contacts.get(contact_id)
         return _json({"ok": True, "contact": _json_safe(contact)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_create_contact(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        payload = _contact_payload(args, require_any=True)
+        contact = client.contacts.create(**payload)
+        return _json({"ok": True, "contact": _json_safe(contact)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_update_contact(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        contact_id = _contact_arg(args, "contact_id", "contactId")
+        if not contact_id:
+            return _json({"error": "`contactId` is required"})
+        payload = _contact_payload(args, require_any=True)
+        contact = client.contacts.update(contact_id, **payload)
+        return _json({"ok": True, "contact": _json_safe(contact)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_delete_contact(args: dict, **kwargs) -> str:
+    del kwargs
+    try:
+        _cfg, client, _identity = _client_and_identity()
+        contact_id = _contact_arg(args, "contact_id", "contactId")
+        if not contact_id:
+            return _json({"error": "`contactId` is required"})
+        client.contacts.delete(contact_id)
+        return _json({"ok": True, "deleted_contact_id": contact_id})
     except Exception as exc:
         return _json({"error": str(exc)})
 
@@ -712,6 +821,81 @@ GET_CONTACT_SCHEMA = {
     },
 }
 
+_CONTACT_EMAIL_ENTRY_SCHEMA = {
+    "oneOf": [
+        {"type": "string", "description": "Email address. The first string is marked primary."},
+        {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "description": "Email address."},
+                "label": {"type": "string", "description": "Optional label, e.g. work or home."},
+                "isPrimary": {"type": "boolean", "description": "Whether this is the primary email."},
+            },
+            "required": ["value"],
+        },
+    ],
+}
+
+_CONTACT_PHONE_ENTRY_SCHEMA = {
+    "oneOf": [
+        {"type": "string", "description": "Phone number. The first string is marked primary."},
+        {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "description": "E.164 phone number."},
+                "label": {"type": "string", "description": "Optional label, e.g. mobile or work."},
+                "isPrimary": {"type": "boolean", "description": "Whether this is the primary phone."},
+            },
+            "required": ["value"],
+        },
+    ],
+}
+
+_CONTACT_WRITE_PROPERTIES = {
+    "preferredName": {"type": "string", "description": "Display/preferred name."},
+    "givenName": {"type": "string", "description": "Given/first name."},
+    "familyName": {"type": "string", "description": "Family/last name."},
+    "companyName": {"type": "string", "description": "Company or organization."},
+    "jobTitle": {"type": "string", "description": "Job title."},
+    "notes": {"type": "string", "description": "Free-form contact notes."},
+    "emails": {"type": "array", "items": _CONTACT_EMAIL_ENTRY_SCHEMA, "description": "Email addresses. Strings or objects are accepted."},
+    "phones": {"type": "array", "items": _CONTACT_PHONE_ENTRY_SCHEMA, "description": "Phone numbers. Strings or objects are accepted."},
+}
+
+CREATE_CONTACT_SCHEMA = {
+    "name": "inkbox_create_contact",
+    "description": "Create an Inkbox address-book contact visible according to Inkbox contact access rules.",
+    "parameters": {
+        "type": "object",
+        "properties": dict(_CONTACT_WRITE_PROPERTIES),
+    },
+}
+
+UPDATE_CONTACT_SCHEMA = {
+    "name": "inkbox_update_contact",
+    "description": "Update an existing Inkbox contact by UUID. Omitted fields are left unchanged; provided emails/phones replace those lists.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "contactId": {"type": "string", "description": "UUID of the Inkbox contact."},
+            **_CONTACT_WRITE_PROPERTIES,
+        },
+        "required": ["contactId"],
+    },
+}
+
+DELETE_CONTACT_SCHEMA = {
+    "name": "inkbox_delete_contact",
+    "description": "Delete an Inkbox contact by UUID. Use only after confirming the target contact.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "contactId": {"type": "string", "description": "UUID of the Inkbox contact."},
+        },
+        "required": ["contactId"],
+    },
+}
+
 SEND_EMAIL_SCHEMA = {
     "name": "inkbox_send_email",
     "description": "Send an email from the configured Inkbox identity.",
@@ -939,6 +1123,9 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_lookup_contact", "inkbox", LOOKUP_CONTACT_SCHEMA, inkbox_lookup_contact, check_fn=_configured)
     ctx.register_tool("inkbox_list_contacts", "inkbox", LIST_CONTACTS_SCHEMA, inkbox_list_contacts, check_fn=_configured)
     ctx.register_tool("inkbox_get_contact", "inkbox", GET_CONTACT_SCHEMA, inkbox_get_contact, check_fn=_configured)
+    ctx.register_tool("inkbox_create_contact", "inkbox", CREATE_CONTACT_SCHEMA, inkbox_create_contact, check_fn=_configured)
+    ctx.register_tool("inkbox_update_contact", "inkbox", UPDATE_CONTACT_SCHEMA, inkbox_update_contact, check_fn=_configured)
+    ctx.register_tool("inkbox_delete_contact", "inkbox", DELETE_CONTACT_SCHEMA, inkbox_delete_contact, check_fn=_configured)
     ctx.register_tool("inkbox_send_email", "inkbox", SEND_EMAIL_SCHEMA, inkbox_send_email, check_fn=_configured)
     ctx.register_tool("inkbox_send_sms", "inkbox", SEND_SMS_SCHEMA, inkbox_send_sms, check_fn=_configured)
     ctx.register_tool("inkbox_list_text_conversations", "inkbox", LIST_TEXT_CONVERSATIONS_SCHEMA, inkbox_list_text_conversations, check_fn=_configured)

@@ -15,10 +15,11 @@ Use this skill whenever the user asks for **multi-step outbound communication** 
 - `inkbox_list_contacts` — find a named recipient before starting
 - `inkbox_lookup_contact` — resolve a known email/phone to a contact
 - `inkbox_get_contact` — inspect a specific contact returned by list/lookup
+- `inkbox_create_contact` / `inkbox_update_contact` / `inkbox_delete_contact` — maintain address-book entries when the user explicitly asks
 - `inkbox_list_text_conversations` — check whether the recipient has replied to past SMS
 - `inkbox_get_text_conversation` — inspect a specific SMS thread when the conversation id is known
 
-Hermes does not expose contact write, historical email-read, note, or email-forwarding tools. Use contact lookup/list/get or literal email addresses/phone numbers supplied by the user. If a named recipient lookup is ambiguous or does not include a usable destination, ask the user for the concrete destination before starting.
+Hermes does not expose historical email-read, note, vCard export/import, or email-forwarding tools. Use contact lookup/list/get or literal email addresses/phone numbers supplied by the user. If a named recipient lookup is ambiguous or does not include a usable destination, ask the user for the concrete destination before starting.
 
 ## Workflow
 

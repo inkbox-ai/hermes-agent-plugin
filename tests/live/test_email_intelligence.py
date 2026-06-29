@@ -10,6 +10,8 @@ through the API keys (NO hardcoded expectations):
   * sender       — reports who the sender is, from the contact card it can see
                    (looked up via the AUT key).
   * tools        — names its real Inkbox tools (derived from plugin.yaml).
+  * contact CRUD — with LIVE_CONTACT_CRUD=1, creates/updates/deletes a
+                   temporary contact through the real agent loop.
 
 Skipped unless both keys + LIVE_REAL_MODEL=1 are set.
 """
@@ -72,6 +74,13 @@ def _client(key):
     from inkbox import Inkbox
 
     return Inkbox(api_key=key, base_url=BASE_URL)
+
+
+def _manifest_tool_names() -> list[str]:
+    import yaml
+
+    manifest = yaml.safe_load(Path(__file__).resolve().parents[2].joinpath("plugin.yaml").read_text())
+    return [t for t in manifest.get("provides_tools", []) if isinstance(t, str)]
 
 
 def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
@@ -174,13 +183,87 @@ def test_reports_sender_details(ctx):
 
 def test_aware_of_inkbox_tools(ctx):
     """Non-LLM proof the agent is wired with real tools: it names them."""
-    import yaml
-
-    manifest = yaml.safe_load(Path(__file__).resolve().parents[2].joinpath("plugin.yaml").read_text())
-    tool_names = [t for t in manifest.get("provides_tools", []) if isinstance(t, str)]
+    tool_names = _manifest_tool_names()
     assert tool_names, "plugin.yaml provides_tools is empty"
+    contact_tools = {
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
+        "inkbox_get_contact",
+        "inkbox_create_contact",
+        "inkbox_update_contact",
+        "inkbox_delete_contact",
+    }
+    assert contact_tools <= set(tool_names)
+    assert "inkbox_export_contact_vcard" not in tool_names
 
     body = _ask(ctx["remote"], ctx["aut_email"], ctx["remote_email"],
                 "List the exact names of all the Inkbox tools you have access to, one per line.")
     hits = [t for t in tool_names if t.lower() in body]
     assert len(hits) >= 3, f"agent named only {hits} of its tools {tool_names}\n{body[:500]}"
+    missing_contacts = sorted(t for t in contact_tools if t.lower() not in body)
+    assert not missing_contacts, f"agent did not name contact tools {missing_contacts}\n{body[:500]}"
+    assert "inkbox_export_contact_vcard" not in body
+
+
+def _contacts_by_email(client, email: str):
+    return list(client.contacts.lookup(email=email) or [])
+
+
+def _delete_contacts_by_email(client, email: str) -> None:
+    for contact in _contacts_by_email(client, email):
+        contact_id = str(getattr(contact, "id", "") or "")
+        if contact_id:
+            client.contacts.delete(contact_id)
+
+
+@pytest.mark.skipif(
+    os.environ.get("LIVE_CONTACT_CRUD") != "1",
+    reason="mutating contact CRUD live test: set LIVE_CONTACT_CRUD=1 to opt in",
+)
+def test_contact_crud_tool_use(ctx):
+    """The real agent can reason about and use contact write tools end to end."""
+    aut = ctx["aut"]
+    nonce = f"hermes-live-{uuid.uuid4().hex[:8]}"
+    contact_name = f"Hermes Live {nonce}"
+    contact_email = f"{nonce}@example.com"
+    updated_notes = f"updated-notes-{nonce}"
+
+    _delete_contacts_by_email(aut, contact_email)
+    try:
+        created = _ask(
+            ctx["remote"],
+            ctx["aut_email"],
+            ctx["remote_email"],
+            "Use inkbox_create_contact now. Create a new contact named "
+            f"{contact_name} with email {contact_email}. Do not just describe the action. "
+            f"After the tool succeeds, reply exactly: CREATED {nonce}",
+        )
+        assert "created" in created and nonce in created, created[:500]
+        matches = _contacts_by_email(aut, contact_email)
+        assert matches, f"agent said it created {contact_email}, but lookup found nothing"
+        contact_id = str(getattr(matches[0], "id", "") or "")
+        assert contact_id, f"created contact has no id: {matches[0]!r}"
+
+        updated = _ask(
+            ctx["remote"],
+            ctx["aut_email"],
+            ctx["remote_email"],
+            "Use inkbox_update_contact now. Update contactId "
+            f"{contact_id} and set notes to {updated_notes}. Do not create a second contact. "
+            f"After the tool succeeds, reply exactly: UPDATED {nonce}",
+        )
+        assert "updated" in updated and nonce in updated, updated[:500]
+        fetched = aut.contacts.get(contact_id)
+        assert updated_notes.lower() in str(getattr(fetched, "notes", "") or "").lower()
+
+        deleted = _ask(
+            ctx["remote"],
+            ctx["aut_email"],
+            ctx["remote_email"],
+            "I confirm this is a temporary test contact. Use inkbox_delete_contact now "
+            f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
+        )
+        assert "deleted" in deleted and nonce in deleted, deleted[:500]
+        assert not _contacts_by_email(aut, contact_email)
+    finally:
+        _delete_contacts_by_email(aut, contact_email)
