@@ -1,0 +1,121 @@
+name: Live — external events (escalation → agent calls driver)
+
+# Boots the agent-under-test (AUT) gateway, then POSTs a signed external
+# escalation webhook (the yc-product-showcase agent_escalation_demo shape) at its
+# local webhook listener asking it to phone the driver contact. The test verifies
+# the agent actually places that call. The driver sits on auto_reject (set by the
+# test) — we monitor the escalation, not the call itself.
+# Real model + real call, so this runs only on ready (non-draft) PRs + dispatch,
+# and shares the AUT tunnel lock with the other live suites.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the agent to place the call"
+        default: "200"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Same group as the other live suites: only one holder of the AUT tunnel at a time.
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+
+jobs:
+  external-events:
+    runs-on: ubuntu-latest
+    # Skip fork PRs (no secrets) and draft PRs (expensive). Pushes + dispatch always run.
+    if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up env paths
+        run: |
+          echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
+          echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
+
+      - name: Install Hermes (non-interactive)
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install plugin into the gateway
+        run: |
+          mkdir -p "$HERMES_HOME/plugins"
+          ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
+          hermes plugins enable inkbox
+          "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5'
+
+      - name: Configure AUT identity + model
+        env:
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          HANDLE="$("$PY" - <<'PYEOF'
+          import os
+          from inkbox import Inkbox
+          c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
+          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PYEOF
+          )"
+          echo "AUT handle: $HANDLE"
+          {
+            echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
+            echo "INKBOX_IDENTITY=$HANDLE"
+            echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
+            echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+            echo "OPENAI_BASE_URL=https://api.openai.com/v1"
+            # No realtime needed — the driver auto-rejects, so no media leg runs.
+            echo "INKBOX_REALTIME_ENABLED=false"
+          } >> "$HERMES_HOME/.env"
+          hermes config set model.provider custom || true
+          hermes config set model.base_url https://api.openai.com/v1 || true
+          hermes config set model.default gpt-5.5 || true
+
+      - name: Start gateway and wait for readiness
+        run: |
+          hermes gateway run > "$GATEWAY_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          echo "Waiting for the gateway (tunnel + webhooks)…"
+          for i in $(seq 1 36); do
+            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+              echo "Gateway ready."; exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+
+      - name: Run external-event intelligence test
+        env:
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          LIVE_EXTERNAL_TIMEOUT: ${{ github.event.inputs.timeout_s || '200' }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
+          LIVE_REAL_MODEL=1 AUT_WEBHOOK_URL=http://127.0.0.1:8765/webhook \
+            "$PY" -m pytest tests/live/test_external_event_intelligence.py -v
+
+      # Failure-only: these logs carry live agent content and this repo is public.
+      - name: Dump logs (on failure only)
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
+          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+
+      - name: Tear down (always)
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
+          sleep 3
