@@ -40,14 +40,20 @@ def _adapter():
     return adapter
 
 
-def test_request_id_commits_after_success():
+def test_request_id_commits_after_success(monkeypatch):
     adapter = _adapter()
+    # Unknown event types now fall through to the external-event path; stub it
+    # so this test stays focused on the dedup commit/duplicate behavior.
+    async def _ok(_envelope, _request_id=""):
+        return types.SimpleNamespace(text="ok")
+
+    monkeypatch.setattr(adapter, "_on_external_event", _ok)
     body = b'{"event_type":"unknown.event"}'
 
     first = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
     second = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
 
-    assert first.text == "ignored"
+    assert first.text == "ok"
     assert second.text == "duplicate"
 
 
