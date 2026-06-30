@@ -78,6 +78,7 @@ semantics).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -2240,6 +2241,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 response = await self._on_imessage_lifecycle(envelope)
             elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
                 response = await self._on_incoming_call(envelope)
+            elif event_type == "external.event":
+                # Externally-injected events (e.g. a GitHub Actions failure
+                # forwarded through the tunnel) that have no Inkbox contact
+                # behind them — wake the agent on a fresh thread.
+                response = await self._on_external_event(envelope, request_id)
             else:
                 response = web.Response(status=200, text="ignored")
         except Exception:
@@ -2407,6 +2413,101 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=rfc_message_id or str(message.get("id") or ""),
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
+        )
+        await self._enqueue(event)
+        return web.Response(status=200, text="ok")
+
+    async def _on_external_event(
+        self,
+        envelope: Dict[str, Any],
+        request_id: str = "",
+    ) -> "web.Response":
+        """Wake the agent on a fresh thread for an externally-injected event.
+
+        External systems (e.g. a GitHub Actions failure) reach the agent
+        through the same signed ``/webhook`` chokepoint as Inkbox traffic, but
+        there is no Inkbox contact behind them.  We surface each one as an
+        ``internal`` MessageEvent on a unique ``thread_id`` so every event
+        spins up a new Hermes session and the agent decides what to do.
+
+        Args:
+            envelope (Dict[str, Any]): Parsed webhook body.  Expects
+                ``{"event_type": "external.event", "data": {...}}`` where
+                ``data`` carries ``source``, ``title``, ``body``, optional
+                ``url``, ``environment``, and optional ``id``.
+            request_id (str): The ``X-Inkbox-Request-Id``, used as the
+                thread/event key when the payload omits its own ``id``.
+
+        Returns:
+            web.Response: 200 once the event is enqueued for the agent.
+        """
+        data = envelope.get("data") or {}
+        # Where the event came from (e.g. "github") and a human-readable title.
+        source_name = str(data.get("source") or "external").strip() or "external"
+        title = str(data.get("title") or "").strip()
+        body = str(data.get("body") or "").strip()
+        url = str(data.get("url") or "").strip()
+        # Free-form deployment environment (prod/beta/dev) the agent uses to
+        # decide how loudly to react; passed through verbatim.
+        environment = str(data.get("environment") or "").strip()
+
+        # A stable per-event key keeps each event on its own thread: prefer an
+        # explicit payload id, fall back to the webhook request id, and finally
+        # hash the payload so distinct events never collide on one thread.
+        event_key = str(data.get("id") or request_id or "").strip()
+        if not event_key:
+            event_key = hashlib.sha256(
+                json.dumps(data, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+
+        # New thread per event so the agent wakes into a clean session, grouped
+        # under one chat_id per source for continuity across that source.
+        chat_id = f"external:{source_name}"
+        thread_id = f"external:{source_name}:{event_key}"
+
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=f"{source_name} events",
+            chat_type="dm",
+            user_id=chat_id,
+            user_name=source_name,
+            thread_id=thread_id,
+            chat_topic=title or None,
+            message_id=event_key,
+        )
+
+        # Routing marker mirrors the inbound-modality convention so the agent
+        # knows this is an external event (and which source/environment).
+        marker = f"[inkbox:external source={source_name}"
+        if environment:
+            marker += f" environment={environment}"
+        if title:
+            marker += f" event={title!r}"
+        marker += "]"
+        # Assemble the body the agent reads: marker line, then title/body/link.
+        parts = [marker]
+        if title:
+            parts.append(title)
+        if body:
+            parts.append(body)
+        if url:
+            parts.append(f"link: {url}")
+        text = "\n".join(parts)
+
+        # Per-source operator overrides (system prompt and/or skills) — this is
+        # the seam where the "what to do on this event" playbook is attached.
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "external", chat_id, None
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=envelope,
+            message_id=event_key,
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
+            internal=True,  # no Inkbox contact behind this — bypass user auth
         )
         await self._enqueue(event)
         return web.Response(status=200, text="ok")

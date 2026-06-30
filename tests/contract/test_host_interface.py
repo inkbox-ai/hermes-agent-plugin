@@ -63,9 +63,11 @@ def test_message_event_accepts_plugin_fields():
         raw_message={},
         message_id="m1",
         auto_skill="inkbox:inkbox-troubleshooting",
+        channel_prompt=None,
         media_urls=[],
         media_types=[],
         reply_to_message_id=None,
+        internal=True,
         timestamp=1.0,
     )
 
