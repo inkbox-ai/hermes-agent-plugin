@@ -75,6 +75,8 @@ jobs:
             echo "INKBOX_ALLOW_ALL_USERS=true"
             echo "OPENAI_API_KEY=$OPENAI_API_KEY"
             echo "OPENAI_BASE_URL=https://api.openai.com/v1"
+            # The whole point of this suite — let external webhooks reach the agent.
+            echo "INKBOX_EXTERNAL_EVENTS_ENABLED=true"
             # No realtime needed — the driver auto-rejects, so no media leg runs.
             echo "INKBOX_REALTIME_ENABLED=false"
           } >> "$HERMES_HOME/.env"

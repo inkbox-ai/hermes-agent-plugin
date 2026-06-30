@@ -1284,6 +1284,16 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_require_signature = os.getenv("INKBOX_REQUIRE_SIGNATURE", "true")
         self._require_signature = str(raw_require_signature).lower() not in ("false", "0", "no")
 
+        # Whether non-Inkbox ("external") webhooks are passed through to the
+        # agent at all.  These are signed by the source (Stripe/GitHub/...),
+        # NOT with our signing key, so we cannot verify them here — they are
+        # let through UNVERIFIED when enabled.  Off by default for that reason.
+        if "external_events" in extra:
+            raw_external_events = extra["external_events"]
+        else:
+            raw_external_events = os.getenv("INKBOX_EXTERNAL_EVENTS_ENABLED", "false")
+        self._external_events_enabled = str(raw_external_events).lower() in ("true", "1", "yes", "on")
+
         # Realtime voice bridge. When an OpenAI API key is present, inbound
         # voice calls are bridged to OpenAI's Realtime API instead of relying
         # on Inkbox-side STT/TTS. See :mod:`realtime`.
@@ -2197,34 +2207,48 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         body = await request.read()
-        # Verify HMAC over the raw body before doing anything with it — both
-        # public-URL and tunnel-delivered traffic hits this handler, so this
-        # is the one chokepoint where we can refuse spoofed requests.
-        if self._require_signature:
-            ok = verify_webhook(
-                payload=body,
-                headers=dict(request.headers),
-                secret=self._signing_key,
-            )
-            if not ok:
-                return web.Response(status=401, text="invalid signature")
+        try:
+            envelope = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="invalid json")
+
+        event_type = envelope.get("event_type")
+        # Classify BEFORE authenticating. Inkbox events are signed with OUR
+        # signing key, so we verify them. External (third-party) events —
+        # Stripe, GitHub, etc. — are signed by the source with the source's
+        # own secret/scheme, which we cannot check here, so we never verify
+        # them and only pass them through when explicitly enabled.
+        is_inkbox_event = self._is_known_inkbox_event(event_type, envelope)
+
+        if is_inkbox_event:
+            # Verify HMAC over the raw body — the one chokepoint where we can
+            # refuse spoofed Inkbox traffic (public-URL and tunnel both land here).
+            if self._require_signature:
+                ok = verify_webhook(
+                    payload=body,
+                    headers=dict(request.headers),
+                    secret=self._signing_key,
+                )
+                if not ok:
+                    return web.Response(status=401, text="invalid signature")
+        elif not self._external_events_enabled:
+            # External pass-through is off by default — drop without waking the agent.
+            return web.Response(status=200, text="ignored")
 
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
         if request_id and self._dedup_begin(request_id):
             return web.Response(status=200, text="duplicate")
 
         try:
-            envelope = json.loads(body or b"{}")
-        except json.JSONDecodeError:
-            self._dedup_rollback(request_id)
-            return web.Response(status=400, text="invalid json")
-
-        try:
             # Mail / SMS webhooks come wrapped in {event_type, data:{...}}; the
             # incoming-call webhook is delivered as a flat object with a
             # ``phone_number_id`` field at the top level (no envelope).
-            event_type = envelope.get("event_type")
-            if event_type == "message.received":
+            if not is_inkbox_event:
+                # Externally-injected event (e.g. a GitHub Actions failure
+                # forwarded through the tunnel) with no Inkbox contact behind
+                # it — wake the agent on a fresh thread to decide what to do.
+                response = await self._on_external_event(envelope, request_id)
+            elif event_type == "message.received":
                 response = await self._on_mail_received(envelope)
             elif event_type and event_type.startswith("message."):
                 # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
@@ -2242,17 +2266,24 @@ class InkboxAdapter(BasePlatformAdapter):
             elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
                 response = await self._on_incoming_call(envelope)
             else:
-                # Catch-all: anything that is NOT a known Inkbox event
-                # (mail/text/imessage/call above) is treated as an
-                # externally-injected event (e.g. a GitHub Actions failure
-                # forwarded through the tunnel) with no Inkbox contact behind
-                # it — wake the agent on a fresh thread to decide what to do.
-                response = await self._on_external_event(envelope, request_id)
+                response = web.Response(status=200, text="ignored")
         except Exception:
             self._dedup_rollback(request_id)
             raise
         self._dedup_commit(request_id)
         return response
+
+    @staticmethod
+    def _is_known_inkbox_event(event_type: "str | None", envelope: Dict[str, Any]) -> bool:
+        """True for events Inkbox itself emits (and signs with our key).
+
+        Mail / text / iMessage arrive as ``{event_type: "<kind>.<...>"}``; the
+        incoming-call webhook is a flat object carrying ``phone_number_id`` +
+        ``remote_phone_number``. Everything else is treated as external.
+        """
+        if event_type and event_type.startswith(("message.", "text.", "imessage.")):
+            return True
+        return "phone_number_id" in envelope and "remote_phone_number" in envelope
 
     def _prune_dedup_ids(self) -> None:
         if not hasattr(self, "_seen_request_ids"):

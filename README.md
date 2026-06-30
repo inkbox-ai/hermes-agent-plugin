@@ -219,7 +219,8 @@ After the gateway starts:
 | `INKBOX_API_KEY` | yes | - | Agent-scoped Inkbox API key. Admin keys are accepted by setup so it can create or choose an identity. |
 | `INKBOX_IDENTITY` | yes | - | Inkbox agent identity handle. |
 | `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, iMessage, and calls. |
-| `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound webhooks unless set to `false`. |
+| `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound Inkbox webhooks unless set to `false`. |
+| `INKBOX_EXTERNAL_EVENTS_ENABLED` | no | `false` | Pass non-Inkbox ("external") webhooks (e.g. GitHub/Stripe) through to the agent. These are signed by the source, not with the Inkbox key, so they are **not** verified — off by default. |
 | `INKBOX_BASE_URL` | no | SDK default | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `INKBOX_TUNNEL_NAME` | no | identity handle | Override Inkbox tunnel name. |

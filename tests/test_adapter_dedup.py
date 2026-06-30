@@ -35,6 +35,7 @@ def fake_web(monkeypatch):
 def _adapter():
     adapter = object.__new__(InkboxAdapter)
     adapter._require_signature = False
+    adapter._external_events_enabled = True  # let unknown events reach the external path
     adapter._seen_request_ids = {}
     adapter._inflight_request_ids = {}
     return adapter

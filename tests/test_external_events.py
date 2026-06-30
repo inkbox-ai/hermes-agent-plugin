@@ -37,6 +37,7 @@ def _adapter():
     # minimum state the webhook + external handler touch.
     adapter = object.__new__(InkboxAdapter)
     adapter._require_signature = False
+    adapter._external_events_enabled = True  # pass-through on for these tests
     adapter._seen_request_ids = {}
     adapter._inflight_request_ids = {}
     adapter.platform = "inkbox"
@@ -83,6 +84,32 @@ def test_demo_payload_wakes_agent_on_new_thread():
     assert "[inkbox:external source=inkbox-ai/servers event=agent_escalation_demo" in event.text
     assert "Requested action: Call Dima and explain what happened." in event.text
     assert "16012345678" in event.text  # raw payload included
+
+
+def test_external_event_skips_signature_even_when_required():
+    # External events are signed by the source, not us — so even with signature
+    # verification ON, the external path must NOT run verify_webhook (it would
+    # 401 every third-party webhook). It passes straight through when enabled.
+    adapter = _adapter()
+    adapter._require_signature = True
+    adapter._signing_key = "whsec_unused"  # never consulted for external events
+
+    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(DEMO_BODY)))
+
+    assert resp.status == 200
+    assert resp.text == "ok"
+    assert len(adapter._enqueued) == 1
+
+
+def test_external_events_disabled_by_default_drops_event():
+    adapter = _adapter()
+    adapter._external_events_enabled = False  # the default
+
+    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(DEMO_BODY)))
+
+    assert resp.status == 200
+    assert resp.text == "ignored"
+    assert adapter._enqueued == []  # agent NOT woken when pass-through is off
 
 
 def test_unknown_event_type_hits_external_path():
