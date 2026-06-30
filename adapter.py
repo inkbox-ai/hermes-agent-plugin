@@ -2241,13 +2241,13 @@ class InkboxAdapter(BasePlatformAdapter):
                 response = await self._on_imessage_lifecycle(envelope)
             elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
                 response = await self._on_incoming_call(envelope)
-            elif event_type == "external.event":
-                # Externally-injected events (e.g. a GitHub Actions failure
-                # forwarded through the tunnel) that have no Inkbox contact
-                # behind them — wake the agent on a fresh thread.
-                response = await self._on_external_event(envelope, request_id)
             else:
-                response = web.Response(status=200, text="ignored")
+                # Catch-all: anything that is NOT a known Inkbox event
+                # (mail/text/imessage/call above) is treated as an
+                # externally-injected event (e.g. a GitHub Actions failure
+                # forwarded through the tunnel) with no Inkbox contact behind
+                # it — wake the agent on a fresh thread to decide what to do.
+                response = await self._on_external_event(envelope, request_id)
         except Exception:
             self._dedup_rollback(request_id)
             raise
@@ -2424,40 +2424,62 @@ class InkboxAdapter(BasePlatformAdapter):
     ) -> "web.Response":
         """Wake the agent on a fresh thread for an externally-injected event.
 
-        External systems (e.g. a GitHub Actions failure) reach the agent
-        through the same signed ``/webhook`` chokepoint as Inkbox traffic, but
-        there is no Inkbox contact behind them.  We surface each one as an
-        ``internal`` MessageEvent on a unique ``thread_id`` so every event
-        spins up a new Hermes session and the agent decides what to do.
+        This is the catch-all path: any inbound webhook whose type is not a
+        known Inkbox event (mail/text/imessage/call) lands here.  External
+        systems (e.g. a GitHub Actions workflow) have no Inkbox contact behind
+        them and use their own ad-hoc JSON schema, so we read whatever common
+        fields are present, surface the whole payload, and enqueue an
+        ``internal`` MessageEvent on a unique ``thread_id`` — a new Hermes
+        session per event — for the agent to act on.
 
         Args:
-            envelope (Dict[str, Any]): Parsed webhook body.  Expects
-                ``{"event_type": "external.event", "data": {...}}`` where
-                ``data`` carries ``source``, ``title``, ``body``, optional
-                ``url``, ``environment``, and optional ``id``.
+            envelope (Dict[str, Any]): Parsed webhook body.  No fixed schema;
+                fields are read from the top level and from a ``data`` wrapper
+                if present (``event``/``event_type``, ``title``, ``summary``/
+                ``body``, ``severity``, ``environment``, ``requested_action``,
+                ``url``/``run_url``, ``source``, optional ``id``, and a
+                ``github`` context block).
             request_id (str): The ``X-Inkbox-Request-Id``, used as the
-                thread/event key when the payload omits its own ``id``.
+                thread/event key when the payload carries no id of its own.
 
         Returns:
             web.Response: 200 once the event is enqueued for the agent.
         """
-        data = envelope.get("data") or {}
-        # Where the event came from (e.g. "github") and a human-readable title.
-        source_name = str(data.get("source") or "external").strip() or "external"
-        title = str(data.get("title") or "").strip()
-        body = str(data.get("body") or "").strip()
-        url = str(data.get("url") or "").strip()
+        # Some senders wrap fields under "data"; the GitHub demo sends a flat
+        # object. Read the top level first, then fall back to the data wrapper.
+        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        github = envelope.get("github") if isinstance(envelope.get("github"), dict) else {}
+
+        def _field(*names: str) -> str:
+            """First non-empty value for any of ``names`` across envelope/data."""
+            for name in names:
+                for scope in (envelope, data):
+                    value = scope.get(name)
+                    if value not in (None, ""):
+                        return str(value).strip()
+            return ""
+
+        # Event name + where it came from (repo for GitHub, else any "source").
+        event_name = _field("event_type", "event") or "external"
+        source_name = (
+            _field("source") or str(github.get("repository") or "").strip() or "external"
+        )
+        title = _field("title")
+        body = _field("summary", "body", "message", "description")
+        severity = _field("severity")
         # Free-form deployment environment (prod/beta/dev) the agent uses to
         # decide how loudly to react; passed through verbatim.
-        environment = str(data.get("environment") or "").strip()
+        environment = _field("environment", "env")
+        requested_action = _field("requested_action", "action")
+        url = _field("url", "run_url", "link") or str(github.get("run_url") or "").strip()
 
         # A stable per-event key keeps each event on its own thread: prefer an
-        # explicit payload id, fall back to the webhook request id, and finally
-        # hash the payload so distinct events never collide on one thread.
-        event_key = str(data.get("id") or request_id or "").strip()
+        # explicit id (payload id or GitHub run id), fall back to the webhook
+        # request id, and finally hash the payload so events never collide.
+        event_key = _field("id") or str(github.get("run_id") or "").strip() or request_id
         if not event_key:
             event_key = hashlib.sha256(
-                json.dumps(data, sort_keys=True, default=str).encode()
+                json.dumps(envelope, sort_keys=True, default=str).encode()
             ).hexdigest()[:16]
 
         # New thread per event so the agent wakes into a clean session, grouped
@@ -2472,26 +2494,32 @@ class InkboxAdapter(BasePlatformAdapter):
             user_id=chat_id,
             user_name=source_name,
             thread_id=thread_id,
-            chat_topic=title or None,
+            chat_topic=title or event_name or None,
             message_id=event_key,
         )
 
         # Routing marker mirrors the inbound-modality convention so the agent
-        # knows this is an external event (and which source/environment).
-        marker = f"[inkbox:external source={source_name}"
+        # knows this is an external event (and its source/env/severity).
+        marker_bits = [f"source={source_name}", f"event={event_name}"]
         if environment:
-            marker += f" environment={environment}"
-        if title:
-            marker += f" event={title!r}"
-        marker += "]"
-        # Assemble the body the agent reads: marker line, then title/body/link.
+            marker_bits.append(f"environment={environment}")
+        if severity:
+            marker_bits.append(f"severity={severity}")
+        marker = f"[inkbox:external {' '.join(marker_bits)}]"
+        # Body the agent reads: recognized fields first, then the raw payload so
+        # the agent has every detail regardless of the sender's schema.
         parts = [marker]
         if title:
             parts.append(title)
         if body:
             parts.append(body)
+        if requested_action:
+            parts.append(f"Requested action: {requested_action}")
         if url:
-            parts.append(f"link: {url}")
+            parts.append(f"Link: {url}")
+        parts.append("")
+        parts.append("Raw event payload:")
+        parts.append(json.dumps(envelope, indent=2, default=str)[:4000])
         text = "\n".join(parts)
 
         # Per-source operator overrides (system prompt and/or skills) — this is

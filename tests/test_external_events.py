@@ -52,53 +52,87 @@ def _adapter():
     return adapter
 
 
-def test_external_event_wakes_agent_on_new_thread():
-    adapter = _adapter()
-    body = (
-        b'{"event_type":"external.event","data":{'
-        b'"source":"github","environment":"prod",'
-        b'"title":"giblins lit prod server aflame",'
-        b'"body":"Workflow deploy.yml failed on main","id":"evt-1"}}'
-    )
+# The exact payload the yc-product-showcase workflow sends (flat object, the
+# key is "event", no "event_type", no "data" wrapper).
+DEMO_BODY = (
+    b'{"event":"agent_escalation_demo","title":"Agent escalation demo",'
+    b'"severity":"demo","summary":"A demo workflow requested human follow-up.",'
+    b'"requested_action":"Call Dima and explain what happened.",'
+    b'"github":{"repository":"inkbox-ai/servers","workflow":"YC product showcase",'
+    b'"run_id":"16012345678",'
+    b'"run_url":"https://github.com/inkbox-ai/servers/actions/runs/16012345678"}}'
+)
 
-    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+
+def test_demo_payload_wakes_agent_on_new_thread():
+    adapter = _adapter()
+
+    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(DEMO_BODY)))
 
     assert resp.status == 200
+    assert resp.text == "ok"
     assert len(adapter._enqueued) == 1
     event = adapter._enqueued[0]
     assert isinstance(event, MessageEvent)
     # Synthetic event must bypass user authorization.
     assert event.internal is True
-    # Fresh thread keyed by source + event id.
-    assert event.source.chat_id == "external:github"
-    assert event.source.thread_id == "external:github:evt-1"
-    # Marker carries source + environment so the agent can branch on it.
-    assert "[inkbox:external source=github environment=prod" in event.text
-    assert "giblins lit prod server aflame" in event.text
+    # Source = the GitHub repo; thread keyed by the run id.
+    assert event.source.chat_id == "external:inkbox-ai/servers"
+    assert event.source.thread_id == "external:inkbox-ai/servers:16012345678"
+    # Marker + the human fields + the requested action are all surfaced.
+    assert "[inkbox:external source=inkbox-ai/servers event=agent_escalation_demo" in event.text
+    assert "Requested action: Call Dima and explain what happened." in event.text
+    assert "16012345678" in event.text  # raw payload included
 
 
-def test_external_event_distinct_ids_get_distinct_threads():
+def test_unknown_event_type_hits_external_path():
+    adapter = _adapter()
+    # An event type we don't recognize and never will — must still wake.
+    body = b'{"event_type":"something.brand_new","title":"hi"}'
+
+    asyncio.run(adapter._handle_webhook(_FakeRequest(body, request_id="r-unknown")))
+
+    assert len(adapter._enqueued) == 1
+    # No id/run_id in the payload, so the thread falls back to the request id.
+    assert adapter._enqueued[0].source.thread_id == "external:external:r-unknown"
+
+
+def test_known_lifecycle_events_are_skipped_not_externalized(monkeypatch):
+    """message./text./imessage. lifecycle events must NOT hit the external path."""
     adapter = _adapter()
 
-    def _post(event_id, rid):
+    called = {"lifecycle": 0}
+
+    async def _fake_text_lifecycle(_envelope):
+        called["lifecycle"] += 1
+        return types.SimpleNamespace(status=200, text="ok")
+
+    monkeypatch.setattr(adapter, "_on_text_lifecycle", _fake_text_lifecycle)
+
+    # A delivery lifecycle event — known, must be handled (logged), not woken.
+    body = b'{"event_type":"text.delivered","data":{"text_message":{"id":"t1"}}}'
+    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+
+    assert resp.text == "ok"
+    assert called["lifecycle"] == 1
+    assert adapter._enqueued == []  # agent was NOT woken
+
+
+def test_distinct_events_get_distinct_threads():
+    adapter = _adapter()
+
+    def _post(run_id, rid):
         body = (
-            b'{"event_type":"external.event","data":{"source":"github",'
-            b'"title":"x","id":"' + event_id.encode() + b'"}}'
+            b'{"event":"agent_escalation_demo","github":{"repository":"inkbox-ai/servers",'
+            b'"run_id":"' + run_id.encode() + b'"}}'
         )
         return asyncio.run(adapter._handle_webhook(_FakeRequest(body, request_id=rid)))
 
-    _post("evt-1", "r1")
-    _post("evt-2", "r2")
+    _post("100", "r1")
+    _post("200", "r2")
 
     threads = {e.source.thread_id for e in adapter._enqueued}
-    assert threads == {"external:github:evt-1", "external:github:evt-2"}
-
-
-def test_external_event_falls_back_to_request_id_for_thread():
-    adapter = _adapter()
-    # No "id" in the payload — the webhook request id becomes the thread key.
-    body = b'{"event_type":"external.event","data":{"source":"github","title":"x"}}'
-
-    asyncio.run(adapter._handle_webhook(_FakeRequest(body, request_id="req-xyz")))
-
-    assert adapter._enqueued[0].source.thread_id == "external:github:req-xyz"
+    assert threads == {
+        "external:inkbox-ai/servers:100",
+        "external:inkbox-ai/servers:200",
+    }
