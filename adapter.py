@@ -2262,11 +2262,17 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="duplicate")
 
         try:
-            if source == "inkbox":
-                # Authenticated Inkbox event — pick the handler from the payload
-                # shape. Mail / text / iMessage arrive wrapped in
+            if source == "inkbox" and self._is_known_inkbox_event(event_type, envelope):
+                # An Inkbox-signed request carrying a known Inkbox event shape —
+                # pick the handler. Mail / text / iMessage arrive wrapped in
                 # ``{event_type, data:{...}}``; the incoming-call webhook is a
                 # flat object carrying ``phone_number_id`` + ``remote_phone_number``.
+                #
+                # NB: an Inkbox *signature* only means Inkbox vouched for
+                # delivery — a forwarded external event (e.g. a CI escalation)
+                # can be Inkbox-signed too. Those don't match a known shape, so
+                # they fall through to the external branch below rather than
+                # getting swallowed here.
                 if event_type == "message.received":
                     response = await self._on_mail_received(envelope)
                 elif event_type and event_type.startswith("message."):
@@ -2282,14 +2288,12 @@ class InkboxAdapter(BasePlatformAdapter):
                     response = await self._on_imessage_reaction(envelope)
                 elif event_type and event_type.startswith("imessage."):
                     response = await self._on_imessage_lifecycle(envelope)
-                elif "phone_number_id" in envelope and "remote_phone_number" in envelope:
-                    response = await self._on_incoming_call(envelope)
                 else:
-                    # Inkbox-signed but an event kind we don't handle — ack, ignore.
-                    response = web.Response(status=200, text="ignored")
+                    response = await self._on_incoming_call(envelope)
             elif source is not None:
-                # A verified third-party source — wake the agent on a fresh
-                # thread to decide what to do.
+                # A verified source whose payload is not a known Inkbox event —
+                # a third party, or an Inkbox-signed forwarded external event.
+                # Wake the agent on a fresh thread to decide what to do.
                 response = await self._on_external_event(envelope, request_id)
             elif self._external_events_enabled:
                 # Unrecognised source, external pass-through explicitly on —
@@ -2303,6 +2307,27 @@ class InkboxAdapter(BasePlatformAdapter):
             raise
         self._dedup_commit(request_id)
         return response
+
+    @staticmethod
+    def _is_known_inkbox_event(event_type: "str | None", envelope: Dict[str, Any]) -> bool:
+        """Whether a payload is a known Inkbox event shape (vs a forwarded external one).
+
+        Used only as a secondary discriminator *after* the source is verified as
+        Inkbox: mail / text / iMessage arrive as ``{event_type: "<kind>.<...>"}``;
+        the incoming-call webhook is a flat object carrying ``phone_number_id`` +
+        ``remote_phone_number``. Everything else (e.g. an Inkbox-signed CI
+        escalation) is treated as external.
+
+        Args:
+            event_type (str | None): The payload's ``event_type`` field, if any.
+            envelope (Dict[str, Any]): The parsed webhook body.
+
+        Returns:
+            bool: True for a recognised Inkbox event shape.
+        """
+        if event_type and event_type.startswith(("message.", "text.", "imessage.")):
+            return True
+        return "phone_number_id" in envelope and "remote_phone_number" in envelope
 
     def _prune_dedup_ids(self) -> None:
         if not hasattr(self, "_seen_request_ids"):

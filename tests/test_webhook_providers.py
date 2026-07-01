@@ -215,6 +215,37 @@ def test_third_party_valid_signature_proceeds(monkeypatch):
     assert captured["url"] == "https://agent.example/webhook"
 
 
+def test_inkbox_signed_external_shaped_event_routes_external(monkeypatch):
+    # An Inkbox *signature* only means Inkbox vouched for delivery — a forwarded
+    # external event (e.g. a CI escalation) is Inkbox-signed but is NOT a known
+    # Inkbox event shape. It must reach the agent via the external path, not get
+    # swallowed by the Inkbox handler branch. (Regression: the live
+    # external-events suite signs its escalation with the Inkbox key.)
+    hit = {"mail": 0, "call": 0}
+
+    async def _mail(_e):
+        hit["mail"] += 1
+
+    async def _call(_e):
+        hit["call"] += 1
+
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", lambda **k: True)
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    monkeypatch.setattr(adapter, "_on_mail_received", _mail)
+    monkeypatch.setattr(adapter, "_on_incoming_call", _call)
+    resp = asyncio.run(
+        adapter._handle_webhook(
+            _FakeRequest(
+                b'{"event":"agent_escalation_demo","title":"prod down"}',
+                headers={"X-Inkbox-Signature": "sha256=good"},
+            )
+        )
+    )
+    assert resp.status == 200
+    assert hit == {"mail": 0, "call": 0}   # not routed to any Inkbox handler
+    assert len(adapter._enqueued) == 1      # woke the agent as an external event
+
+
 def test_verified_third_party_bypasses_passthrough_flag(monkeypatch):
     # A source we deliberately onboarded (provider + secret) is trusted, so its
     # events reach the agent even with external pass-through OFF — the flag only
