@@ -12,6 +12,7 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin import webhook_providers as wp
+from inkbox_plugin.webhook_providers import inkbox as inkbox_provider_mod
 from inkbox_plugin.adapter import InkboxAdapter
 
 
@@ -56,6 +57,12 @@ def _adapter(*, require_signature, external_events_enabled):
 
 # --- registry ------------------------------------------------------------
 
+def test_providers_are_auto_discovered():
+    # Importing the package alone registers every provider module (the drop-in
+    # contract): the Inkbox provider is present without being imported by hand.
+    assert "inkbox" in {p.name for p in wp.base._REGISTRY}
+
+
 def test_match_provider_identifies_inkbox_by_header():
     provider = wp.match_provider({"X-Inkbox-Signature": "sha256=abc"})
     assert provider is not None and provider.name == "inkbox"
@@ -78,8 +85,8 @@ def test_inkbox_provider_delegates_to_sdk(monkeypatch):
         seen.update(payload=payload, secret=secret)
         return True
 
-    monkeypatch.setattr(wp, "verify_webhook", _fake_verify)
-    provider = wp.InkboxProvider()
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", _fake_verify)
+    provider = inkbox_provider_mod.InkboxProvider()
     ok = provider.verify(body=b"raw", headers={}, url="u", secret="whsec_test")
     assert ok is True
     assert seen == {"payload": b"raw", "secret": "whsec_test"}
@@ -97,7 +104,7 @@ def test_inkbox_event_without_signature_is_rejected():
 
 
 def test_inkbox_event_with_valid_signature_passes(monkeypatch):
-    monkeypatch.setattr(wp, "verify_webhook", lambda **k: True)
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", lambda **k: True)
     adapter = _adapter(require_signature=True, external_events_enabled=False)
     resp = asyncio.run(
         adapter._handle_webhook(
@@ -112,7 +119,7 @@ def test_inkbox_event_with_valid_signature_passes(monkeypatch):
 
 
 def test_inkbox_event_with_bad_signature_is_rejected(monkeypatch):
-    monkeypatch.setattr(wp, "verify_webhook", lambda **k: False)
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", lambda **k: False)
     adapter = _adapter(require_signature=True, external_events_enabled=False)
     resp = asyncio.run(
         adapter._handle_webhook(

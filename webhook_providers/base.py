@@ -1,31 +1,13 @@
-"""Inbound-webhook source identification + signature verification.
+"""Core webhook-provider machinery: the base class and the registry.
 
-Every request that reaches the plugin's ``/webhook`` endpoint is signed by
-whoever sent it, but each source signs differently — a different header name,
-different signed content, and a different algorithm — so there is no single
-signature to check. This module turns that into a small registry:
-
-* each source is a :class:`WebhookProvider` that knows how to (a) recognise
-  its own requests from the headers and (b) verify their signature;
-* :func:`match_provider` picks the provider for an incoming request by header
-  presence, and the adapter then calls ``provider.verify(...)`` with that
-  source's secret.
-
-Only the Inkbox provider ships today. To onboard another source, add a
-:class:`WebhookProvider` subclass and decorate it with
-:func:`register_provider` — see ``skills/inkbox-webhook-providers``.
+Provider modules import :class:`WebhookProvider` and :func:`register_provider`
+from here; the package ``__init__`` auto-imports every provider module at
+startup so their registration runs. See ``skills/inkbox-webhook-providers``.
 """
 
 from __future__ import annotations
 
 from typing import List, Mapping, Optional, Type
-
-try:
-    # The SDK owns the canonical Inkbox HMAC scheme; the Inkbox provider reuses
-    # it verbatim so the verification logic lives in exactly one place.
-    from inkbox import verify_webhook
-except ImportError:  # pragma: no cover - SDK is optional at import time
-    verify_webhook = None  # type: ignore[assignment]
 
 
 class WebhookProvider:
@@ -117,31 +99,3 @@ def match_provider(headers: Mapping[str, str]) -> Optional[WebhookProvider]:
         if provider.matches(headers):
             return provider
     return None
-
-
-@register_provider
-class InkboxProvider(WebhookProvider):
-    """Inkbox's own events — inbound mail, text, iMessage, and calls.
-
-    Inkbox stamps ``X-Inkbox-Signature`` as an HMAC-SHA256 over the request
-    id, timestamp, and raw body using the org signing key. Verification is
-    delegated to the SDK's ``verify_webhook`` so the scheme stays defined in
-    one place.
-    """
-
-    name = "inkbox"
-    provider_header = "X-Inkbox-Signature"
-
-    def verify(
-        self,
-        *,
-        body: bytes,
-        headers: Mapping[str, str],
-        url: str,
-        secret: str,
-    ) -> bool:
-        # No SDK installed means we cannot verify — fail closed.
-        if verify_webhook is None:
-            return False
-        # Inkbox signs the raw body; ``url`` is unused for this scheme.
-        return verify_webhook(payload=body, headers=headers, secret=secret)

@@ -9,9 +9,11 @@ user-invocable: false
 Every request that reaches the plugin's `/webhook` endpoint is signed by
 whoever sent it, but each source signs differently — a different header, a
 different signed payload, and a different algorithm — so there is no single
-signature to check. The plugin handles this with a small registry in
-`webhook_providers.py`: each source is a `WebhookProvider` that knows how to
-recognise its own requests and verify their signature.
+signature to check. The plugin handles this with a small registry in the
+`webhook_providers/` package: each source is a `WebhookProvider` in **its own
+module** that knows how to recognise its own requests and verify their
+signature. The package auto-imports every module in it at startup, so adding a
+source is drop-in: **create one file, no central list to edit.**
 
 ## How verification is decided
 
@@ -34,17 +36,24 @@ to "cryptographically verified".
 
 ## Steps to onboard a source
 
-1. **Add a subclass** in `webhook_providers.py` and decorate it with
-   `@register_provider`:
+1. **Drop a new file** `webhook_providers/<name>.py` with a `WebhookProvider`
+   subclass decorated with `@register_provider`. That's the whole registration
+   step — the package auto-imports it at startup, no other file changes:
 
    ```python
+   # webhook_providers/github.py
+   import hashlib
+   import hmac
+
+   from .base import WebhookProvider, register_provider
+
+
    @register_provider
    class GithubProvider(WebhookProvider):
        name = "github"                       # surfaced to the agent as source=github
        provider_header = "X-Hub-Signature-256"
 
        def verify(self, *, body, headers, url, secret):
-           import hashlib, hmac
            sent = ""
            for k, v in headers.items():      # header names are case-insensitive
                if k.lower() == "x-hub-signature-256":
