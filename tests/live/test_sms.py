@@ -66,7 +66,15 @@ def sms():
 
 
 def _ask_sms(sms, text: str) -> str:
-    """Text the agent; return the reply body (lowercased), matched by new message id."""
+    """Text the agent; return the reply body (lowercased), matched by new message id.
+
+    The agent sometimes emits a trailing *second* SMS for the PREVIOUS question
+    (a duplicate "OK", or a masked + unmasked identity pair) that lands a few
+    seconds late. Matching on "any new inbound id after I sent" would let that
+    leftover leak into the next question's match. So before sending we first
+    drain the inbound conversation to a quiet state — polling until the id-set
+    stops growing — which folds any in-flight trailing reply into ``before``.
+    """
     remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
     tail = _digits(aut_phone)[-10:]
 
@@ -78,7 +86,17 @@ def _ask_sms(sms, text: str) -> str:
                 out.append(m)
         return out
 
+    # Settle: wait until no new inbound arrives for one quiet poll, so a trailing
+    # reply to the prior question is captured in `before` instead of mis-matched.
     before = {m.id for m in _inbound_from_aut()}
+    quiet_deadline = time.monotonic() + 2 * POLL_EVERY_S
+    while time.monotonic() < quiet_deadline:
+        time.sleep(POLL_EVERY_S)
+        now_ids = {m.id for m in _inbound_from_aut()}
+        if now_ids == before:
+            break
+        before = now_ids
+
     remote.texts.send(pid, to=aut_phone, text=text)
 
     deadline = time.monotonic() + TIMEOUT_S
