@@ -71,6 +71,7 @@ if not _real_host_available() and "gateway.config" not in sys.modules:
         source: Any = None
         raw_message: dict[str, Any] | None = None
         reply_to_message_id: str | None = None
+        internal: bool = False
         chat_name: str | None = None
         user_name: str | None = None
         platform: Any = None
