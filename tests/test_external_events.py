@@ -171,3 +171,36 @@ def test_distinct_events_get_distinct_threads():
         "external:inkbox-ai/servers:100",
         "external:inkbox-ai/servers:200",
     }
+
+
+def test_github_native_payload_extracts_source_and_run():
+    # Real GitHub webhooks nest repository.full_name and workflow_run.id/html_url
+    # (not our demo `github` block) — the routing fields must still resolve.
+    adapter = _adapter()
+    body = {
+        "action": "completed",
+        "conclusion": "failure",
+        "repository": {"full_name": "inkbox-ai/servers"},
+        "workflow_run": {
+            "id": "991",
+            "html_url": "https://github.com/inkbox-ai/servers/actions/runs/991",
+        },
+    }
+    asyncio.run(adapter._on_external_event(body, "req-gh", verified=True))
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "external:inkbox-ai/servers"
+    assert event.source.thread_id == "external:inkbox-ai/servers:991"
+    assert "runs/991" in event.text
+
+
+def test_external_source_name_sanitized_in_marker():
+    # A crafted source can't break the [inkbox:external ...] marker or the
+    # external:<source> chat id (brackets stripped, newline → space).
+    adapter = _adapter()
+    asyncio.run(adapter._on_external_event({"source": "evil]\ninjected", "title": "x"}, "req-s"))
+    event = adapter._enqueued[0]
+    marker = event.text.splitlines()[0]
+    assert marker.startswith("[inkbox:external ") and marker.endswith("]")
+    assert marker.count("]") == 1  # injected ']' stripped; only the closer remains
+    assert "source=evil injected" in marker  # newline became a space, no line break
+    assert event.source.chat_id == "external:evil injected"

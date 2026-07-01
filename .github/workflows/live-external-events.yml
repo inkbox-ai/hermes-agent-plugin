@@ -76,7 +76,9 @@ jobs:
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
-            echo "INKBOX_ALLOW_ALL_USERS=true"
+            # NB: no INKBOX_ALLOW_ALL_USERS here on purpose — external events
+            # are enqueued internal=True and must bypass user auth on their own.
+            # Setting allow-all would mask a regression in that bypass.
             echo "OPENAI_API_KEY=$OPENAI_API_KEY"
             echo "OPENAI_BASE_URL=https://api.openai.com/v1"
             # The whole point of this suite — let external webhooks reach the agent.

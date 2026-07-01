@@ -270,6 +270,45 @@ def test_inkbox_signed_external_shaped_event_routes_external(monkeypatch):
     assert len(adapter._enqueued) == 1      # woke the agent as an external event
 
 
+def test_inkbox_signed_unknown_dropped_when_external_events_off(monkeypatch):
+    # An Inkbox-signed payload with no handler (e.g. a future Inkbox event
+    # family) must NOT wake a session when external events are off — it's gated
+    # by the flag, same as an unknown source. Only registered third parties
+    # bypass the flag.
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", lambda **k: True)
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    resp = asyncio.run(
+        adapter._handle_webhook(
+            _FakeRequest(
+                b'{"event_type":"contact.updated","data":{}}',
+                headers={"X-Inkbox-Signature": "sha256=good"},
+            )
+        )
+    )
+    assert resp.status == 200 and resp.text == "ignored"
+    assert adapter._enqueued == []
+
+
+def test_unknown_source_event_carries_unverified_directive():
+    # Unsigned unknown source, passed through → the enqueued event must carry
+    # the cautious (do-not-act) directive as its channel_prompt.
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    asyncio.run(adapter._handle_webhook(_FakeRequest(b'{"event":"maybe_prod_fire"}')))
+    assert adapter._enqueued[0].channel_prompt == adapter_mod.EXTERNAL_EVENT_UNVERIFIED_DIRECTIVE
+
+
+def test_verified_thirdparty_event_carries_action_directive(monkeypatch):
+    # A verified third-party event → action directive (may act on it).
+    fake = types.SimpleNamespace(name="acme", verify=lambda **k: True)
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: fake)
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_ACME", "s3cret")
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    asyncio.run(
+        adapter._handle_webhook(_FakeRequest(b'{"event":"charge"}', headers={"X-Acme-Signature": "good"}))
+    )
+    assert adapter._enqueued[0].channel_prompt == adapter_mod.EXTERNAL_EVENT_DIRECTIVE
+
+
 def test_github_valid_signature_reaches_agent(monkeypatch):
     # A GitHub-signed escalation with a VALID signature is verified and handed
     # to the agent as an external event (source=github, not a known Inkbox shape).

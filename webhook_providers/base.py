@@ -79,8 +79,22 @@ def register_provider(cls: Type[WebhookProvider]) -> Type[WebhookProvider]:
     Returns:
         Type[WebhookProvider]: The same class, unchanged, so the decorator is
             transparent to the class definition.
+
+    Raises:
+        ValueError: If another registered provider already claims the same
+            ``provider_header`` — match order is first-match-wins, so an
+            overlapping header would be ambiguous. Fail fast at import.
     """
-    _REGISTRY.append(cls())
+    provider = cls()
+    header = (provider.provider_header or "").lower()
+    if header:
+        for existing in _REGISTRY:
+            if (existing.provider_header or "").lower() == header:
+                raise ValueError(
+                    f"Webhook provider header collision: {cls.__name__} and "
+                    f"{type(existing).__name__} both claim {provider.provider_header!r}."
+                )
+    _REGISTRY.append(provider)
     return cls
 
 

@@ -65,7 +65,7 @@ its events reach the agent regardless of the pass-through flag).
                    break
            if not sent.startswith("sha256="):
                return False
-           expected = "sha256=" + hmac.new(
+           expected = hmac.new(
                secret.encode(), body, hashlib.sha256
            ).hexdigest()
            return hmac.compare_digest(expected, sent.removeprefix("sha256="))

@@ -100,19 +100,30 @@ def _external_adapter():
     return adapter
 
 
-def test_external_event_injects_directive_prompt():
+def test_verified_external_event_injects_action_directive():
     adapter = _external_adapter()
-    asyncio.run(adapter._on_external_event({"event": "workflow_run", "title": "CI failed"}, "req-1"))
+    asyncio.run(
+        adapter._on_external_event({"event": "workflow_run", "title": "CI failed"}, "req-1", verified=True)
+    )
     event = adapter._enqueued[0]
-    # The directive is injected as the per-turn channel_prompt (system prompt).
+    # A verified source may be acted on — action directive as the system prompt.
     assert event.channel_prompt == adapter_mod.EXTERNAL_EVENT_DIRECTIVE
     assert "NOT delivered" in event.channel_prompt  # the "no human reads this" clause
+
+
+def test_unverified_external_event_injects_cautious_directive():
+    adapter = _external_adapter()
+    asyncio.run(adapter._on_external_event({"event": "workflow_run"}, "req-1b", verified=False))
+    event = adapter._enqueued[0]
+    # An unverified source gets the cautious "don't take irreversible action" prompt.
+    assert event.channel_prompt == adapter_mod.EXTERNAL_EVENT_UNVERIFIED_DIRECTIVE
+    assert "Do NOT take any irreversible" in event.channel_prompt
 
 
 def test_external_event_directive_composes_with_operator_prompt():
     adapter = _external_adapter()
     adapter._resolve_channel_overrides = lambda *a, **k: ("OPS PLAYBOOK", "inkbox:oncall")
-    asyncio.run(adapter._on_external_event({"event": "workflow_run"}, "req-2"))
+    asyncio.run(adapter._on_external_event({"event": "workflow_run"}, "req-2", verified=True))
     event = adapter._enqueued[0]
     # Directive first, then the operator's per-source playbook.
     assert event.channel_prompt.startswith(adapter_mod.EXTERNAL_EVENT_DIRECTIVE)
