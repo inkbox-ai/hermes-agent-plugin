@@ -167,6 +167,22 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
+
+# Injected as the per-turn system prompt whenever an external event wakes the
+# agent. The agent's text reply on an external thread is not delivered to a
+# human (see send()), so it must reason about the event and ACT via tools
+# rather than "reply". Prepended to any operator-configured external prompt.
+EXTERNAL_EVENT_DIRECTIVE = (
+    "You have been woken by an EXTERNAL automated event (a webhook from an "
+    "outside system), not by a message from a human. No person is reading this "
+    "thread, and your text reply here is NOT delivered to anyone — replying is "
+    "not how you take action. Think carefully about what this event actually "
+    "means and what, if anything, needs to happen. Then ACT with your tools: if "
+    "a human must be reached, call or message a specific contact by name/number "
+    "using the appropriate tool; if something must be recorded or handled, use "
+    "the right tool to do it. Do not merely describe what you would do — do it. "
+    "If no action is warranted, stop without sending anything."
+)
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
 IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
 SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
@@ -1266,6 +1282,13 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         self._webhook_path = str(extra.get("webhook_path") or DEFAULT_WEBHOOK_PATH)
         self._ws_path = str(extra.get("ws_path") or DEFAULT_WS_PATH)
+        # Default delivery target for messages with no human counterparty on
+        # the source thread (e.g. external-event summaries). ``home_channel``
+        # arrives from config as either a bare chat_id or ``{chat_id, name}``.
+        raw_home = extra.get("home_channel")
+        if isinstance(raw_home, dict):
+            raw_home = raw_home.get("chat_id")
+        self._home_channel = str(raw_home or os.getenv("INKBOX_HOME_CHANNEL") or "").strip()
         self._public_url_override = (
             extra.get("public_url") or os.getenv("INKBOX_PUBLIC_URL") or ""
         ).strip()
@@ -1799,6 +1822,26 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-silent-marker")
+
+        # External-event replies have no human counterparty on the source
+        # thread — ``chat_id`` is a synthetic ``external:<source>`` with no
+        # mailbox/number/contact behind it. Route the agent's summary to the
+        # configured home channel if there is one; otherwise drop it cleanly
+        # (success, so the host doesn't log a delivery failure and retry). The
+        # agent's real work happens through tools, independently of this reply.
+        if str(chat_id).startswith("external:"):
+            if self._home_channel:
+                logger.info(
+                    "[Inkbox] Routing external-event reply for %s to home channel",
+                    chat_id,
+                )
+                chat_id = self._home_channel
+            else:
+                logger.info(
+                    "[Inkbox] Dropping external-event reply for %s (no home channel): %s…",
+                    chat_id, (content or "")[:60].replace("\n", " "),
+                )
+                return SendResult(success=True, message_id="external-event-no-home-channel")
 
         meta = metadata or {}
         mode = (meta.get("mode") or "").lower().strip()
@@ -2601,6 +2644,14 @@ class InkboxAdapter(BasePlatformAdapter):
         # the seam where the "what to do on this event" playbook is attached.
         channel_prompt, auto_skill = self._resolve_channel_overrides(
             "external", chat_id, None
+        )
+        # Always prepend the external-event directive: no human reads this
+        # thread and the agent's reply is not delivered, so it must reason and
+        # act via tools. Any operator-configured prompt is appended after it.
+        channel_prompt = (
+            f"{EXTERNAL_EVENT_DIRECTIVE}\n\n{channel_prompt}"
+            if channel_prompt
+            else EXTERNAL_EVENT_DIRECTIVE
         )
         event = MessageEvent(
             text=text,
