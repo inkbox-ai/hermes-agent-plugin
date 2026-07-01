@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import sys
 import types
 from pathlib import Path
@@ -24,6 +26,18 @@ class _FakeRequest:
 
     async def read(self):
         return self._body
+
+
+def _sign(body, secret, *, request_id="rid-1", timestamp="1700000000"):
+    """Build real Inkbox signature headers for ``body`` (matches the SDK scheme)."""
+    key = secret.removeprefix("whsec_")
+    message = f"{request_id}.{timestamp}.".encode() + body
+    digest = hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+    return {
+        "X-Inkbox-Signature": "sha256=" + digest,
+        "X-Inkbox-Request-Id": request_id,
+        "X-Inkbox-Timestamp": timestamp,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -164,3 +178,123 @@ def test_registered_third_party_is_verified(monkeypatch):
         )
     )
     assert resp.status == 401
+
+
+def test_third_party_valid_signature_proceeds(monkeypatch):
+    # Matched third-party + good signature → the event reaches the agent, and
+    # the raw body, url, and env-resolved secret are all passed to verify().
+    captured = {}
+
+    def _verify(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    fake = types.SimpleNamespace(name="acme", verify=_verify)
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: fake)
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_ACME", "s3cret")
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    resp = asyncio.run(
+        adapter._handle_webhook(
+            _FakeRequest(b'{"event":"charge"}', headers={"X-Acme-Signature": "good"})
+        )
+    )
+    assert resp.status == 200
+    assert len(adapter._enqueued) == 1
+    assert captured["secret"] == "s3cret"          # env secret reached the verifier
+    assert captured["body"] == b'{"event":"charge"}'  # raw body, unparsed
+    assert captured["url"] == "https://agent.example/webhook"
+
+
+def test_inkbox_event_signed_by_other_provider_is_rejected(monkeypatch):
+    # Spoof: a non-Inkbox provider matches a request claiming an Inkbox event
+    # type. Even though that provider would "verify", it must be rejected —
+    # only the Inkbox provider may vouch for Inkbox events.
+    other = types.SimpleNamespace(name="github", verify=lambda **k: True)
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: other)
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    resp = asyncio.run(
+        adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.received"}'))
+    )
+    assert resp.status == 401
+
+
+def test_require_signature_false_bypasses_verify():
+    # Local-testing escape hatch: no verification at all when disabled.
+    adapter = _adapter(require_signature=False, external_events_enabled=False)
+    resp = asyncio.run(
+        adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.delivered"}'))
+    )
+    assert resp.status == 200 and resp.text == "ok"
+
+
+# --- provider unit edges -------------------------------------------------
+
+def test_register_provider_returns_class_and_registers(monkeypatch):
+    monkeypatch.setattr(wp.base, "_REGISTRY", [])
+
+    @wp.register_provider
+    class _Tmp(wp.WebhookProvider):
+        name = "tmp"
+        provider_header = "X-Tmp"
+
+    assert _Tmp.__name__ == "_Tmp"  # decorator is transparent
+    assert [p.name for p in wp.base._REGISTRY] == ["tmp"]
+
+
+def test_match_provider_first_match_wins(monkeypatch):
+    a = types.SimpleNamespace(name="a", matches=lambda h: True)
+    b = types.SimpleNamespace(name="b", matches=lambda h: True)
+    monkeypatch.setattr(wp.base, "_REGISTRY", [a, b])
+    assert wp.match_provider({}).name == "a"
+
+
+def test_base_matches_false_without_provider_header():
+    assert wp.WebhookProvider().matches({"X-Anything": "1"}) is False
+
+
+def test_base_verify_is_abstract():
+    with pytest.raises(NotImplementedError):
+        wp.WebhookProvider().verify(body=b"", headers={}, url="", secret="")
+
+
+def test_inkbox_provider_fails_closed_without_sdk(monkeypatch):
+    # SDK absent → cannot verify → must reject, never accept.
+    monkeypatch.setattr(inkbox_provider_mod, "verify_webhook", None)
+    provider = inkbox_provider_mod.InkboxProvider()
+    ok = provider.verify(
+        body=b"x", headers={"X-Inkbox-Signature": "sha256=abc"}, url="u", secret="s"
+    )
+    assert ok is False
+
+
+def test_inkbox_provider_real_signature_roundtrip():
+    # Exercise the real SDK HMAC path (not mocked): good sig verifies, and any
+    # tamper — body, secret, or dropped prefix — fails.
+    if inkbox_provider_mod.verify_webhook is None:
+        pytest.skip("inkbox SDK not installed")
+    provider = inkbox_provider_mod.InkboxProvider()
+    body = b'{"event_type":"message.received","data":{"id":"abc"}}'
+    headers = _sign(body, "whsec_secret")
+
+    assert provider.verify(body=body, headers=headers, url="u", secret="whsec_secret") is True
+    assert provider.verify(body=body + b" ", headers=headers, url="u", secret="whsec_secret") is False
+    assert provider.verify(body=body, headers=headers, url="u", secret="whsec_wrong") is False
+
+
+# --- secret resolution ---------------------------------------------------
+
+def test_provider_secret_inkbox_uses_signing_key():
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    assert adapter._provider_secret("inkbox") == "whsec_test"
+
+
+def test_provider_secret_third_party_reads_env(monkeypatch):
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_ACME", "from-env")
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    assert adapter._provider_secret("acme") == "from-env"
+
+
+def test_provider_secret_missing_env_is_empty(monkeypatch):
+    monkeypatch.delenv("INKBOX_WEBHOOK_SECRET_NOPE", raising=False)
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    assert adapter._provider_secret("nope") == ""
