@@ -89,7 +89,31 @@ def test_match_provider_is_case_insensitive():
 
 def test_match_provider_returns_none_for_unknown_source():
     # A third-party source we have not onboarded a verifier for.
-    assert wp.match_provider({"X-Hub-Signature-256": "sha256=abc"}) is None
+    assert wp.match_provider({"X-Stripe-Signature": "t=1,v1=abc"}) is None
+
+
+def test_github_provider_registered_and_matches():
+    provider = wp.match_provider({"X-Hub-Signature-256": "sha256=abc"})
+    assert provider is not None and provider.name == "github"
+
+
+def test_github_provider_verifies_real_hmac():
+    from inkbox_plugin.webhook_providers.github import GithubProvider
+
+    provider = GithubProvider()
+    body = b'{"action":"completed","conclusion":"failure"}'
+    secret = "gh_webhook_secret"
+    good = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    hdr = {"X-Hub-Signature-256": good}
+    assert provider.verify(body=body, headers=hdr, url="u", secret=secret) is True
+    # Tamper / wrong secret / no secret → all reject.
+    assert provider.verify(body=body + b"x", headers=hdr, url="u", secret=secret) is False
+    assert provider.verify(body=body, headers=hdr, url="u", secret="wrong") is False
+    assert provider.verify(body=body, headers=hdr, url="u", secret="") is False
+    assert provider.verify(
+        body=body, headers={"X-Hub-Signature-256": "nope"}, url="u", secret=secret
+    ) is False
 
 
 def test_inkbox_provider_delegates_to_sdk(monkeypatch):
@@ -244,6 +268,34 @@ def test_inkbox_signed_external_shaped_event_routes_external(monkeypatch):
     assert resp.status == 200
     assert hit == {"mail": 0, "call": 0}   # not routed to any Inkbox handler
     assert len(adapter._enqueued) == 1      # woke the agent as an external event
+
+
+def test_github_valid_signature_reaches_agent(monkeypatch):
+    # A GitHub-signed escalation with a VALID signature is verified and handed
+    # to the agent as an external event (source=github, not a known Inkbox shape).
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_GITHUB", "gh_secret")
+    body = b'{"event":"workflow_run","conclusion":"failure","summary":"call Jane Doe now"}'
+    sig = "sha256=" + hmac.new(b"gh_secret", body, hashlib.sha256).hexdigest()
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    resp = asyncio.run(
+        adapter._handle_webhook(_FakeRequest(body, headers={"X-Hub-Signature-256": sig}))
+    )
+    assert resp.status == 200
+    assert len(adapter._enqueued) == 1  # verified → agent woken
+
+
+def test_github_forged_signature_is_dropped(monkeypatch):
+    # Same event, a FORGED signature → rejected before the agent sees anything.
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_GITHUB", "gh_secret")
+    body = b'{"event":"workflow_run","conclusion":"failure","summary":"call Jane Doe now"}'
+    adapter = _adapter(require_signature=True, external_events_enabled=True)
+    resp = asyncio.run(
+        adapter._handle_webhook(
+            _FakeRequest(body, headers={"X-Hub-Signature-256": "sha256=deadbeef"})
+        )
+    )
+    assert resp.status == 401
+    assert adapter._enqueued == []  # forged → agent never woken
 
 
 def test_verified_third_party_bypasses_passthrough_flag(monkeypatch):

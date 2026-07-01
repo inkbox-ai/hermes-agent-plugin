@@ -68,6 +68,10 @@ jobs:
           PYEOF
           )"
           echo "AUT handle: $HANDLE"
+          # Per-run GitHub webhook secret: shared by the gateway (to verify) and
+          # the test (to sign). Generated fresh so nothing is committed.
+          GH_SECRET="$(openssl rand -hex 24)"
+          echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET" >> "$GITHUB_ENV"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
@@ -77,6 +81,8 @@ jobs:
             echo "OPENAI_BASE_URL=https://api.openai.com/v1"
             # The whole point of this suite — let external webhooks reach the agent.
             echo "INKBOX_EXTERNAL_EVENTS_ENABLED=true"
+            # Secret the github WebhookProvider verifies X-Hub-Signature-256 against.
+            echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET"
             # No realtime needed — the driver auto-rejects, so no media leg runs.
             echo "INKBOX_REALTIME_ENABLED=false"
           } >> "$HERMES_HOME/.env"
@@ -106,8 +112,11 @@ jobs:
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
+          # Inkbox-signed escalation + GitHub-signed (valid & forged) escalation.
           LIVE_REAL_MODEL=1 AUT_WEBHOOK_URL=http://127.0.0.1:8765/webhook \
-            "$PY" -m pytest tests/live/test_external_event_intelligence.py -v
+            "$PY" -m pytest \
+              tests/live/test_external_event_intelligence.py \
+              tests/live/test_external_event_github.py -v
 
       # Failure-only: these logs carry live agent content and this repo is public.
       - name: Dump logs (on failure only)
