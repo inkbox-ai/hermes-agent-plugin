@@ -134,6 +134,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.platforms.helpers import redact_phone
 try:
     from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from .webhook_providers import match_provider
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -146,6 +147,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from webhook_providers import match_provider
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -2205,6 +2207,25 @@ class InkboxAdapter(BasePlatformAdapter):
             "public_url": self._public_url,
         })
 
+    def _provider_secret(self, provider_name: str) -> str:
+        """Resolve the signing secret / verification key for a webhook provider.
+
+        The provider (matched by header) tells us *which* scheme to verify with;
+        this maps that provider to *its* secret.
+
+        Args:
+            provider_name (str): The matched provider's ``name`` (e.g. "inkbox").
+
+        Returns:
+            str: The secret used to verify that source's signatures. Inkbox uses
+                the configured signing key; any other source reads
+                ``INKBOX_WEBHOOK_SECRET_<NAME>`` from the environment (empty when
+                unset, which fails verification closed).
+        """
+        if provider_name == "inkbox":
+            return self._signing_key
+        return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
+
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         body = await request.read()
         try:
@@ -2213,27 +2234,37 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=400, text="invalid json")
 
         event_type = envelope.get("event_type")
-        # Classify BEFORE authenticating. Inkbox events are signed with OUR
-        # signing key, so we verify them. External (third-party) events —
-        # Stripe, GitHub, etc. — are signed by the source with the source's
-        # own secret/scheme, which we cannot check here, so we never verify
-        # them and only pass them through when explicitly enabled.
+        # Classify (which handler) separately from authenticating (who signed
+        # this). ``is_inkbox_event`` decides routing; the provider registry
+        # decides verification. Each source signs with its own header + scheme,
+        # so we identify the source by header presence, then verify with that
+        # source's verifier. See ``webhook_providers``.
         is_inkbox_event = self._is_known_inkbox_event(event_type, envelope)
+        provider = match_provider(request.headers)
 
         if is_inkbox_event:
-            # Verify HMAC over the raw body — the one chokepoint where we can
-            # refuse spoofed Inkbox traffic (public-URL and tunnel both land here).
-            if self._require_signature:
-                ok = verify_webhook(
-                    payload=body,
-                    headers=dict(request.headers),
-                    secret=self._signing_key,
-                )
-                if not ok:
-                    return web.Response(status=401, text="invalid signature")
-        elif not self._external_events_enabled:
-            # External pass-through is off by default — drop without waking the agent.
+            # An event claiming an Inkbox type MUST carry a valid Inkbox
+            # signature — otherwise anyone who reached the tunnel could forge a
+            # mail/text/call event. Reject anything not signed by Inkbox.
+            if self._require_signature and (provider is None or provider.name != "inkbox"):
+                return web.Response(status=401, text="invalid signature")
+        elif provider is None and not self._external_events_enabled:
+            # Unrecognised third-party source and external pass-through is off
+            # by default — drop without waking the agent.
             return web.Response(status=200, text="ignored")
+
+        # Verify whenever a registered provider claims the request — Inkbox or
+        # any onboarded third party. Unrecognised external sources fall through
+        # here unverified, and only when pass-through is explicitly enabled.
+        if provider is not None and self._require_signature:
+            ok = provider.verify(
+                body=body,
+                headers=dict(request.headers),
+                url=str(request.url),
+                secret=self._provider_secret(provider.name),
+            )
+            if not ok:
+                return web.Response(status=401, text="invalid signature")
 
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
         if request_id and self._dedup_begin(request_id):
