@@ -15,12 +15,18 @@ from inkbox_plugin.adapter import InkboxAdapter
 
 
 class _FakeRequest:
-    def __init__(self, body, *, request_id="req-1"):
+    def __init__(self, body, headers=None, *, request_id="req-1"):
         self._body = body
-        self.headers = {"X-Inkbox-Request-Id": request_id}
+        self.headers = {"X-Inkbox-Request-Id": request_id, **(headers or {})}
+        self.url = "https://agent.example/webhook"
 
     async def read(self):
         return self._body
+
+
+# Marks a request as Inkbox-signed so it routes to the Inkbox handlers (value
+# unchecked here: _adapter() builds with _require_signature=False).
+_INKBOX_SIGNED = {"X-Inkbox-Signature": "sha256=unchecked"}
 
 
 @pytest.fixture(autouse=True)
@@ -70,8 +76,8 @@ def test_request_id_rolls_back_after_dispatch_failure(monkeypatch):
     body = b'{"event_type":"text.received","data":{"text_message":{"id":"t1"}}}'
 
     with pytest.raises(RuntimeError):
-        asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED)))
     with pytest.raises(RuntimeError):
-        asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED)))
 
     assert calls["count"] == 2

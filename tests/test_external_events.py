@@ -15,12 +15,19 @@ from inkbox_plugin.adapter import InkboxAdapter, MessageEvent
 
 
 class _FakeRequest:
-    def __init__(self, body, *, request_id="req-ext-1"):
+    def __init__(self, body, headers=None, *, request_id="req-ext-1"):
         self._body = body
-        self.headers = {"X-Inkbox-Request-Id": request_id}
+        self.headers = {"X-Inkbox-Request-Id": request_id, **(headers or {})}
+        self.url = "https://agent.example/webhook"
 
     async def read(self):
         return self._body
+
+
+# An Inkbox-signed request carries this header, so the inkbox provider matches
+# and routing treats it as an Inkbox event. Value is irrelevant when signature
+# verification is off (these tests build adapters with _require_signature=False).
+_INKBOX_SIGNED = {"X-Inkbox-Signature": "sha256=unchecked"}
 
 
 @pytest.fixture(autouse=True)
@@ -137,8 +144,9 @@ def test_known_lifecycle_events_are_skipped_not_externalized(monkeypatch):
     monkeypatch.setattr(adapter, "_on_text_lifecycle", _fake_text_lifecycle)
 
     # A delivery lifecycle event — known, must be handled (logged), not woken.
+    # It's Inkbox-signed, so it routes to the Inkbox lifecycle handler.
     body = b'{"event_type":"text.delivered","data":{"text_message":{"id":"t1"}}}'
-    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(body)))
+    resp = asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED)))
 
     assert resp.text == "ok"
     assert called["lifecycle"] == 1

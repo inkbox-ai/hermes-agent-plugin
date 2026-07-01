@@ -108,13 +108,23 @@ def test_inkbox_provider_delegates_to_sdk(monkeypatch):
 
 # --- adapter integration -------------------------------------------------
 
-def test_inkbox_event_without_signature_is_rejected():
-    # Claims an Inkbox event type but carries no Inkbox signature header.
-    adapter = _adapter(require_signature=True, external_events_enabled=True)
+def test_unsigned_inkbox_typed_event_is_not_trusted_as_inkbox(monkeypatch):
+    # We route on the authenticated source, not the body's claim. An unsigned
+    # payload claiming "message.received" must NOT reach the Inkbox mail handler
+    # — with pass-through off it is simply ignored.
+    hit = {"mail": 0}
+
+    async def _mail(_envelope):
+        hit["mail"] += 1
+
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    monkeypatch.setattr(adapter, "_on_mail_received", _mail)
     resp = asyncio.run(
-        adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.delivered"}'))
+        adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.received"}'))
     )
-    assert resp.status == 401
+    assert resp.status == 200 and resp.text == "ignored"
+    assert hit["mail"] == 0
+    assert adapter._enqueued == []
 
 
 def test_inkbox_event_with_valid_signature_passes(monkeypatch):
@@ -205,24 +215,55 @@ def test_third_party_valid_signature_proceeds(monkeypatch):
     assert captured["url"] == "https://agent.example/webhook"
 
 
-def test_inkbox_event_signed_by_other_provider_is_rejected(monkeypatch):
-    # Spoof: a non-Inkbox provider matches a request claiming an Inkbox event
-    # type. Even though that provider would "verify", it must be rejected —
-    # only the Inkbox provider may vouch for Inkbox events.
+def test_verified_third_party_bypasses_passthrough_flag(monkeypatch):
+    # A source we deliberately onboarded (provider + secret) is trusted, so its
+    # events reach the agent even with external pass-through OFF — the flag only
+    # gates *unverified* unknown sources.
+    fake = types.SimpleNamespace(name="acme", verify=lambda **k: True)
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: fake)
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_ACME", "s3cret")
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    resp = asyncio.run(
+        adapter._handle_webhook(
+            _FakeRequest(b'{"event":"charge"}', headers={"X-Acme-Signature": "good"})
+        )
+    )
+    assert resp.status == 200
+    assert len(adapter._enqueued) == 1
+
+
+def test_other_provider_claiming_inkbox_type_routes_external_not_mail(monkeypatch):
+    # A non-Inkbox source signs a payload that *claims* "message.received".
+    # Routing on the authenticated source means it goes to the external path
+    # (source=github), never to the Inkbox mail handler — no spoof possible.
+    hit = {"mail": 0}
+
+    async def _mail(_envelope):
+        hit["mail"] += 1
+
     other = types.SimpleNamespace(name="github", verify=lambda **k: True)
     monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: other)
     adapter = _adapter(require_signature=True, external_events_enabled=True)
+    monkeypatch.setattr(adapter, "_on_mail_received", _mail)
     resp = asyncio.run(
         adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.received"}'))
     )
-    assert resp.status == 401
+    assert resp.status == 200
+    assert hit["mail"] == 0            # never reached the Inkbox mail handler
+    assert len(adapter._enqueued) == 1  # handled as a verified external event
 
 
 def test_require_signature_false_bypasses_verify():
-    # Local-testing escape hatch: no verification at all when disabled.
+    # Local-testing escape hatch: the source is still identified by its header
+    # (real Inkbox traffic always carries it), but the signature is not checked.
     adapter = _adapter(require_signature=False, external_events_enabled=False)
     resp = asyncio.run(
-        adapter._handle_webhook(_FakeRequest(b'{"event_type":"message.delivered"}'))
+        adapter._handle_webhook(
+            _FakeRequest(
+                b'{"event_type":"message.delivered"}',
+                headers={"X-Inkbox-Signature": "sha256=unchecked"},
+            )
+        )
     )
     assert resp.status == 200 and resp.text == "ok"
 

@@ -17,22 +17,26 @@ source is drop-in: **create one file, no central list to edit.**
 
 ## How verification is decided
 
-On each inbound webhook, `adapter._handle_webhook`:
+`adapter._handle_webhook` **authenticates first, then routes on the verified
+source** — never on the payload's claimed `event_type`. On each inbound webhook:
 
-1. Calls `match_provider(headers)` — returns the first registered provider
-   whose signature header is present, or `None`.
-2. **Inkbox events** (`message.*` / `text.* `/ `imessage.*` / call payloads)
-   MUST be matched by the Inkbox provider and pass its check, or they are
-   rejected `401`. This stops anyone who reaches the tunnel from forging an
-   Inkbox event.
-3. **A matched third-party provider** → verified with that provider's scheme;
-   a bad signature is `401`.
-4. **An unmatched source** → passed through to the agent **unverified**, and
-   only when `INKBOX_EXTERNAL_EVENTS_ENABLED` is true (off by default);
-   otherwise dropped with `200 ignored`.
+1. `match_provider(headers)` returns the first registered provider whose
+   signature header is present, or `None`.
+2. If a provider matched, it must `verify()` (unless `INKBOX_REQUIRE_SIGNATURE`
+   is off); a present-but-invalid signature is rejected `401`.
+3. The **verified source** decides routing:
+   - `source == "inkbox"` → dispatched to the mail/text/iMessage/call handler by
+     payload shape.
+   - a verified **third-party** source → handed to the agent as an external event.
+   - **no provider matched** (unknown source) → external pass-through **only**
+     when `INKBOX_EXTERNAL_EVENTS_ENABLED` is true (off by default); otherwise
+     dropped with `200 ignored`.
 
-So onboarding a provider is what moves a source from "unverified pass-through"
-to "cryptographically verified".
+Because routing keys off *who signed it*, a forged payload can't impersonate an
+Inkbox event — an unsigned body claiming `message.received` is just an unknown
+source, never the mail handler. Onboarding a provider moves a source from
+"unverified pass-through" to "cryptographically verified" (and, once verified,
+its events reach the agent regardless of the pass-through flag).
 
 ## Steps to onboard a source
 
