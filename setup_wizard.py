@@ -1364,8 +1364,11 @@ def _offer_dedicated_number(client: Any, identity: Any) -> tuple[Any, bool]:
         provisioned = client.phone_numbers.provision(agent_handle=identity.agent_handle, type="local")
         print_success(f"  Provisioned: {provisioned.number}")
     except Exception as exc:
-        print_warning(f"  Phone provisioning failed: {exc}")
-        print_info("  You can provision a number later in the Inkbox console.")
+        # Graceful fallback — most rejections here are plan gating. Point at
+        # pricing and keep the wizard moving; nothing downstream needs a number.
+        print_info("  Dedicated phone numbers are available on Inkbox paid tiers —")
+        print_info("  see https://inkbox.ai/pricing for details.")
+        print_info(f"  (provisioning response: {exc})")
         return identity, False
 
     try:
