@@ -96,6 +96,74 @@ def _openai_realtime_ws_headers(bearer: str) -> Dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Main-agent capability map
+# ─────────────────────────────────────────────────────────────────────────────
+
+# What the main Hermes agent can do on behalf of a live call, grouped for
+# speech. Single source of truth: rendered into both the session instructions
+# and the consult_agent tool description so the two lists can never drift
+# apart. Each entry is (group, spoken summary, plugin tool names backing it);
+# tests/test_realtime_capabilities.py asserts every tool in plugin.yaml maps
+# to exactly one group, so adding a tool without updating this map fails CI.
+# The "general" group covers host-level abilities with no plugin tool behind
+# them and stays empty on purpose.
+MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    (
+        "contacts",
+        "look up, list, create, update, or delete contacts",
+        (
+            "inkbox_lookup_contact",
+            "inkbox_list_contacts",
+            "inkbox_get_contact",
+            "inkbox_create_contact",
+            "inkbox_update_contact",
+            "inkbox_delete_contact",
+        ),
+    ),
+    (
+        "sms",
+        "send SMS and read or manage past SMS conversations",
+        (
+            "inkbox_send_sms",
+            "inkbox_list_text_conversations",
+            "inkbox_get_text_conversation",
+            "inkbox_list_texts",
+            "inkbox_get_text",
+            "inkbox_mark_text_read",
+            "inkbox_mark_text_conversation_read",
+        ),
+    ),
+    (
+        "imessage",
+        "send iMessages and tapback reactions and read past iMessage conversations",
+        (
+            "inkbox_imessage_triage_number",
+            "inkbox_send_imessage",
+            "inkbox_list_imessage_assignments",
+            "inkbox_list_imessage_conversations",
+            "inkbox_get_imessage_conversation",
+            "inkbox_send_imessage_reaction",
+            "inkbox_mark_imessage_conversation_read",
+        ),
+    ),
+    ("email", "send email", ("inkbox_send_email",)),
+    ("calls", "place a separate outbound phone call", ("inkbox_place_call",)),
+    ("identity", "check its own Inkbox identity and numbers", ("inkbox_whoami",)),
+    (
+        "general",
+        "search session history and notes, check the calendar, do research or "
+        "computation, call external APIs, and draft long-form replies",
+        (),
+    ),
+)
+
+
+def _capability_summaries() -> List[str]:
+    """Spoken-friendly capability summaries, in map order."""
+    return [summary for _group, summary, _tools in MAIN_AGENT_CAPABILITIES]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tool schema definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -106,9 +174,8 @@ def _agent_consult_tool_schema() -> Dict[str, Any]:
         "name": AGENT_CONSULT_TOOL_NAME,
         "description": (
             "Pause the live voice conversation and ask the main Hermes agent to "
-            "do tool work that requires the full agent loop (look up an email, "
-            "search session history, check the calendar, hit an API, run a "
-            "computation, draft a long-form reply, etc.). The result you "
+            "do tool work that requires the full agent loop. The main agent can "
+            f"{'; '.join(_capability_summaries())}. The result you "
             "receive is the agent's spoken-friendly answer; read it back to "
             "the caller. Use this whenever the caller asks for something that "
             "needs current external data, persistent memory, or a tool call. "
@@ -410,9 +477,10 @@ def build_realtime_instructions(
         "Do not perform a context lookup before greeting the caller. Do not say you "
         "are waiting on a lookup or checking context.",
         f"If the caller asks for work to happen now during the live call and it needs "
-        f"Hermes/Inkbox tools, call {AGENT_CONSULT_TOOL_NAME}. This includes sending "
-        f"SMS/email, reading SMS/email/call history, creating notes, updating contacts, "
-        f"or checking current workspace/session data.",
+        f"Hermes/Inkbox tools, call {AGENT_CONSULT_TOOL_NAME}. The main agent can: "
+        + "; ".join(_capability_summaries()) + ".",
+        f"Do not promise work outside that list. If you are not sure something is "
+        f"possible, call {AGENT_CONSULT_TOOL_NAME} and ask instead of guessing.",
         f"If the caller explicitly asks for work to happen after the call, or accepts "
         f"an after-call deferral, call {POST_CALL_ACTION_TOOL_NAME}. Tell the caller "
         f"the action is queued for after the call; do not claim it has already been "
