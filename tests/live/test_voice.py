@@ -129,6 +129,23 @@ LOOKUP_CONTACT_EMAIL = "marigold.zebrawood@example.com"
 GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 
 
+def _gateway_log_text() -> str:
+    """All gateway log content we can find: stdout capture + hermes log files."""
+    from pathlib import Path
+
+    paths = [Path(GATEWAY_LOG)] if GATEWAY_LOG else []
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if hermes_home:
+        paths.extend(sorted(Path(hermes_home, "logs").glob("*")))
+    chunks = []
+    for path in paths:
+        try:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
 def _delete_contacts_by_email(client, email: str) -> None:
     for contact in client.contacts.lookup(email=email) or []:
         contact_id = str(getattr(contact, "id", "") or "")
@@ -222,11 +239,12 @@ def test_outbound_call_realtime_direct_contact_lookup():
             )
 
         # Non-LLM proof the DIRECT tool served the answer (vs a consult loop).
-        if GATEWAY_LOG and os.path.exists(GATEWAY_LOG):
-            with open(GATEWAY_LOG, encoding="utf-8", errors="replace") as fh:
-                log_text = fh.read()
+        # The gateway writes almost nothing to stdout; the plugin's INFO lines
+        # land in the hermes log files, so search every log we can find.
+        log_text = _gateway_log_text()
+        if log_text:
             assert "direct contact read inkbox_" in log_text, \
-                "gateway log shows no direct contact read during the call"
+                "gateway logs show no direct contact read during the call"
 
         tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
         assert tts is False and stt is False, \
