@@ -106,7 +106,7 @@ def _outbound_calls_to(aut, aut_number_id, driver_phone: str) -> list:
     """AUT's outbound calls dialed to the driver's number (newest first)."""
     tail = _digits(driver_phone)[-10:]
     return [
-        c for c in aut.calls.list(aut_number_id, limit=30)
+        c for c in aut.calls.list(limit=30)
         if (getattr(c, "direction", "") or "").lower() == "outbound"
         and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
     ]
