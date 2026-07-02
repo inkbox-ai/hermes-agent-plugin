@@ -71,6 +71,10 @@ hermes plugins update inkbox
 hermes gateway restart
 ```
 
+## Companion X/Twitter Alerts
+
+Pair Inkbox with [Hermes Tweet](https://github.com/Xquik-dev/hermes-tweet) when a Hermes agent should deliver X/Twitter monitoring summaries, reply digests, or campaign reminders over email, SMS, iMessage, or voice. Hermes Tweet owns the X/Twitter read tools and optional action gates; Inkbox owns the human-facing delivery channel.
+
 ## Setup Wizard
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
