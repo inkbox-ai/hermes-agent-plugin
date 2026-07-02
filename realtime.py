@@ -68,6 +68,26 @@ EDIT_POST_CALL_ACTION_TOOL_NAME = "edit_post_call_action"
 DELETE_POST_CALL_ACTION_TOOL_NAME = "delete_post_call_action"
 HANG_UP_CALL_TOOL_NAME = "hang_up_call"
 
+# Read-only contact tools exposed directly to the realtime model, so common
+# "who is X?" / "what's their email?" questions answer in one SDK round-trip
+# instead of a full consult_agent loop. Reads only, on purpose: writes stay
+# brokered through consult_agent / post-call actions, where the main agent
+# can apply judgment before anything mutates. No inkbox_get_contact here —
+# lookup and list already return full cards, so a by-id fetch adds nothing
+# mid-call. Names match the main-agent tools in plugin.yaml; the shared
+# implementations in tools.py do the work.
+CONTACT_LOOKUP_TOOL_NAME = "inkbox_lookup_contact"
+CONTACT_LIST_TOOL_NAME = "inkbox_list_contacts"
+REALTIME_CONTACT_READ_TOOLS: Tuple[str, ...] = (
+    CONTACT_LOOKUP_TOOL_NAME,
+    CONTACT_LIST_TOOL_NAME,
+)
+
+# Voice results must stay small — everything in the session competes with
+# audio for context. Cap matches and clip notes before submitting results.
+CONTACT_READ_MAX_RESULTS = 5
+CONTACT_READ_NOTES_MAX_CHARS = 200
+
 # How long to wait for the agent_consult tool to complete before giving up and
 # returning an error tool result. The realtime model is sitting idle while this
 # runs; longer values risk dead air, shorter values cut off legitimate work.
@@ -307,6 +327,65 @@ def _hang_up_call_tool_schema() -> Dict[str, Any]:
     }
 
 
+def _contact_lookup_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": CONTACT_LOOKUP_TOOL_NAME,
+        "description": (
+            "Look up an Inkbox contact by exactly ONE filter: email, phone, "
+            "emailContains, or phoneContains. Fast direct read; returns full "
+            "contact cards. Use this when the caller gives you an email "
+            "address or phone number. To search by NAME, use "
+            f"{CONTACT_LIST_TOOL_NAME} instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "Exact email address.",
+                },
+                "phone": {
+                    "type": "string",
+                    "description": "Exact phone number, E.164 preferred.",
+                },
+                "emailContains": {
+                    "type": "string",
+                    "description": "Substring of the email address.",
+                },
+                "phoneContains": {
+                    "type": "string",
+                    "description": "Substring of the phone number.",
+                },
+            },
+            "required": [],
+        },
+    }
+
+
+def _contact_list_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": CONTACT_LIST_TOOL_NAME,
+        "description": (
+            "Search the Inkbox contact book by name or free text. Fast direct "
+            f"read; returns up to {CONTACT_READ_MAX_RESULTS} full contact "
+            "cards. Use this when the caller asks who someone is or what "
+            "email/phone is on file for a person, mentioning them by name."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "description": "Name or free-text search query.",
+                },
+            },
+            "required": [],
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Data types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -481,6 +560,15 @@ def build_realtime_instructions(
         + "; ".join(_capability_summaries()) + ".",
         f"Do not promise work outside that list. If you are not sure something is "
         f"possible, call {AGENT_CONSULT_TOOL_NAME} and ask instead of guessing.",
+        f"Exception — quick contact questions (who someone is, what email or "
+        f"phone is on file): answer those yourself with {CONTACT_LIST_TOOL_NAME} "
+        f"(search by name via q) or {CONTACT_LOOKUP_TOOL_NAME} (exact "
+        f"email/phone), NOT {AGENT_CONSULT_TOOL_NAME}; the direct tools answer "
+        f"instantly. Contact changes still go through {AGENT_CONSULT_TOOL_NAME} "
+        f"or after-call actions.",
+        "Never recite contact details or message history involving third "
+        "parties to a caller you have not recognized; offer a follow-up after "
+        "the call instead.",
         f"If the caller explicitly asks for work to happen after the call, or accepts "
         f"an after-call deferral, call {POST_CALL_ACTION_TOOL_NAME}. Tell the caller "
         f"the action is queued for after the call; do not claim it has already been "
@@ -882,6 +970,8 @@ async def _send_session_update(
                 _edit_post_call_action_tool_schema(),
                 _delete_post_call_action_tool_schema(),
                 _hang_up_call_tool_schema(),
+                _contact_lookup_tool_schema(),
+                _contact_list_tool_schema(),
             ],
             "tool_choice": "auto",
         },
@@ -970,9 +1060,11 @@ async def _openai_to_inkbox_pump(
         # Dispatch it as a background task instead; the pump keeps streaming
         # audio while the agent thinks, and the task submits the tool result when
         # it finishes (this is exactly the async-tool flow gpt-realtime expects).
-        # Every other tool is an instant in-memory op, so it stays inline.
-        if name == AGENT_CONSULT_TOOL_NAME:
-            task = asyncio.create_task(coro, name=f"realtime-consult-{cid}")
+        # Direct contact reads are sync network I/O (~hundreds of ms), so they
+        # go to the background too. Every other tool is an instant in-memory
+        # op and stays inline.
+        if name == AGENT_CONSULT_TOOL_NAME or name in REALTIME_CONTACT_READ_TOOLS:
+            task = asyncio.create_task(coro, name=f"realtime-tool-{cid}")
             state.consult_tasks.add(task)
             task.add_done_callback(state.consult_tasks.discard)
         else:
@@ -1113,6 +1205,61 @@ async def _openai_to_inkbox_pump(
         # rate_limits.updated, …) are ignored.
 
 
+def _voice_trim_contact(raw: Any) -> Any:
+    """Cut a full contact card down to what is worth saying aloud."""
+    if not isinstance(raw, dict):
+        return raw
+    trimmed: Dict[str, Any] = {}
+    for key in ("id", "preferred_name", "given_name", "family_name", "company_name", "job_title"):
+        if raw.get(key):
+            trimmed[key] = raw[key]
+    # emails/phones arrive as [{value, is_primary, ...}] — flatten to values.
+    for key in ("emails", "phones"):
+        values = []
+        for entry in raw.get(key) or []:
+            value = entry.get("value") if isinstance(entry, dict) else entry
+            if value:
+                values.append(value)
+        if values:
+            trimmed[key] = values[:3]
+    notes = raw.get("notes")
+    if notes:
+        trimmed["notes"] = str(notes)[:CONTACT_READ_NOTES_MAX_CHARS]
+    return trimmed
+
+
+def _voice_trim_contact_result(payload: Any) -> Any:
+    """Shrink a contact tool's JSON payload before it enters the audio session."""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return payload
+    contacts = payload.get("contacts")
+    if isinstance(contacts, list):
+        payload["contacts"] = [
+            _voice_trim_contact(entry) for entry in contacts[:CONTACT_READ_MAX_RESULTS]
+        ]
+        if len(contacts) > CONTACT_READ_MAX_RESULTS:
+            payload["truncated_to"] = CONTACT_READ_MAX_RESULTS
+    return payload
+
+
+def _run_contact_read_sync(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute one direct contact read via the shared tool implementations."""
+    try:
+        from . import tools as tools_mod
+    except ImportError:  # pragma: no cover - direct local import/test fallback
+        import tools as tools_mod
+    tool_fn = getattr(tools_mod, name, None)
+    if tool_fn is None:
+        return {"error": f"unknown contact tool: {name}"}
+    if name == CONTACT_LIST_TOOL_NAME:
+        args = {**args, "limit": CONTACT_READ_MAX_RESULTS}
+    try:
+        payload = json.loads(tool_fn(dict(args)))
+    except Exception as exc:
+        return {"error": f"contact read failed: {exc}"}
+    return _voice_trim_contact_result(payload)
+
+
 async def _dispatch_tool_call(
     *,
     openai_ws: Any,
@@ -1130,6 +1277,19 @@ async def _dispatch_tool_call(
         args = json.loads(arguments_json or "{}")
     except (TypeError, ValueError):
         args = {}
+
+    if name in REALTIME_CONTACT_READ_TOOLS:
+        # Runs as a background task (see _finalize_fn_call); the sync SDK call
+        # moves to a thread so the audio pump keeps streaming meanwhile.
+        output = await asyncio.to_thread(_run_contact_read_sync, name, args)
+        # Tool name only — args/results carry contact PII and live-suite logs
+        # can end up in CI output.
+        logger.info(
+            "[Inkbox realtime] direct contact read %s for call_id=%s",
+            name, meta.call_id,
+        )
+        await _submit_tool_result(openai_ws, call_id, output)
+        return
 
     if name == POST_CALL_ACTION_TOOL_NAME:
         action = (args.get("action") or "").strip()

@@ -188,6 +188,8 @@ def test_session_update_exposes_post_call_edit_and_delete_tools():
         EDIT_POST_CALL_ACTION_TOOL_NAME,
         DELETE_POST_CALL_ACTION_TOOL_NAME,
         HANG_UP_CALL_TOOL_NAME,
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
     ]
 
     instructions = ws.sent[0]["session"]["instructions"]

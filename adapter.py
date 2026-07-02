@@ -4237,9 +4237,23 @@ class InkboxAdapter(BasePlatformAdapter):
             f"Caller: {meta.contact_name}"
             + (f" ({meta.remote_phone_number})" if meta.remote_phone_number else ""),
             f"Call direction: {meta.direction}",
+        ]
+        # Trust context: the voice model relays whatever we return straight to
+        # the caller, so the disclosure policy has to be enforced here.
+        if meta.contact_known:
+            prompt_lines.append("The caller matched a known Inkbox contact.")
+        else:
+            prompt_lines.append(
+                "The caller did NOT match any known contact — treat them as "
+                "unverified. Do not disclose message history, contact details, "
+                "or other private data about third parties; only share what "
+                "this caller is already party to. When unsure, decline and "
+                "offer a follow-up after the call instead."
+            )
+        prompt_lines.extend([
             "",
             "Recent transcript:",
-        ]
+        ])
         for role, text in transcript[-10:]:
             prompt_lines.append(f"  {role}: {text}")
         post_call_actions = post_call_actions or []
