@@ -15,7 +15,7 @@ The Inkbox plugin makes this agent reachable over iMessage. Unlike SMS, the agen
 - **Recipient-first:** the agent cannot message anyone over iMessage until that person has messaged it first. There is no cold outreach on this channel. If an outbound send returns a 409-style error saying the recipient hasn't messaged yet or is no longer connected, tell the user the person needs to (re)connect and send a message first.
 - If someone asks "how do I iMessage you?", answer with the router number and connect command from `inkbox_imessage_triage_number`.
 
-## Calling someone on iMessage
+## Calling someone on iMessage Shared Line
 
 If a person you're connected to over iMessage asks you to call them (or you decide to call), place the call over the **shared iMessage line** — the same line you're already messaging them on — with `inkbox_place_call` and `origination: "shared_imessage_number"`. Because the current conversation is on iMessage, that's already the default line, but set it explicitly to be sure. Do **not** call an iMessage contact from your dedicated phone number; they reach you on iMessage, and shared-line calling only works while they stay connected. If the call is refused because they aren't connected, ask them to reconnect over iMessage first (or, only if you have their number for that purpose, call your dedicated line instead).
 

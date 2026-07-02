@@ -6,7 +6,7 @@ description = "Inkbox platform plugin for Hermes Agent"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
-  "inkbox>=0.4.15",
+  "inkbox>=0.4.15,<1.0.0",
   "segno>=1.5",
 ]
 
