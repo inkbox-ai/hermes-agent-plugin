@@ -221,8 +221,16 @@ def test_outbound_call_realtime_direct_contact_lookup():
                     call_id = fresh[0].id
                     break
                 time.sleep(POLL_EVERY_S)
-            assert call_id, \
-                f"agent never placed a call back within {attempt_timeout:.0f}s (attempt {attempt})"
+            if call_id is None:
+                # place_call can succeed API-side yet the PSTN leg never
+                # materializes (bad carrier window) — same class of flake as a
+                # collapsed call, so let the second attempt run too.
+                if attempt == 2:
+                    pytest.fail(
+                        f"agent never placed a call back within "
+                        f"{attempt_timeout:.0f}s in two attempts"
+                    )
+                continue
 
             # Poll until the ANSWER lands, not just any two-way exchange — the
             # greeting alone already satisfies "both parties spoke". Transcript
