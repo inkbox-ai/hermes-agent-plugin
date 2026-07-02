@@ -3863,6 +3863,9 @@ class InkboxAdapter(BasePlatformAdapter):
                         "number",
                         None,
                     ) if identity_for_meta is not None else None,
+                    agent_imessage_enabled=bool(
+                        getattr(identity_for_meta, "imessage_enabled", False),
+                    ) if identity_for_meta is not None else False,
                     contact_known=bool(meta.get("contact")),
                     contact_emails=list(rt_contact.get("emails") or []),
                     contact_phones=list(rt_contact.get("phones") or []),
