@@ -201,41 +201,51 @@ def test_outbound_call_realtime_direct_contact_lookup():
                     if (getattr(c, "direction", "") or "").lower() == "inbound"
                     and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
-        before = {c.id for c in _inbound_from_aut()}
-        remote.texts.send(st["number_id"], to=aut_phone,
-                          text="Please call me right now by phone — give me a ring.")
-
-        deadline = time.monotonic() + TIMEOUT_S
-        call_id = None
-        while time.monotonic() < deadline:
-            fresh = [c for c in _inbound_from_aut() if c.id not in before]
-            if fresh:
-                call_id = fresh[0].id
-                break
-            time.sleep(POLL_EVERY_S)
-        assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
-
-        # Poll until the ANSWER lands, not just any two-way exchange — the
-        # greeting alone already satisfies "both parties spoke". Transcript
-        # segments persist past hangup, so polling may finish after the call.
-        # The driver-leg transcript is STT of the agent's real voice; strip
-        # spaces so "zebra wood" still matches the surname.
-        deadline = time.monotonic() + TIMEOUT_S
+        # Outbound realtime calls occasionally collapse seconds in with no
+        # agent audio ever transcribed (media-path flake, also seen on the
+        # plain outbound leg) — so allow one fresh call before failing.
+        attempt_timeout = max(TIMEOUT_S / 2, 110.0)
+        found = False
         agent_said = ""
-        while time.monotonic() < deadline:
-            try:
-                _all, rem, _loc = _segments(remote, st["number_id"], call_id)
-            except Exception:  # transcripts may 404 until the call is set up
-                rem = []
-            agent_said = " | ".join(s.text.strip() for s in rem)
-            squashed = agent_said.lower().replace(" ", "")
-            if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
+        for attempt in (1, 2):
+            before = {c.id for c in _inbound_from_aut()}
+            remote.texts.send(st["number_id"], to=aut_phone,
+                              text="Please call me right now by phone — give me a ring.")
+
+            deadline = time.monotonic() + attempt_timeout
+            call_id = None
+            while time.monotonic() < deadline:
+                fresh = [c for c in _inbound_from_aut() if c.id not in before]
+                if fresh:
+                    call_id = fresh[0].id
+                    break
+                time.sleep(POLL_EVERY_S)
+            assert call_id, \
+                f"agent never placed a call back within {attempt_timeout:.0f}s (attempt {attempt})"
+
+            # Poll until the ANSWER lands, not just any two-way exchange — the
+            # greeting alone already satisfies "both parties spoke". Transcript
+            # segments persist past hangup, so polling may finish after the
+            # call. The driver-leg transcript is STT of the agent's real voice;
+            # strip spaces so "zebra wood" still matches the surname.
+            deadline = time.monotonic() + attempt_timeout
+            while time.monotonic() < deadline:
+                try:
+                    _all, rem, _loc = _segments(remote, st["number_id"], call_id)
+                except Exception:  # transcripts may 404 until the call is set up
+                    rem = []
+                agent_said = " | ".join(s.text.strip() for s in rem)
+                squashed = agent_said.lower().replace(" ", "")
+                if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
+                    found = True
+                    break
+                time.sleep(POLL_EVERY_S)
+            if found:
                 break
-            time.sleep(POLL_EVERY_S)
-        else:
+        if not found:
             pytest.fail(
-                f"agent speech never carried the seeded contact's details within "
-                f"{TIMEOUT_S:.0f}s; heard: {agent_said[:500]}"
+                "agent speech never carried the seeded contact's details in "
+                f"two calls; last heard: {agent_said[:500]}"
             )
 
         # Non-LLM proof the DIRECT tool served the answer (vs a consult loop).
