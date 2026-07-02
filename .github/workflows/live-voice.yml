@@ -117,7 +117,7 @@ jobs:
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           if [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
-            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Marigold Zebrawood? Please read the email out loud, then say goodbye."
+            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
             export VOICE_DRIVER_LISTEN=25   # tool round-trip + spoken email needs more than the default turn
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
