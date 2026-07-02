@@ -120,12 +120,13 @@ def test_inbound_call_inkbox_tts_stt():
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
 # workflow can bake the matching question into VOICE_DRIVER_LINE; the test seeds
-# and deletes the card around the call, and the surname is one no real contact
-# would carry. STT writes it back as "zebrawood" or "zebra wood" — the assert
-# strips spaces before matching.
-LOOKUP_CONTACT_GIVEN = "Marigold"
-LOOKUP_CONTACT_FAMILY = "Zebrawood"
-LOOKUP_CONTACT_EMAIL = "marigold.zebrawood@example.com"
+# and deletes the card around the call. The name must survive TWO audio hops
+# (driver TTS → realtime ASR), so it has to be phonetically ordinary — an
+# invented surname came back as "Miracle Zibberwood" and the lookup rightly
+# found nothing. The assert still strips spaces before matching.
+LOOKUP_CONTACT_GIVEN = "Olivia"
+LOOKUP_CONTACT_FAMILY = "Parker"
+LOOKUP_CONTACT_EMAIL = "olivia.parker.livetest@example.com"
 GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 
 
