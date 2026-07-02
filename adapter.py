@@ -1727,15 +1727,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 identity.phone_number.number, webhook_url,
             )
 
-        # Inbound-call config is now IDENTITY-scoped (SDK 0.4.15+): a single
-        # row governs answering for BOTH the dedicated number and any shared
-        # iMessage line that routes to this identity.  ``auto_accept`` tells
-        # Inkbox to pick up the call itself and immediately open a WS to
-        # ``client_websocket_url`` without round-tripping a webhook first —
-        # lower setup latency than ``webhook`` mode, and the call context
-        # arrives on the WS itself via the ``x-call-context`` header (parsed
-        # in ``_handle_call_ws``).  We register whenever the identity can take
-        # a call at all: a dedicated number, iMessage enabled, or both.
+        # Inbound-call config is identity-scoped (SDK 0.4.15+): one row covers
+        # the dedicated number AND any shared iMessage line. ``auto_accept``
+        # skips the webhook round-trip and opens the WS directly (context in
+        # the ``x-call-context`` header). Register whenever calls can arrive.
         can_receive_calls = (
             identity.phone_number is not None
             or bool(getattr(identity, "imessage_enabled", False))
