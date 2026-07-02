@@ -156,7 +156,7 @@ def test_sms_request_gets_email_response(xc):
 def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
     """The driver's inbound calls originating from the AUT's number."""
     tail = _digits(aut_phone)[-10:]
-    return [c for c in remote.calls.list(remote_pid, limit=30)
+    return [c for c in remote.calls.list(limit=30)
             if (getattr(c, "direction", "") or "").lower() == "inbound"
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 

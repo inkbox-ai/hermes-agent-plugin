@@ -60,7 +60,8 @@ def _aut_phone(aut) -> str:
 
 def _segments(remote, number_id, call_id):
     """Transcript segments for a call, split by who spoke."""
-    segs = remote.transcripts.list(number_id, call_id)
+    # Identity-centered transcript read (SDK 0.4.15+); number_id is vestigial.
+    segs = remote.calls.transcripts(call_id)
     rem = [s for s in segs if (getattr(s, "party", "") or "").lower() == "remote" and (s.text or "").strip()]
     loc = [s for s in segs if (getattr(s, "party", "") or "").lower() == "local" and (s.text or "").strip()]
     return segs, rem, loc
@@ -89,9 +90,8 @@ def _aut_speech_mode(aut, direction, driver_number):
     """(use_inkbox_tts, use_inkbox_stt) of the agent's most recent answered call
     in `direction` with the driver. Tells Inkbox STT/TTS (True/True) from realtime
     (False/False), so each leg can prove it ran the speech path it claims."""
-    num_id = str(aut.phone_numbers.list()[0].id)
     tail = _digits(driver_number)[-10:]
-    answered = [c for c in aut.calls.list(num_id, limit=10)
+    answered = [c for c in aut.calls.list(limit=10)
                 if (getattr(c, "direction", "") or "").lower() == direction
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
                 and c.use_inkbox_tts is not None]
@@ -127,7 +127,7 @@ def test_outbound_call_realtime():
     tail = _digits(aut_phone)[-10:]
 
     def _inbound_from_aut():
-        return [c for c in remote.calls.list(st["number_id"], limit=30)
+        return [c for c in remote.calls.list(limit=30)
                 if (getattr(c, "direction", "") or "").lower() == "inbound"
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 

@@ -58,7 +58,7 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.4.7' 'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
+            'inkbox>=0.4.15' 'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
 
       - name: Configure AUT identity + model + speech path (${{ matrix.scenario }})
         env:
