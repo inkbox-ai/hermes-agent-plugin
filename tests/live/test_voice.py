@@ -198,14 +198,28 @@ def test_outbound_call_realtime_direct_contact_lookup():
             time.sleep(POLL_EVERY_S)
         assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
 
-        agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
+        # Poll until the ANSWER lands, not just any two-way exchange — the
+        # greeting alone already satisfies "both parties spoke". Transcript
+        # segments persist past hangup, so polling may finish after the call.
         # The driver-leg transcript is STT of the agent's real voice; strip
         # spaces so "zebra wood" still matches the surname.
-        squashed = agent_said.lower().replace(" ", "")
-        assert LOOKUP_CONTACT_FAMILY.lower() in squashed, \
-            f"agent speech never mentioned the seeded contact: {agent_said[:500]}"
-        assert "example" in squashed, \
-            f"agent speech never carried the email details: {agent_said[:500]}"
+        deadline = time.monotonic() + TIMEOUT_S
+        agent_said = ""
+        while time.monotonic() < deadline:
+            try:
+                _all, rem, _loc = _segments(remote, st["number_id"], call_id)
+            except Exception:  # transcripts may 404 until the call is set up
+                rem = []
+            agent_said = " | ".join(s.text.strip() for s in rem)
+            squashed = agent_said.lower().replace(" ", "")
+            if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
+                break
+            time.sleep(POLL_EVERY_S)
+        else:
+            pytest.fail(
+                f"agent speech never carried the seeded contact's details within "
+                f"{TIMEOUT_S:.0f}s; heard: {agent_said[:500]}"
+            )
 
         # Non-LLM proof the DIRECT tool served the answer (vs a consult loop).
         if GATEWAY_LOG and os.path.exists(GATEWAY_LOG):
