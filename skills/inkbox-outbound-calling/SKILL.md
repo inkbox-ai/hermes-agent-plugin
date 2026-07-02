@@ -24,9 +24,11 @@ already talking to the person on:
   number or ask them to message you on iMessage first. The agent never sees or
   chooses the underlying shared number — Inkbox resolves it from the connection.
 
-If only one path is available (you have just a number, or just iMessage), you
-can omit `origination` and it resolves automatically. When both are available,
-set it explicitly to match the conversation's channel.
+If you omit `origination`, it resolves automatically: to whichever line is the
+only one available, or — when both are available — to the line matching the
+conversation you're currently on (an iMessage turn calls over the shared
+iMessage line; an SMS/phone turn calls over the dedicated number). Set it
+explicitly only to override that default.
 
 ## Optional tool
 
@@ -39,7 +41,7 @@ set it explicitly to match the conversation's channel.
 3. Call `inkbox_place_call` with:
    - `to_number`
    - `purpose` — required. Include the reason/topic the user gave; if none was given, say the user asked for a general call.
-   - `origination` — set to match the channel when both paths are available; omit to auto-resolve when only one is.
+   - `origination` — usually omit it; it auto-follows the conversation's channel (and the only available line). Set it explicitly only to override.
    - `opening_message` — include when the user told you what to say first.
    - `context` — concise background the voice agent may need during the call.
 4. Do not invent or request `client_websocket_url`; the plugin supplies the active Inkbox call bridge when the channel gateway is running.

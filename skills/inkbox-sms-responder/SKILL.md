@@ -29,6 +29,10 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 
 4. **Mark as handled** if you have the optional tool allowlisted: `inkbox_mark_text_conversation_read` with `conversationId`.
 
+## Calling someone on SMS
+
+If someone in an SMS/text conversation asks you to call them (or you decide to), place the call from your **dedicated phone line** — the same number this conversation is on — with `inkbox_place_call` and `origination: "dedicated_number"`. That's already the default for a phone/SMS conversation, but set it explicitly to be sure. (The shared iMessage line is only for people connected over iMessage.)
+
 ## Gates and errors
 
 - **Opt-in required.** Recipients must have texted `START` to one of your Inkbox numbers. If they haven't, `inkbox_send_sms` returns the plain-language error "Recipient has not opted in to SMS." Surface this to the user; do not try to bypass.
