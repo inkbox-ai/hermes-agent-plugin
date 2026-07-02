@@ -1,9 +1,12 @@
 name: Live — voice calls (Inkbox TTS/STT + realtime)
 
 # Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
-# other side of a real phone call over its own Inkbox tunnel. Two matrix legs:
+# other side of a real phone call over its own Inkbox tunnel. Three matrix legs:
 #   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
 #   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
+#   outbound_realtime_contact — same call-back, but the driver asks for a seeded
+#                       contact's email; the agent must answer via a direct
+#                       contact-read tool and speak the details.
 # Each leg verifies the stored call transcript shows the agent spoke to the caller.
 # Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
 # shares the AUT tunnel lock with the other live suites.
@@ -35,7 +38,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
       matrix:
-        scenario: [inbound_inkbox, outbound_realtime]
+        scenario: [inbound_inkbox, outbound_realtime, outbound_realtime_contact]
 
     steps:
       - uses: actions/checkout@v4
@@ -88,10 +91,10 @@ jobs:
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true
           hermes config set model.default gpt-5.5 || true
-          if [ "${{ matrix.scenario }}" = "outbound_realtime" ]; then
-            echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
-          else
+          if [ "${{ matrix.scenario }}" = "inbound_inkbox" ]; then
             echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
+          else
+            echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
           fi
 
       - name: Start gateway and wait for readiness
@@ -112,6 +115,11 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          if [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
+            # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
+            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Marigold Zebrawood? Please read the email out loud, then say goodbye."
+            export VOICE_DRIVER_LISTEN=25   # tool round-trip + spoken email needs more than the default turn
+          fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/driver.pid"
