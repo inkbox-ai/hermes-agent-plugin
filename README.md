@@ -162,6 +162,15 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
+### Two calling lines
+
+Calls — inbound and outbound — can run over either of two lines, and the agent picks the one that matches the channel it's talking on:
+
+- **The dedicated phone number.** The agent's own number (the same line SMS uses). Outbound calls present this number; inbound calls to it ring the agent.
+- **The shared Inkbox iMessage line.** The agent can also place and receive voice calls with a person it's connected to over iMessage, over the same shared line that person already messages. The underlying number is never surfaced — Inkbox resolves it from the iMessage connection — and it only works for people already connected over iMessage (an unknown caller is rejected; an outbound call with no connection is refused).
+
+Inbound answering is configured once per identity (`auto_accept` → open the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it when only one line is available.
+
 ## iMessage
 
 iMessage works differently from SMS: the agent does not get its own iMessage number. People connect to the agent through the Inkbox iMessage router, and each connected person gets a dedicated thread with the agent.
@@ -172,6 +181,8 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, the gateway routes the thread into the same contact-keyed Hermes session as email/SMS/voice, and the agent replies over iMessage by default to whoever last reached it there.
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`, `imessage.delivery_failed`) arrive as webhooks and are logged by the gateway without waking the agent, matching the SMS lifecycle handling.
+
+Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
 ## CLI
 

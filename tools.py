@@ -725,6 +725,30 @@ def inkbox_mark_imessage_conversation_read(args: dict, **kwargs) -> str:
         return _json({"error": str(exc)})
 
 
+def _resolve_call_origination(identity, explicit: str) -> str | None:
+    """Pick which line an outbound call originates from.
+
+    Calls can go out over two paths: the agent's own ``dedicated_number`` or
+    the ``shared_imessage_number`` it's already messaging the recipient on.
+    An explicit choice (from the agent, matching the conversation's channel)
+    always wins.  Otherwise we auto-resolve only when the choice is
+    unambiguous — a dedicated number but no iMessage → dedicated; iMessage
+    enabled but no number → shared.  When BOTH are available and the agent
+    didn't say, default to the dedicated number (the open line that can reach
+    anyone).  Returns ``None`` when neither path exists (nothing to call from).
+    """
+    explicit = (explicit or "").strip().lower()
+    if explicit in {"dedicated_number", "shared_imessage_number"}:
+        return explicit
+    has_number = getattr(identity, "phone_number", None) is not None
+    imessage_enabled = bool(getattr(identity, "imessage_enabled", False))
+    if has_number:
+        return "dedicated_number"
+    if imessage_enabled:
+        return "shared_imessage_number"
+    return None
+
+
 def inkbox_place_call(args: dict, **kwargs) -> str:
     del kwargs
     try:
@@ -735,6 +759,13 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
             return _json({"error": "`to_number` is required"})
         if not purpose:
             return _json({"error": "`purpose` is required so the live call starts with the right context"})
+
+        # Resolve the outbound line (dedicated number vs shared iMessage line).
+        origination = _resolve_call_origination(
+            identity, args.get("origination") or args.get("origination_type") or "",
+        )
+        if origination is None:
+            return _json({"error": "This identity can't place calls: it has no dedicated phone number and iMessage is not enabled. Provision a number or enable iMessage first."})
 
         ws_url = str(args.get("client_websocket_url") or args.get("clientWebsocketUrl") or "").strip()
         if not ws_url:
@@ -751,22 +782,39 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
         decorated_ws_url = _append_query_param(ws_url, "context_token", token)
 
         def _place():
-            if hasattr(identity, "place_call"):
-                try:
-                    return identity.place_call(to_number=to_number, client_websocket_url=decorated_ws_url)
-                except TypeError:
-                    return identity.place_call({"to_number": to_number, "client_websocket_url": decorated_ws_url})
-            if hasattr(identity, "placeCall"):
-                return identity.placeCall({"toNumber": to_number, "clientWebsocketUrl": decorated_ws_url})
-            raise RuntimeError("Inkbox SDK identity has no place_call method")
+            if not hasattr(identity, "place_call"):
+                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.4.15)")
+            try:
+                return identity.place_call(
+                    to_number=to_number,
+                    origination=origination,
+                    client_websocket_url=decorated_ws_url,
+                )
+            except TypeError:
+                # Older SDK without ``origination`` support → dedicated only.
+                return identity.place_call(
+                    to_number=to_number,
+                    client_websocket_url=decorated_ws_url,
+                )
 
-        call = _place()
+        try:
+            call = _place()
+        except Exception as exc:  # noqa: BLE001 — surface a legible reason to the agent
+            msg = str(exc)
+            if "no_shared_connection" in msg:
+                return _json({
+                    "error": "Can't place a shared iMessage-line call: this person isn't connected to you over iMessage yet. They need to message your iMessage number first. To call from your own phone number instead, set origination to \"dedicated_number\".",
+                    "detail": msg,
+                })
+            return _json({"error": msg})
+
         rate = object_summary(getattr(call, "rate_limit", None) or getattr(call, "rateLimit", None))
         return _json({
             "ok": True,
             "call_id": str(getattr(call, "id", "")),
             "status": object_summary(getattr(call, "status", None)),
             "to_number": to_number,
+            "origination": origination,
             "context_token": token,
             "rate_limit": rate,
         })
@@ -1103,12 +1151,31 @@ MARK_IMESSAGE_CONVERSATION_READ_SCHEMA = {
 
 PLACE_CALL_SCHEMA = {
     "name": "inkbox_place_call",
-    "description": "Place an outbound call from the configured Inkbox identity phone number. Always include purpose.",
+    "description": (
+        "Place an outbound voice call. Calls can go out over two lines: your "
+        "own dedicated phone number, or the shared Inkbox iMessage line you are "
+        "already messaging the recipient on. Match the channel you're talking on "
+        "— call SMS/phone contacts from your dedicated number, and call an "
+        "iMessage contact over the shared iMessage line (set `origination` "
+        "accordingly). Always include purpose."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "to_number": {"type": "string", "description": "Recipient phone number in E.164 format."},
             "purpose": {"type": "string", "description": "Why the call is being placed; loaded into the live call before greeting."},
+            "origination": {
+                "type": "string",
+                "enum": ["dedicated_number", "shared_imessage_number"],
+                "description": (
+                    "Which line to call from. Use \"dedicated_number\" to call from your own "
+                    "phone number (the same line SMS/voice conversations use). Use "
+                    "\"shared_imessage_number\" to call someone over the shared iMessage line you "
+                    "are already messaging them on — this only works if they are connected to you "
+                    "over iMessage (otherwise the call is rejected). If omitted, it is resolved "
+                    "automatically when only one path is available."
+                ),
+            },
             "opening_message": {"type": "string", "description": "Optional first thing to say when the call connects."},
             "context": {"type": "string", "description": "Optional concise background for the voice agent."},
             "client_websocket_url": {"type": "string", "description": "Optional explicit call media WebSocket URL."},
