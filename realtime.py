@@ -257,6 +257,9 @@ class RealtimeCallMeta:
     agent_identity_handle: Optional[str] = None
     agent_identity_email: Optional[str] = None
     agent_identity_phone: Optional[str] = None
+    # Whether the identity also has the shared Inkbox iMessage line enabled —
+    # lets the spoken prompt draw the dedicated-vs-shared-line distinction.
+    agent_imessage_enabled: bool = False
     # True only when a real Inkbox contact resolved. When false, contact_name
     # may be a raw phone number / "unknown" and must NOT be treated as known.
     contact_known: bool = False
@@ -363,7 +366,19 @@ def build_realtime_instructions(
     if meta.agent_identity_email:
         lines.append(f"Your Inkbox agent email address: {meta.agent_identity_email}.")
     if meta.agent_identity_phone:
-        lines.append(f"Your Inkbox agent phone number: {meta.agent_identity_phone}.")
+        lines.append(
+            f"Your dedicated phone line (your own number, for SMS and voice calls): "
+            f"{meta.agent_identity_phone}.",
+        )
+    if meta.agent_imessage_enabled:
+        lines.append(
+            "You also have a shared Inkbox iMessage line — voice calls and iMessage "
+            "with people connected to you over iMessage. Its number is managed by "
+            "Inkbox: never state or promise a number for it. The current call may be "
+            "running over either line; calls follow the conversation's channel "
+            "(iMessage contacts are called over the shared line, SMS/phone contacts "
+            "over your dedicated number).",
+        )
     if meta.remote_phone_number:
         lines.append(f"Caller is calling from: {meta.remote_phone_number}.")
     if meta.contact_known and meta.contact_name and meta.contact_name not in ("unknown", ""):

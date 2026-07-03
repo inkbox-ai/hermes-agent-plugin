@@ -1713,12 +1713,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 identity.mailbox.email_address, webhook_url,
             )
 
-        # Phone number: text subscription + call channel on the resource.
-        # ``incoming_call_action="auto_accept"`` tells Inkbox to pick up the
-        # call itself and immediately open a WS to ``client_websocket_url``,
-        # without round-tripping a webhook first.  Lower setup latency than
-        # ``webhook`` mode, and the call context arrives on the WS itself
-        # via the ``x-call-context`` header (parsed in ``_handle_call_ws``).
+        # Phone number: register the inbound-text subscription on the number.
         if identity.phone_number is not None:
             _reconcile_text_subscription(
                 self._inkbox,
@@ -1727,15 +1722,38 @@ class InkboxAdapter(BasePlatformAdapter):
                 previous_webhook_url=previous_webhook_url,
                 desired_events=_DESIRED_TEXT_EVENTS,
             )
-            self._inkbox.phone_numbers.update(
-                identity.phone_number.id,
-                incoming_call_webhook_url=webhook_url,
-                incoming_call_action="auto_accept",
-                client_websocket_url=ws_url,
-            )
             logger.info(
-                "[Inkbox] Patched phone %s → %s + %s",
-                identity.phone_number.number, webhook_url, ws_url,
+                "[Inkbox] Patched phone %s text subscription → %s",
+                identity.phone_number.number, webhook_url,
+            )
+
+        # Inbound-call config is identity-scoped (SDK 0.4.15+): one row covers
+        # the dedicated number AND any shared iMessage line. ``auto_accept``
+        # skips the webhook round-trip and opens the WS directly (context in
+        # the ``x-call-context`` header). Register whenever calls can arrive.
+        can_receive_calls = (
+            identity.phone_number is not None
+            or bool(getattr(identity, "imessage_enabled", False))
+        )
+        if can_receive_calls:
+            if hasattr(identity, "set_incoming_call_action"):
+                identity.set_incoming_call_action(
+                    incoming_call_action="auto_accept",
+                    client_websocket_url=ws_url,
+                    incoming_call_webhook_url=webhook_url,
+                )
+            elif identity.phone_number is not None:
+                # Legacy SDKs (<0.4.15) only expose the number-scoped shim,
+                # which cannot configure a shared-iMessage-only identity.
+                self._inkbox.phone_numbers.update(
+                    identity.phone_number.id,
+                    incoming_call_webhook_url=webhook_url,
+                    incoming_call_action="auto_accept",
+                    client_websocket_url=ws_url,
+                )
+            logger.info(
+                "[Inkbox] Patched incoming-call action for identity %s → %s + %s",
+                self._identity_handle, webhook_url, ws_url,
             )
 
         # iMessage: identity-owned subscription, only while the identity is
@@ -3722,20 +3740,18 @@ class InkboxAdapter(BasePlatformAdapter):
             # stay isolated under their own thread.
             if call_id and self._inkbox is not None:
                 try:
-                    identity = await asyncio.to_thread(
-                        self._inkbox.get_identity, self._identity_handle,
+                    # Identity-centered call read (SDK 0.4.15+): a single
+                    # call-id lookup, no owning phone number required — so it
+                    # resolves shared iMessage-line calls too (those have no
+                    # ``phone_number`` on the identity).  Prefer the public
+                    # ``calls`` accessor, fall back to the private ``_calls``.
+                    calls_res = getattr(self._inkbox, "calls", None) or getattr(
+                        self._inkbox, "_calls", None,
                     )
-                    pn_id = getattr(identity.phone_number, "id", None)
-                    if pn_id:
-                        # ``_calls`` is the SDK's private call resource — same
-                        # accessor the legacy phone-bridge used.  Public
-                        # attribute is not yet exposed on Inkbox().
-                        call = await asyncio.to_thread(
-                            self._inkbox._calls.get, pn_id, call_id,
-                        )
-                        direction = (getattr(call, "direction", "") or "").strip().lower()
-                        if not remote:
-                            remote = (getattr(call, "remote_phone_number", "") or "").strip()
+                    call = await asyncio.to_thread(calls_res.get, call_id)
+                    direction = (getattr(call, "direction", "") or "").strip().lower()
+                    if not remote:
+                        remote = (getattr(call, "remote_phone_number", "") or "").strip()
                 except Exception as exc:
                     logger.warning(
                         "[Inkbox] Call lookup failed for call_id=%s: %s", call_id, exc,
@@ -3842,6 +3858,9 @@ class InkboxAdapter(BasePlatformAdapter):
                         "number",
                         None,
                     ) if identity_for_meta is not None else None,
+                    agent_imessage_enabled=bool(
+                        getattr(identity_for_meta, "imessage_enabled", False),
+                    ) if identity_for_meta is not None else False,
                     contact_known=bool(meta.get("contact")),
                     contact_emails=list(rt_contact.get("emails") or []),
                     contact_phones=list(rt_contact.get("phones") or []),
