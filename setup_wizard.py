@@ -506,9 +506,11 @@ def _test_openai_realtime_api_key(api_key: str, model: str = OPENAI_REALTIME_TES
         return False, f"Could not run Realtime validation from this setup process: {exc}"
 
 
-def _configure_realtime_calls(identity: Any) -> None:
+def _configure_realtime_calls(identity: Any, *, imessage_enabled: bool = False) -> None:
+    # Calls can arrive over the dedicated number OR the shared iMessage line,
+    # so offer realtime whenever either exists.
     phone = getattr(identity, "phone_number", None)
-    if phone is None:
+    if phone is None and not imessage_enabled:
         return
 
     print()
@@ -757,7 +759,7 @@ def _configure_avatar(base_url: str, api_key: str, identity: Any, *, is_signup: 
         print_info("  You can set one later in the Inkbox console.")
 
 
-def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -> None:
+def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -> bool:
     """Offer to enable iMessage for the agent and walk through connecting.
 
     Args:
@@ -767,39 +769,42 @@ def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -
         Inkbox (Any): The Inkbox SDK client class.
 
     Returns:
-        None: Prints progress; failures degrade to a warning and return.
+        bool: True when iMessage ended up enabled (newly or already), so the
+        caller can gate iMessage-dependent steps like realtime calling.
     """
     print()
     print(color("  --- iMessage ---", Colors.CYAN))
     print_info("  Inkbox can make this agent reachable over iMessage from your iPhone.")
     print_info("  No number to provision — you connect through the Inkbox iMessage router.")
+    print_info("  Once connected, the agent can also make and take voice calls with you")
+    print_info("  over that same shared iMessage line.")
 
     try:
         client = Inkbox(**inkbox_client_kwargs(api_key, base_url))
         identity = client.get_identity(handle)
     except Exception as exc:
         print_warning(f"  Could not load the identity for iMessage setup: {exc}")
-        return
+        return False
 
     # Old SDKs predate iMessage entirely — detect by surface, not version.
     if not hasattr(client, "imessages") or not hasattr(identity, "imessage_enabled"):
         print_warning("  The installed Inkbox SDK does not support iMessage yet.")
         print_info("  Upgrade it and rerun setup:")
         print_info(f"    {_install_command_text()}")
-        return
+        return False
 
     if identity.imessage_enabled:
         print_success("  iMessage is already enabled for this agent.")
     else:
         if not prompt_yes_no("  Enable iMessage for this agent?", True):
             print_info("  Skipped. Rerun `hermes inkbox setup` anytime to enable iMessage.")
-            return
+            return False
         try:
             identity.update(imessage_enabled=True)
         except Exception as exc:
             print_error(f"  Could not enable iMessage: {exc}")
             print_info("  You can enable it later from the Inkbox console and rerun setup.")
-            return
+            return False
         print_success("  iMessage enabled for this agent.")
         try:
             # Re-fetch so the local object reflects the new flag (the SDK
@@ -807,7 +812,7 @@ def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -
             identity = client.get_identity(handle)
         except Exception as exc:
             print_warning(f"  Could not refresh the identity after enabling: {exc}")
-            return
+            return True
 
     # Surface phones already connected through the router so reruns don't
     # read like a first-time setup, and default the walkthrough off when a
@@ -832,8 +837,9 @@ def _configure_imessage(api_key: str, base_url: str, handle: str, Inkbox: Any) -
     )
     if not prompt_yes_no(question, not connected):
         print_info("  You can connect anytime — rerun `hermes inkbox setup` for the walkthrough.")
-        return
+        return True
     _wait_for_imessage_first_message(client, identity, handle)
+    return True
 
 
 def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) -> None:
@@ -1350,7 +1356,12 @@ def _offer_dedicated_number(client: Any, identity: Any) -> tuple[Any, bool]:
     dedicated number.  Returns ``(possibly-refreshed identity, provisioned?)``;
     a no-op when the identity already has a number.
     """
-    if getattr(identity, "phone_number", None) is not None:
+    existing = getattr(identity, "phone_number", None)
+    if existing is not None:
+        # Say so instead of silently skipping — otherwise the step looks lost.
+        print()
+        print(color("  --- Dedicated phone number ---", Colors.CYAN))
+        print_success(f"  Already provisioned: {existing.number}")
         return identity, False
 
     print()
@@ -1503,7 +1514,7 @@ def interactive_setup() -> None:
     # the shared Inkbox iMessage router), THEN offer a dedicated phone number
     # for SMS + voice.  Provisioning is decoupled from identity creation so this
     # ordering holds across every entry path (signup, admin, agent-scoped).
-    _configure_imessage(api_key, base_url, identity.agent_handle, Inkbox)
+    imessage_on = _configure_imessage(api_key, base_url, identity.agent_handle, Inkbox)
 
     did_provision_phone = False
     try:
@@ -1521,7 +1532,7 @@ def interactive_setup() -> None:
     if did_provision_phone:
         _wait_for_sms_opt_in(api_key, base_url, getattr(identity, "phone_number", None), Inkbox)
 
-    _configure_realtime_calls(identity)
+    _configure_realtime_calls(identity, imessage_enabled=imessage_on)
 
     _setup_signing_key(api_key, base_url, Inkbox)
 
