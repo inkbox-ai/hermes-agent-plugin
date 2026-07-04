@@ -498,6 +498,13 @@ class _BridgeState:
     transcript_events: "asyncio.Queue[Tuple[str, str]]" = field(
         default_factory=asyncio.Queue,
     )
+    # True while a model response is being generated (between response.created
+    # and response.done). The supervisor checks this so a speak-now interjection
+    # never fires response.create into an already-active response.
+    response_active: bool = False
+    # Set once the supervisor loop is running, so the pump only fills
+    # transcript_events when something is actually consuming it.
+    supervisor_active: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -755,6 +762,11 @@ class OpenedRealtimeBridge:
             )
             for task in pending:
                 task.cancel()
+            # Await the cancelled pump(s) so they settle instead of leaking a
+            # pending task (and a "Task was destroyed but it is pending" warning).
+            for task in pending:
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
             for task in done:
                 try:
                     exc = task.exception()
@@ -881,15 +893,25 @@ def _maybe_start_supervisor(
     sup_config = getattr(config, "supervisor", None)
     if on_supervise is None or sup_config is None or not sup_config.enabled:
         return None
+    state.supervisor_active = True
     task = asyncio.create_task(
         _supervisor.run_supervisor_loop(
             openai_ws=openai_ws,
             transcript_events=state.transcript_events,
             transcript_snapshot=lambda: list(state.transcript),
-            is_closed=lambda: state.closed,
+            # Stop supervising once the call is closing OR a hangup has been
+            # armed — the goodbye/teardown window should not be steered.
+            is_closed=lambda: state.closed or state.hangup_armed_at is not None,
             config=sup_config,
             meta=meta,
             on_supervise=on_supervise,
+            # "Unsafe to speak now": a response is already generating, OR a
+            # consult is pending (its result readback will fire its own
+            # response.create shortly). Firing a speak-now interjection in either
+            # case collides with that response.create and OpenAI rejects one,
+            # which could drop the consult answer the caller is waiting on. When
+            # unsafe, the note is still injected silently and picked up next turn.
+            is_response_active=lambda: state.response_active or bool(state.pending_consult_keys),
         ),
         name=f"realtime-supervisor-{meta.call_id}",
     )
@@ -1057,9 +1079,13 @@ async def _send_session_update(
 def _publish_transcript_turn(state: _BridgeState, party: str, text: str) -> None:
     """Publish a finalized transcript turn to the supervisor bus (best-effort).
 
-    The queue is unbounded, so ``put_nowait`` never blocks or raises in practice;
-    a failure here must never disrupt the audio pump, so it is swallowed.
+    No-op unless a supervisor loop is actually consuming the bus — otherwise the
+    unbounded queue would just grow for the whole call with no reader. The queue
+    never blocks or raises on ``put_nowait``; any failure here must not disrupt
+    the audio pump, so it is swallowed.
     """
+    if not state.supervisor_active:
+        return
     try:
         state.transcript_events.put_nowait((party, text))
     except Exception:  # pragma: no cover — unbounded queue; defensive only
@@ -1280,7 +1306,13 @@ async def _openai_to_inkbox_pump(
                     "args": item.get("arguments") or "",
                 })
 
+        elif ftype == "response.created":
+            # A response is now generating. The supervisor consults this so a
+            # speak-now interjection doesn't fire response.create into it.
+            state.response_active = True
+
         elif ftype == "response.done":
+            state.response_active = False
             resp = frame.get("response") or {}
             rid = resp.get("id")
             if rid:

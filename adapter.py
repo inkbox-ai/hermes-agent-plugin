@@ -4380,7 +4380,8 @@ class InkboxAdapter(BasePlatformAdapter):
         "- interject: the agent just said something wrong or misleading and must "
         "correct it immediately.\n"
         "guidance must be one imperative sentence addressed to the agent, "
-        "spoken-friendly, and must never invent facts you were not given."
+        "spoken-friendly, and must never invent facts you were not given. Keep "
+        "reason under 12 words so the JSON stays short and complete."
     )
 
     async def _realtime_supervise(
@@ -4447,7 +4448,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0,
-            "max_tokens": 200,
+            # Roomy enough that a short JSON decision never truncates mid-object
+            # (json_object mode does not bound length on its own).
+            "max_tokens": 400,
             "response_format": {"type": "json_object"},
         }
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

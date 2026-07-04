@@ -262,7 +262,7 @@ After the gateway starts:
 | `INKBOX_REALTIME_SUPERVISOR` | no | `false` | Enable the proactive supervisor loop that watches the transcript and injects mid-call steering. |
 | `INKBOX_REALTIME_SUPERVISOR_MODEL` | no | `gpt-4o-mini` | Reasoning model the supervisor uses to review the call and decide whether to nudge. |
 | `INKBOX_REALTIME_SUPERVISOR_MAX_INTERJECTIONS` | no | `8` | Hard cap on supervisor notes injected per call. |
-| `INKBOX_REALTIME_SUPERVISOR_MIN_INTERVAL_S` | no | `6` | Minimum seconds between supervisor reviews. |
+| `INKBOX_REALTIME_SUPERVISOR_MIN_INTERVAL_S` | no | `0` | Floor on seconds between supervisor reviews (`0` = review every settled turn). |
 
 ## Channel Overrides
 

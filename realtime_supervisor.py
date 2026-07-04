@@ -98,9 +98,11 @@ class SupervisorConfig:
     # How long the supervisor model may take before we abandon a review. The
     # call keeps flowing regardless — a slow review just means no nudge.
     review_timeout_s: float = 12.0
-    # Never fire more than one review per this interval, even under rapid
-    # back-and-forth. Bounds cost and avoids stepping on the model.
-    min_review_interval_s: float = 6.0
+    # Floor on the gap between reviews, as a backstop against pathological
+    # rapid-fire. 0 = review every settled turn (the debounce already coalesces
+    # fragments within a turn), which is what "regular updates as the call
+    # proceeds" wants; raise it to trade responsiveness for fewer model calls.
+    min_review_interval_s: float = 0.0
     # Hard cap on total injected notes per call. Prevents a misbehaving
     # supervisor from turning the call into a lecture.
     max_interjections: int = 8
@@ -183,6 +185,12 @@ def parse_supervisor_decision(raw: Any) -> SupervisorDecision:
             guidance=str(json_obj.get("guidance") or ""),
             reason=str(json_obj.get("reason") or ""),
         ))
+
+    # Looks like JSON but didn't parse (e.g. a max_tokens-truncated object). Do
+    # NOT fall through to the freeform-steer path — injecting a half-JSON blob as
+    # a spoken note would be worse than staying silent.
+    if stripped.startswith("{") or stripped.startswith("```"):
+        return SupervisorDecision(action=ACTION_NONE)
 
     # Plain-text convention.
     if stripped.lower() in _SILENT_MARKERS:
@@ -282,7 +290,9 @@ class _SupervisorRuntime:
     """Mutable per-call supervisor bookkeeping, kept off the shared bridge state."""
 
     interjections: int = 0
-    last_review_at: float = 0.0
+    # -inf so the very first review is never throttled by min_review_interval_s,
+    # regardless of the clock's absolute value.
+    last_review_at: float = float("-inf")
     reviewed_turns: int = 0
     guidance: List[str] = field(default_factory=list)
 
@@ -296,6 +306,7 @@ async def run_supervisor_loop(
     config: SupervisorConfig,
     meta: Any,
     on_supervise: SuperviseCallback,
+    is_response_active: Optional[Callable[[], bool]] = None,
     clock: Callable[[], float] = None,  # type: ignore[assignment]
     runtime: Optional[_SupervisorRuntime] = None,
 ) -> None:
@@ -364,15 +375,23 @@ async def run_supervisor_loop(
 
         rt.guidance.append(decision.guidance)
         rt.interjections += 1
+        # Speak-now only when the model is NOT already mid-response. Firing
+        # response.create while a response is active collides with the bridge's
+        # own server-VAD auto-response and OpenAI rejects one
+        # (conversation_already_has_active_response). When busy, we still inject
+        # the note silently — it lands in context and the in-flight/next response
+        # picks it up — so the guidance is never lost, we just don't double-fire.
+        speak = decision.action == ACTION_INTERJECT and not (
+            is_response_active is not None and is_response_active()
+        )
         logger.info(
-            "[Inkbox supervisor] %s note #%d for call_id=%s",
+            "[Inkbox supervisor] %s note #%d (speak=%s) for call_id=%s",
             decision.action,
             rt.interjections,
+            speak,
             getattr(meta, "call_id", "?"),
         )
-        await inject_guidance(
-            openai_ws, decision.guidance, speak=(decision.action == ACTION_INTERJECT),
-        )
+        await inject_guidance(openai_ws, decision.guidance, speak=speak)
 
 
 async def _next_turn(

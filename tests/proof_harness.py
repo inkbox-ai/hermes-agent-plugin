@@ -121,6 +121,14 @@ def run_call(
          the ``response.create`` speak-now path.
 
     ``supervisor=None`` is the baseline (pull-only) architecture.
+
+    Idealization to be aware of: this harness is *turn-synchronous* — a steer
+    injected at step 2 is guaranteed to reach the agent before its reply at
+    step 3. The production loop (``realtime_supervisor.run_supervisor_loop``) is
+    *concurrent*, so a steer may land slightly after the model has already begun
+    a reply, in which case it applies to the following turn instead. The
+    deterministic proof therefore measures the *ceiling* of the mechanism; the
+    live suite measures the effect under real concurrency.
     """
     caller = _as_caller(scenario.caller)
     transcript: List[Turn] = []

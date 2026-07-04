@@ -147,6 +147,9 @@ def _make_supervisor(brief):
 
 
 def _judge(brief, rubric, transcript):
+    # The judge sees only caller/agent turns (supervisor notes are stripped) and
+    # is called per-arm with no "this is the supervised one" label, so it can't
+    # tell which arm it is grading.
     convo = format_transcript([t for t in transcript if t.party in ("caller", "agent")])
     prompt = (
         "You are grading a phone call for quality. The agent was briefed:\n"
@@ -155,18 +158,23 @@ def _judge(brief, rubric, transcript):
         'Score the AGENT from 0 to 10 and reply ONLY as JSON: {"score": <0-10>, '
         '"reason": "<one sentence>"}.'
     )
-    raw = _chat(
-        JUDGE_MODEL,
-        [{"role": "user", "content": prompt}],
-        temperature=0.0,
-        json_mode=True,
-        max_tokens=200,
-    )
-    try:
-        obj = json.loads(raw)
-        return float(obj.get("score", 0)), str(obj.get("reason", ""))
-    except (ValueError, TypeError):
-        return 0.0, "unparseable judge reply"
+    # Retry once; a parse failure must fail loudly rather than silently scoring
+    # 0.0, which could manufacture or destroy the measured delta.
+    last_raw = ""
+    for _ in range(2):
+        last_raw = _chat(
+            JUDGE_MODEL,
+            [{"role": "user", "content": prompt}],
+            temperature=0.0,
+            json_mode=True,
+            max_tokens=200,
+        )
+        try:
+            obj = json.loads(last_raw)
+            return float(obj["score"]), str(obj.get("reason", ""))
+        except (ValueError, TypeError, KeyError):
+            continue
+    pytest.fail(f"judge returned unparseable score twice: {last_raw!r}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,11 +277,23 @@ def test_supervisor_beats_baseline_by_llm_judge(capsys):
         print(f"BASELINE {r['base']:.1f} ({r['base_reason']}):\n{format_transcript(r['base_t'])}")
         print(f"ENHANCED {r['enh']:.1f} ({r['enh_reason']}):\n{format_transcript(r['enh_t'])}")
 
-    # The proof: with real models, the supervised calls score higher on average.
-    assert enh_mean > base_mean, (
-        f"supervisor did not improve judged quality: baseline={base_mean:.2f} "
-        f"enhanced={enh_mean:.2f}"
-    )
-    # And the supervisor actually did something on at least one scenario (guards
-    # against a vacuous pass where nothing was ever injected).
+    # The supervisor must actually have intervened somewhere (guards against a
+    # vacuous pass where nothing was ever injected).
     assert any(r["interjected"] for r in rows), "supervisor never intervened"
+    # The proof: with real models, the supervised calls score higher on average.
+    # A small margin (on the 0-10 scale) keeps a coin-flip 0.01 edge from
+    # counting as a win; single-shot judging has real variance, so a genuine
+    # architectural effect should clear this comfortably.
+    margin = float(os.environ.get("SUPERVISOR_QUALITY_MARGIN", "0.5"))
+    assert enh_mean >= base_mean + margin, (
+        f"supervisor did not improve judged quality by >= {margin}: "
+        f"baseline={base_mean:.2f} enhanced={enh_mean:.2f}"
+    )
+    # Per-arm non-regression on the scenarios where it intervened: the supervisor
+    # should not have made any individual supervised call worse than its baseline.
+    for r in rows:
+        if r["interjected"]:
+            assert r["enh"] >= r["base"] - 1.0, (
+                f"{r['name']}: supervised call scored materially worse "
+                f"(baseline={r['base']:.1f} enhanced={r['enh']:.1f})"
+            )

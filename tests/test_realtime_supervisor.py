@@ -457,6 +457,7 @@ def test_pump_publishes_transcript_turns_to_bus():
     ])
     state = _BridgeState()
     state.stream_id = "s-1"
+    state.supervisor_active = True  # a supervisor is consuming the bus
 
     async def _noop(*_a, **_k):
         return ""
@@ -532,3 +533,281 @@ def test_maybe_start_supervisor_enabled_spawns_and_cancels():
         assert task.cancelled() or task.done()
 
     asyncio.run(_run())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Guard coverage: rate-limit, debounce, timeout, reviewed_turns, response-active,
+# cancellation, and parse edge cases (added after adversarial review)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_parse_empty_guidance_normalizes_to_none():
+    # A verb with only whitespace guidance is not actionable.
+    for raw in ["STEER:   ", "INTERJECT:", '{"action":"steer","guidance":"   "}']:
+        d = parse_supervisor_decision(raw)
+        assert d.action == ACTION_NONE, raw
+        assert not d.is_actionable
+
+
+def test_parse_truncated_json_is_not_injected_as_steer():
+    # A max_tokens-truncated JSON object must NOT fall through to a freeform
+    # steer that injects half a JSON blob as spoken guidance.
+    truncated = '{"action":"steer","guidance":"tell them the refund is'
+    d = parse_supervisor_decision(truncated)
+    assert d.action == ACTION_NONE
+    assert not d.is_actionable
+
+
+def test_loop_rate_limits_reviews_with_min_interval():
+    # With a large min_review_interval and a clock that does not advance, a
+    # second turn must NOT trigger a second review.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    reviews = {"n": 0}
+    transcript = [("caller", "a")]
+
+    async def _on_supervise(*_a):
+        reviews["n"] += 1
+        return SupervisorDecision(action=ACTION_STEER, guidance="note")
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: list(transcript),
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=1000.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+            clock=lambda: 100.0,  # frozen clock → interval never elapses
+        ))
+        events.put_nowait(("caller", "a"))
+        await _wait_until(lambda: reviews["n"] >= 1, timeout=1.0)
+        transcript.append(("caller", "b"))
+        events.put_nowait(("caller", "b"))
+        await asyncio.sleep(0.1)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert reviews["n"] == 1, "min_review_interval did not throttle the second review"
+
+
+def test_loop_debounce_coalesces_burst_into_one_review():
+    # A burst of fragments within the debounce window collapses into ONE review
+    # that sees the whole transcript.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    reviews = {"n": 0}
+    seen_len = []
+    transcript = [("caller", "part one"), ("caller", "part two"), ("caller", "part three")]
+
+    async def _on_supervise(_m, t, _g):
+        reviews["n"] += 1
+        seen_len.append(len(t))
+        return SupervisorDecision(action=ACTION_NONE)
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: list(transcript),
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.08, min_review_interval_s=0.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+        ))
+        # Three fragments arrive close together (within the debounce window).
+        events.put_nowait(("caller", "part one"))
+        events.put_nowait(("caller", "part two"))
+        events.put_nowait(("caller", "part three"))
+        await _wait_until(lambda: reviews["n"] >= 1, timeout=1.0)
+        await asyncio.sleep(0.1)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert reviews["n"] == 1, "debounce did not coalesce the burst into one review"
+    assert seen_len == [3], "the single review should see the full coalesced transcript"
+
+
+def test_loop_review_timeout_skips_without_injecting():
+    # A hung supervisor model must be abandoned after review_timeout_s and must
+    # not inject anything; the loop keeps running.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    started = {"v": False}
+
+    async def _hang(*_a):
+        started["v"] = True
+        await asyncio.Event().wait()  # never returns
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: [("caller", "x")],
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0,
+                review_timeout_s=0.05, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_hang,
+        ))
+        events.put_nowait(("caller", "x"))
+        await _wait_until(lambda: started["v"], timeout=1.0)
+        await asyncio.sleep(0.15)  # let the timeout trip
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert ws.sent == [], "a timed-out review must not inject guidance"
+
+
+def test_loop_skips_review_when_transcript_has_not_grown():
+    # reviewed_turns guard: a second wake with no new turns must not re-review
+    # (and thus not re-inject duplicate guidance).
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    reviews = {"n": 0}
+    static = [("caller", "a"), ("agent", "b")]  # never grows
+
+    async def _on_supervise(*_a):
+        reviews["n"] += 1
+        return SupervisorDecision(action=ACTION_NONE)
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: list(static),
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+        ))
+        events.put_nowait(("caller", "a"))
+        await _wait_until(lambda: reviews["n"] >= 1, timeout=1.0)
+        # A second wake with the SAME transcript length must be skipped.
+        events.put_nowait(("agent", "b"))
+        await asyncio.sleep(0.1)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert reviews["n"] == 1, "reviewed_turns guard did not skip an unchanged transcript"
+
+
+def test_loop_interject_suppressed_to_silent_when_response_active():
+    # When a response is already being generated, a speak-now interject must NOT
+    # fire response.create (it would collide); the note is still injected.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    reviews = {"n": 0}
+
+    async def _on_supervise(*_a):
+        reviews["n"] += 1
+        return SupervisorDecision(action=ACTION_INTERJECT, guidance="correct it")
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: [("caller", "x"), ("agent", "wrong")],
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+            is_response_active=lambda: True,  # a response is mid-flight
+        ))
+        events.put_nowait(("agent", "wrong"))
+        await _wait_until(lambda: reviews["n"] >= 1, timeout=1.0)
+        await asyncio.sleep(0.05)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    # Item injected, but NO response.create while a response is active.
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create"]
+
+
+def test_loop_cancellation_mid_review_propagates():
+    # Cancelling the loop while a review is in-flight must cancel cleanly (the
+    # CancelledError is re-raised, not swallowed) and inject nothing.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    entered = {"v": False}
+
+    async def _block(*_a):
+        entered["v"] = True
+        await asyncio.Event().wait()
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: [("caller", "x")],
+            is_closed=lambda: False,
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+                review_timeout_s=100.0,
+            ),
+            meta=_meta(),
+            on_supervise=_block,
+        ))
+        events.put_nowait(("caller", "x"))
+        await _wait_until(lambda: entered["v"], timeout=1.0)
+        await realtime_mod._cancel_supervisor_task(task)
+        assert task.cancelled() or task.done()
+
+    asyncio.run(_run())
+    assert ws.sent == []
+
+
+def test_pump_toggles_response_active_flag():
+    state = _BridgeState()
+    assert state.response_active is False
+    openai_ws = _FakeOpenAIWS([
+        {"type": "response.created", "response": {"id": "r1"}},
+        {"type": "response.output_audio.delta", "delta": "AA"},
+        {"type": "response.done", "response": {"id": "r1"}},
+    ])
+
+    async def _noop(*_a, **_k):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=_FakeWS(),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+    # After response.done, the flag is cleared.
+    assert state.response_active is False
+
+
+def test_publish_transcript_turn_noop_without_supervisor():
+    # The pump must not fill the bus when no supervisor is consuming it.
+    state = _BridgeState()
+    assert state.supervisor_active is False
+    realtime_mod._publish_transcript_turn(state, "caller", "hello")
+    assert state.transcript_events.empty()
+    state.supervisor_active = True
+    realtime_mod._publish_transcript_turn(state, "caller", "hello")
+    assert not state.transcript_events.empty()
