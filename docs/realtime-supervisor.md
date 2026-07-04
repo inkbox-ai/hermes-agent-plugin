@@ -25,13 +25,50 @@ existing pull one.
 | Tier | Model | Path | Owns |
 |---|---|---|---|
 | **Fast — "mouth"** | `gpt-realtime` | hard real-time, sub-second | turn-taking, backchannel, greetings, slot-filling, reading answers back |
-| **Mid — "supervisor"** | cheap reasoning model (`gpt-4o-mini` class) | off-path, seconds OK | watches every caller turn; decides whether to nudge; **pushes** steering notes. **New.** |
+| **Mid — "supervisor"** | real Hermes agent via `hermes -z` (default), or a cheap `gpt-4o-mini`-class model | off-path, seconds OK | watches every caller turn; decides whether to nudge; **pushes** steering notes. **New.** |
 | **Smart — "brain"** | full Hermes agent + tools (`consult_agent`) | off-path, heavy | multi-step reasoning, tool execution, irreversible actions. Pull-style, unchanged — but the supervisor can now proactively steer the mouth *to* consult. |
 
-The supervisor is the new middle tier. It runs a single short model call per
-caller turn (debounced + rate-limited), not the full agent loop, so it is cheap
-and low-latency enough to run continuously. It never executes tools — actual
-work still flows through `consult_agent` and post-call actions.
+The supervisor is the new middle tier. It reviews once per settled turn
+(debounced + rate-limited), never the continuous audio path, so seconds of
+latency are fine. It never executes *mutating* work — actual actions still flow
+through `consult_agent` and post-call actions — but which brain does the
+reviewing is configurable (see **Supervisor backends** below).
+
+## Supervisor backends
+
+The review loop is backend-agnostic; `platforms.inkbox.realtime.supervisor.backend`
+(or `INKBOX_REALTIME_SUPERVISOR_BACKEND`) picks which brain runs a review.
+
+| Backend | What runs | Can verify facts? | Cost / latency |
+|---|---|---|---|
+| `hermes` **(default)** | the real main agent, one bounded `hermes -z` pass with its tools | **Yes** — it can look a fact up | higher; a subprocess per review |
+| `model` | a single `chat/completions` call to a cheap model | No — reasons over the transcript + handed context only | lowest; one small API call |
+
+Why `hermes` is the default: the point of a supervisor is to catch what the fast
+voice model gets wrong, and the highest-value case is a **wrong fact** — "your
+order ships Monday" when it ships Thursday. A context-only model has no way to
+know that; only a tool-capable brain can look it up. The `model` backend still
+catches guardrail and self-consistency problems (unverified caller, contradicting
+the notes on file) and is the cheap option when tool-grounded verification isn't
+needed. `test_supervisor_hermes_proof.py` pins the difference: on a tool-grounded
+trap the `model` backend gives zero lift over baseline while `hermes` corrects
+the call; on a pure guardrail both fix it (the `hermes` backend is a superset).
+
+Two safety notes on the `hermes` backend:
+
+- **Read-only by prompt, not by sandbox.** `hermes -z` has no tool-profile flag,
+  so the supervisor prompt instructs the agent to only *read/look up* to verify
+  and never send, write, schedule, or contact anyone while it is merely
+  observing the call. A real read-only tool profile is the right future
+  hardening.
+- **Fail-open and bounded.** The review is capped by `review_timeout_s`; on
+  timeout the subprocess is killed and reaped and the review is skipped, so a
+  slow or hung agent never disrupts the live call. Only an explicit JSON
+  decision is acted on — the agent's prose is never spoken to the caller.
+
+Set `INKBOX_REALTIME_SUPERVISOR_HERMES_MODEL` to run the `hermes` backend on a
+cheaper/faster model than the caller's default (passed through to the CLI via
+`HERMES_MODEL`; honored if the build reads it).
 
 ## How steering is injected
 

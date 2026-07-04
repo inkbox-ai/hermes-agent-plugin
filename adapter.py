@@ -145,7 +145,13 @@ try:
         RealtimeConsultResult,
         open_inkbox_realtime_bridge,
     )
-    from .realtime_supervisor import SupervisorConfig, SupervisorDecision, parse_supervisor_decision
+    from .realtime_supervisor import (
+        SuperviseCallback,
+        SupervisorConfig,
+        SupervisorDecision,
+        _extract_json_object,
+        parse_supervisor_decision,
+    )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from webhook_providers import match_provider
@@ -159,7 +165,13 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         RealtimeConsultResult,
         open_inkbox_realtime_bridge,
     )
-    from realtime_supervisor import SupervisorConfig, SupervisorDecision, parse_supervisor_decision
+    from realtime_supervisor import (
+        SuperviseCallback,
+        SupervisorConfig,
+        SupervisorDecision,
+        _extract_json_object,
+        parse_supervisor_decision,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +409,7 @@ def _resolve_supervisor_config(rt_extra: Dict[str, Any]) -> SupervisorConfig:
 
         supervisor:
           enabled: bool          # default false
+          backend: str           # "hermes" (default) | "model"
           debounce_s: float
           review_timeout_s: float
           min_review_interval_s: float
@@ -412,6 +425,16 @@ def _resolve_supervisor_config(rt_extra: Dict[str, Any]) -> SupervisorConfig:
     )
     defaults = SupervisorConfig()
 
+    # Backend selects which brain runs a review; anything unrecognized falls back
+    # to the default so a typo can never silently disable the supervisor.
+    backend = str(
+        sup_extra.get("backend")
+        or os.getenv("INKBOX_REALTIME_SUPERVISOR_BACKEND")
+        or defaults.backend
+    ).strip().lower()
+    if backend not in ("hermes", "model"):
+        backend = defaults.backend
+
     def _num(key: str, env: str, default: float) -> float:
         raw = sup_extra.get(key)
         if raw is None:
@@ -423,6 +446,7 @@ def _resolve_supervisor_config(rt_extra: Dict[str, Any]) -> SupervisorConfig:
 
     return SupervisorConfig(
         enabled=enabled,
+        backend=backend,
         debounce_s=_num("debounce_s", "INKBOX_REALTIME_SUPERVISOR_DEBOUNCE_S", defaults.debounce_s),
         review_timeout_s=_num(
             "review_timeout_s", "INKBOX_REALTIME_SUPERVISOR_REVIEW_TIMEOUT_S", defaults.review_timeout_s,
@@ -437,6 +461,60 @@ def _resolve_supervisor_config(rt_extra: Dict[str, Any]) -> SupervisorConfig:
             "min_caller_turns", "INKBOX_REALTIME_SUPERVISOR_MIN_CALLER_TURNS", defaults.min_caller_turns,
         )),
     )
+
+
+async def _run_hermes_oneshot(
+    prompt: str, *, timeout_s: float, model: Optional[str] = None,
+) -> str:
+    """Run one ``hermes -z`` invocation and return its stdout, or "" on failure.
+
+    Spawns the real main Hermes agent (full tooling) as a one-shot subprocess —
+    the same mechanism the ``agent_consult`` path uses — so the caller gets a
+    *tool-capable* brain rather than a context-only model. Unlike the consult
+    path this reaps the child on timeout (``wait_for`` alone cancels the await
+    but leaves the OS process running), and it is fail-open: every failure mode
+    returns "" so a supervisor review can degrade to a silent no-op.
+
+    Args:
+        prompt (str): Full prompt passed as the ``-z`` positional argument.
+        timeout_s (float): Hard wall-clock cap; the child is killed if exceeded.
+        model (Optional[str]): Optional model id passed through to the CLI via
+            the ``HERMES_MODEL`` env var so the supervisor can run a cheaper /
+            faster model than the caller's default. Honored only if the hermes
+            build reads it.
+
+    Returns:
+        str: The agent's stripped stdout, or "" on any failure.
+    """
+    hermes_bin = shutil.which("hermes") or "/home/ec2-user/.local/bin/hermes"
+    env = {**os.environ, "HERMES_NO_TUI": "1"}
+    if model:
+        env["HERMES_MODEL"] = model  # best-effort fast-model override
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_bin, "-z", prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        logger.debug("[Inkbox] hermes oneshot spawn failed: %s", exc)
+        return ""
+    try:
+        stdout_bytes, _stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        # Kill and reap so a hung agent can't leak a subprocess for the rest of
+        # the call. The call keeps flowing — a slow review just means no nudge.
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        logger.debug("[Inkbox] hermes oneshot timed out after %ss; killed", timeout_s)
+        return ""
+    return stdout_bytes.decode("utf-8", errors="replace").strip()
 
 
 def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
@@ -3979,7 +4057,7 @@ class InkboxAdapter(BasePlatformAdapter):
                         on_post_call_actions=self._realtime_post_call_actions,
                         on_call_ended=self._realtime_call_ended,
                         on_supervise=(
-                            self._realtime_supervise
+                            self._supervise_callback()
                             if self._realtime_config.supervisor.enabled
                             else None
                         ),
@@ -4384,6 +4462,24 @@ class InkboxAdapter(BasePlatformAdapter):
         "reason under 12 words so the JSON stays short and complete."
     )
 
+    # Hermes-backend supervisor prompt: same job as the cheap one, but this
+    # brain HAS tools — so it can look facts up instead of only reasoning over
+    # the transcript. The extra rules keep it read-only (it must never take a
+    # real action while it is only observing a live call) and quiet (return the
+    # JSON and nothing else, so `hermes -z` stdout parses cleanly).
+    _HERMES_SUPERVISOR_SYSTEM_PROMPT = (
+        _SUPERVISOR_SYSTEM_PROMPT
+        + "\n\nYou are the main Hermes agent, so you also have your tools. Use "
+        "them ONLY to READ / look things up to verify what the voice agent said "
+        "(order status, a contact detail, a prior message). This is the key "
+        "reason you are here: you can catch a WRONG FACT the voice agent has no "
+        "way to know is wrong. Do at most one or two quick lookups. You are only "
+        "OBSERVING a live call — never send, write, schedule, modify, or contact "
+        "anyone; those belong to the agent via consult, not to you. When done, "
+        "output ONLY the JSON decision object and nothing else — no preamble, no "
+        "explanation around it."
+    )
+
     async def _realtime_supervise(
         self,
         meta: RealtimeCallMeta,
@@ -4480,6 +4576,108 @@ class InkboxAdapter(BasePlatformAdapter):
         if decision.is_actionable:
             logger.info(
                 "[Inkbox] supervisor -> %s for call_id=%s", decision.action, meta.call_id,
+            )
+        return decision
+
+    def _supervise_callback(self) -> SuperviseCallback:
+        """Pick the supervisor backend callback from config.
+
+        ``hermes`` (default) runs the real main agent so it can verify facts
+        with tools; ``model`` runs the cheap chat-completions proxy. Both match
+        the :data:`SuperviseCallback` contract the loop expects.
+        """
+        if self._realtime_config.supervisor.backend == "hermes":
+            return self._realtime_hermes_supervise
+        return self._realtime_supervise
+
+    def _build_hermes_supervisor_prompt(
+        self,
+        meta: RealtimeCallMeta,
+        transcript: List[Tuple[str, str]],
+        prior_guidance: List[str],
+    ) -> str:
+        """Assemble the ``hermes -z`` prompt for one supervisor review.
+
+        Mirrors the context the cheap supervisor gets (direction, caller trust,
+        purpose, notes, already-sent guidance, recent transcript) so the two
+        backends judge the same call, then hands it to the tool-capable brain.
+
+        Args:
+            meta (RealtimeCallMeta): Live-call metadata for the current call.
+            transcript (List[Tuple[str, str]]): ``(party, text)`` turns so far.
+            prior_guidance (List[str]): Notes already injected this call.
+
+        Returns:
+            str: The full prompt string passed as the ``-z`` argument.
+        """
+        context_lines = [
+            f"Call direction: {meta.direction}.",
+            (
+                f"Caller is a known Inkbox contact: {meta.contact_name}."
+                if meta.contact_known
+                else "Caller is NOT a known contact — treat as unverified; the "
+                "agent must not disclose third-party data."
+            ),
+        ]
+        if meta.direction == "outbound" and meta.outbound_purpose:
+            context_lines.append(f"Reason we called: {meta.outbound_purpose}")
+        if meta.contact_notes:
+            context_lines.append(f"Notes on file about the caller: {meta.contact_notes}")
+        if prior_guidance:
+            context_lines.append(
+                "Guidance you already sent (do NOT repeat these): "
+                + " | ".join(prior_guidance[-5:])
+            )
+        transcript_block = "\n".join(
+            f"{'CALLER' if role == 'caller' else 'AGENT'}: {text}"
+            for role, text in transcript[-20:]
+        )
+        return (
+            self._HERMES_SUPERVISOR_SYSTEM_PROMPT
+            + "\n\n"
+            + "\n".join(context_lines)
+            + "\n\nTranscript so far:\n"
+            + transcript_block
+            + "\n\nDecide now. JSON only."
+        )
+
+    async def _realtime_hermes_supervise(
+        self,
+        meta: RealtimeCallMeta,
+        transcript: List[Tuple[str, str]],
+        prior_guidance: List[str],
+    ) -> SupervisorDecision:
+        """Tier-2 supervisor backed by the REAL Hermes agent (not a proxy).
+
+        Runs a single bounded ``hermes -z`` pass so the supervisor has the main
+        agent's tools and can verify a fact the fast voice model stated — the
+        thing a context-only model structurally cannot do. On any failure it
+        returns ``none`` so the call is never disrupted by a supervisor problem.
+
+        Args:
+            meta (RealtimeCallMeta): Live-call metadata for the current call.
+            transcript (List[Tuple[str, str]]): ``(party, text)`` turns so far.
+            prior_guidance (List[str]): Notes already injected this call.
+
+        Returns:
+            SupervisorDecision: The parsed decision, or ``none`` on any failure.
+        """
+        sup = self._realtime_config.supervisor
+        prompt = self._build_hermes_supervisor_prompt(meta, transcript, prior_guidance)
+        # Optional cheaper/faster model for the supervisor pass (passed through
+        # to the CLI). Distinct from the chat-backend's INKBOX_..._MODEL var.
+        model = (os.getenv("INKBOX_REALTIME_SUPERVISOR_HERMES_MODEL") or "").strip() or None
+        raw = await _run_hermes_oneshot(prompt, timeout_s=sup.review_timeout_s, model=model)
+        # Hermes is a chatty agent. Only act on an explicit JSON decision — if it
+        # emitted none, stay silent rather than let the freeform-text fallback in
+        # parse_supervisor_decision speak the agent's prose to the caller.
+        if not raw or _extract_json_object(raw) is None:
+            return SupervisorDecision(action="none")
+        decision = parse_supervisor_decision(raw)
+        if decision.is_actionable:
+            logger.info(
+                "[Inkbox] hermes supervisor -> %s for call_id=%s",
+                decision.action, meta.call_id,
             )
         return decision
 

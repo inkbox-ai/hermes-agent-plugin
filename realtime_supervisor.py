@@ -92,6 +92,13 @@ class SupervisorConfig:
     """
 
     enabled: bool = False
+    # Which brain runs a review. "hermes" (default) is the real main agent via
+    # ``hermes -z`` — it has tools, so it can VERIFY facts against live data and
+    # catch tool-grounded errors a context-only model cannot. "model" is a cheap
+    # chat-completions proxy: fast and cheap, but no tools/live data, so it only
+    # catches guardrail/consistency problems. The loop is backend-agnostic; the
+    # adapter maps this field to the matching callback.
+    backend: str = "hermes"
     # Wait this long for the caller's turn to settle before reviewing, so we
     # review once per *thought* rather than per transcription fragment.
     debounce_s: float = 1.2
