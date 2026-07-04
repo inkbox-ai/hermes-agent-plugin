@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_MODEL = "gpt-realtime-2"
 DEFAULT_VOICE = "cedar"
+
+# Realtime voice mode. ``local`` runs the voice bridge in this process, bringing
+# its own provider credential. ``hosted`` hands the voice leg to the platform:
+# the server runs the voice agent and this plugin only opens the observe +
+# intervene control channel (see adapter._run_realtime_control_channel).
+MODE_LOCAL = "local"
+MODE_HOSTED = "hosted"
 AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
 INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
@@ -437,10 +444,17 @@ class RealtimeConfig:
     fallback_to_inkbox_stt_tts: bool = True
     # ``api.openai.com`` by default; override for Azure / proxies.
     base_url: str = REALTIME_URL
+    # ``local`` (in-process voice bridge) or ``hosted`` (platform runs the voice
+    # agent; this plugin only opens the control channel). See MODE_* constants.
+    mode: str = MODE_LOCAL
 
     @property
     def has_credential(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def hosted(self) -> bool:
+        return self.mode == MODE_HOSTED
 
 
 @dataclass
