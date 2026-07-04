@@ -162,6 +162,19 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
+### Proactive supervisor (opt-in)
+
+By default the realtime voice model drives the whole call and only reaches the main agent when *it* decides to call `consult_agent` (pull-only). The **supervisor** adds the missing push channel: a background loop watches the transcript as the call proceeds and, on its own initiative, injects steering guidance into the live session — adding context, correcting a wrong statement, or redirecting the voice model — without waiting to be asked. See [`docs/realtime-supervisor.md`](docs/realtime-supervisor.md) for the full architecture and the quality proof.
+
+It runs a cheap reasoning model (the "mid" tier between the fast voice model and the heavy main agent) once per caller turn, debounced and rate-limited, and defaults to doing nothing. Enable it under `platforms.inkbox.realtime.supervisor` or with env:
+
+```bash
+export INKBOX_REALTIME_SUPERVISOR=true               # off by default
+export INKBOX_REALTIME_SUPERVISOR_MODEL="gpt-4o-mini" # the supervisor/"mid" model
+```
+
+Guidance is delivered two ways: a **silent steer** (an out-of-band `system` note the voice model folds into its next turn) or a **speak-now interject** (the same note plus an immediate response, e.g. to correct a fact it just stated). The heavy main agent is still reached via `consult_agent` for actual tool work — the supervisor only steers, and can proactively tell the voice model *to* consult.
+
 ### Two calling lines
 
 Calls — inbound and outbound — can run over either of two lines, and the agent picks the one that matches the channel it's talking on:
@@ -246,6 +259,10 @@ After the gateway starts:
 | `INKBOX_REALTIME_CONNECT_TIMEOUT_S` | no | `8` | Seconds to wait for OpenAI Realtime preflight before falling back or failing. |
 | `INKBOX_REALTIME_CONSULT_TIMEOUT_S` | no | plugin default | Seconds the Realtime voice agent waits for a Hermes consult before continuing. |
 | `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
+| `INKBOX_REALTIME_SUPERVISOR` | no | `false` | Enable the proactive supervisor loop that watches the transcript and injects mid-call steering. |
+| `INKBOX_REALTIME_SUPERVISOR_MODEL` | no | `gpt-4o-mini` | Reasoning model the supervisor uses to review the call and decide whether to nudge. |
+| `INKBOX_REALTIME_SUPERVISOR_MAX_INTERJECTIONS` | no | `8` | Hard cap on supervisor notes injected per call. |
+| `INKBOX_REALTIME_SUPERVISOR_MIN_INTERVAL_S` | no | `6` | Minimum seconds between supervisor reviews. |
 
 ## Channel Overrides
 

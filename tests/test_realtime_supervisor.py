@@ -1,0 +1,534 @@
+"""Unit tests for the proactive realtime supervisor.
+
+Covers the pure decision-parsing / injection-frame builders and the async
+supervisor loop (debounce, rate-limit, budget, dedup, silent-vs-speak
+injection, teardown), plus the realtime-bridge wiring that publishes transcript
+turns onto the supervisor bus. No network, fully deterministic.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import types
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+pkg = types.ModuleType("inkbox_plugin")
+pkg.__path__ = [str(ROOT)]
+sys.modules.setdefault("inkbox_plugin", pkg)
+
+from inkbox_plugin import realtime as realtime_mod
+from inkbox_plugin.realtime import RealtimeCallMeta, RealtimeConfig, _BridgeState, _openai_to_inkbox_pump
+from inkbox_plugin.realtime_supervisor import (
+    ACTION_INTERJECT,
+    ACTION_NONE,
+    ACTION_STEER,
+    SUPERVISOR_ITEM_ROLE,
+    SUPERVISOR_NOTE_PREFIX,
+    SupervisorConfig,
+    SupervisorDecision,
+    build_supervisor_item,
+    inject_guidance,
+    parse_supervisor_decision,
+    run_supervisor_loop,
+)
+
+
+if realtime_mod.aiohttp is None:  # mirror the parity suite's aiohttp shim
+    realtime_mod.aiohttp = types.SimpleNamespace(
+        WSMsgType=types.SimpleNamespace(
+            TEXT=object(), CLOSE=object(), CLOSED=object(), ERROR=object(),
+        ),
+    )
+
+
+def _meta(**overrides):
+    base = {
+        "call_id": "call-sup",
+        "contact_id": "c-1",
+        "contact_name": "Alex Wilcox",
+        "remote_phone_number": "+15555550101",
+        "direction": "inbound",
+        "contact_known": True,
+    }
+    base.update(overrides)
+    return RealtimeCallMeta(**base)
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send_str(self, payload):
+        self.sent.append(json.loads(payload))
+
+
+class _FakeMsg:
+    def __init__(self, data):
+        self.type = realtime_mod.aiohttp.WSMsgType.TEXT
+        self.data = json.dumps(data)
+
+
+class _FakeOpenAIWS(_FakeWS):
+    def __init__(self, frames):
+        super().__init__()
+        self._frames = [_FakeMsg(frame) for frame in frames]
+
+    def __aiter__(self):
+        self._it = iter(self._frames)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Decision parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_parse_none_shapes():
+    for raw in ["", "  ", "NONE", "none", "[SILENT]", "n/a", None]:
+        d = parse_supervisor_decision(raw)
+        assert d.action == ACTION_NONE
+        assert not d.is_actionable
+
+
+def test_parse_verb_prefixes():
+    steer = parse_supervisor_decision("STEER: mention the refund window is 30 days")
+    assert steer.action == ACTION_STEER
+    assert steer.guidance == "mention the refund window is 30 days"
+    assert steer.is_actionable
+
+    interject = parse_supervisor_decision("INTERJECT: correct the price, it's $49 not $39")
+    assert interject.action == ACTION_INTERJECT
+    assert interject.is_actionable
+
+    # "speak" is normalized to interject.
+    assert parse_supervisor_decision("speak: fix that").action == ACTION_INTERJECT
+
+
+def test_parse_json_object_and_fenced_json():
+    d = parse_supervisor_decision('{"action":"interject","guidance":"say hi","reason":"greeting"}')
+    assert d.action == ACTION_INTERJECT
+    assert d.guidance == "say hi"
+    assert d.reason == "greeting"
+
+    fenced = parse_supervisor_decision('```json\n{"action":"steer","guidance":"nudge"}\n```')
+    assert fenced.action == ACTION_STEER
+    assert fenced.guidance == "nudge"
+
+
+def test_parse_json_none_action_wins_over_guidance():
+    # Guidance present but action none → not actionable.
+    d = parse_supervisor_decision('{"action":"none","guidance":"ignored"}')
+    assert d.action == ACTION_NONE
+    assert not d.is_actionable
+
+
+def test_parse_freeform_text_becomes_silent_steer():
+    d = parse_supervisor_decision("the caller sounds confused about billing")
+    assert d.action == ACTION_STEER
+    assert d.guidance == "the caller sounds confused about billing"
+
+
+def test_parse_passthrough_decision_object():
+    orig = SupervisorDecision(action="interject", guidance="go")
+    assert parse_supervisor_decision(orig).action == ACTION_INTERJECT
+
+
+def test_parse_invalid_action_falls_back_to_none():
+    assert parse_supervisor_decision('{"action":"shout","guidance":"x"}').action == ACTION_NONE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Injection frame builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_supervisor_item_shape():
+    item = build_supervisor_item("correct the price")
+    assert item["type"] == "conversation.item.create"
+    assert item["item"]["type"] == "message"
+    assert item["item"]["role"] == SUPERVISOR_ITEM_ROLE
+    part = item["item"]["content"][0]
+    assert part["type"] == "input_text"
+    assert part["text"].startswith(SUPERVISOR_NOTE_PREFIX)
+    assert "correct the price" in part["text"]
+
+
+def test_build_supervisor_item_does_not_double_prefix():
+    item = build_supervisor_item(f"{SUPERVISOR_NOTE_PREFIX} already tagged")
+    assert item["item"]["content"][0]["text"].count(SUPERVISOR_NOTE_PREFIX) == 1
+
+
+def test_inject_steer_sends_item_only():
+    ws = _FakeWS()
+    asyncio.run(inject_guidance(ws, "add context", speak=False))
+    assert len(ws.sent) == 1
+    assert ws.sent[0]["type"] == "conversation.item.create"
+
+
+def test_inject_interject_sends_item_then_response_create():
+    ws = _FakeWS()
+    asyncio.run(inject_guidance(ws, "correct that now", speak=True))
+    assert [f["type"] for f in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supervisor loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _wait_until(pred, timeout=2.0, step=0.01):
+    for _ in range(int(timeout / step)):
+        if pred():
+            return True
+        await asyncio.sleep(step)
+    return pred()
+
+
+async def _run_loop_until(openai_ws, transcript, decisions, *, config=None, expect_sends, meta=None, grow=True):
+    """Drive run_supervisor_loop, feeding one caller turn per queued decision.
+
+    ``decisions`` is a list the on_supervise stub returns in order (then NONE).
+    Events are fed one at a time, each only after the prior review has been
+    consumed — real caller turns arrive spread out in time, and the loop's
+    debounce drains anything already queued, so feeding all at once would
+    collapse them into a single review. Returns the prior-guidance snapshot the
+    stub observed on each call, for dedup assertions.
+    """
+    config = config or SupervisorConfig(
+        enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+    )
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    seen_prior = []
+    calls = {"n": 0}
+
+    async def _on_supervise(_meta, _transcript, prior_guidance):
+        seen_prior.append(list(prior_guidance))
+        i = calls["n"]
+        calls["n"] += 1
+        return decisions[i] if i < len(decisions) else SupervisorDecision(action=ACTION_NONE)
+
+    task = asyncio.create_task(run_supervisor_loop(
+        openai_ws=openai_ws,
+        transcript_events=events,
+        transcript_snapshot=lambda: list(transcript),
+        is_closed=lambda: closed["v"],
+        config=config,
+        meta=meta or _meta(),
+        on_supervise=_on_supervise,
+    ))
+
+    for i in range(len(decisions)):
+        target = calls["n"] + 1
+        # Real calls grow the transcript each turn; the loop deliberately skips a
+        # review when the transcript hasn't grown since the last one, so a static
+        # transcript would collapse every feed into one review. Grow it here to
+        # mirror reality (guard-specific tests pass grow=False).
+        if grow:
+            transcript.append(("caller", f"caller-turn-{i}"))
+        events.put_nowait(("caller", "hello"))
+        # Wait for this review to be consumed. If a guard (min_caller_turns,
+        # max_interjections) legitimately blocks the review, this just times out
+        # and we move on — the assertions cover those cases.
+        await _wait_until(lambda: calls["n"] >= target, timeout=0.4)
+
+    if expect_sends:
+        await _wait_until(lambda: len(openai_ws.sent) >= expect_sends, timeout=1.0)
+    else:
+        # Give the loop a beat to consult (and decline) before we tear it down.
+        await asyncio.sleep(0.15)
+    closed["v"] = True
+    await asyncio.wait_for(task, timeout=2.0)
+    return seen_prior
+
+
+def test_loop_injects_silent_steer_on_caller_turn():
+    ws = _FakeWS()
+    asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "what's my balance?")],
+        decisions=[SupervisorDecision(action=ACTION_STEER, guidance="offer to check the balance")],
+        expect_sends=1,
+    ))
+    types_sent = [f["type"] for f in ws.sent]
+    assert types_sent == ["conversation.item.create"]
+    assert "offer to check the balance" in ws.sent[0]["item"]["content"][0]["text"]
+
+
+def test_loop_speaks_on_interject():
+    ws = _FakeWS()
+    asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "so it's free, right?"), ("agent", "yes, totally free")],
+        decisions=[SupervisorDecision(action=ACTION_INTERJECT, guidance="correct: there's a $5 fee")],
+        expect_sends=2,
+    ))
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create", "response.create"]
+
+
+def test_loop_does_nothing_on_none():
+    ws = _FakeWS()
+    seen = asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "hi")],
+        decisions=[SupervisorDecision(action=ACTION_NONE)],
+        expect_sends=0,  # never satisfied; loop polls then we close it
+    ))
+    assert ws.sent == []
+    assert seen  # the supervisor was consulted, it just declined
+
+
+def test_loop_respects_max_interjections():
+    ws = _FakeWS()
+    config = SupervisorConfig(
+        enabled=True, debounce_s=0.0, min_review_interval_s=0.0,
+        poll_interval_s=0.01, max_interjections=1,
+    )
+    asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "a"), ("caller", "b"), ("caller", "c")],
+        decisions=[
+            SupervisorDecision(action=ACTION_STEER, guidance="first"),
+            SupervisorDecision(action=ACTION_STEER, guidance="second"),
+        ],
+        config=config,
+        expect_sends=1,
+    ))
+    item_frames = [f for f in ws.sent if f["type"] == "conversation.item.create"]
+    assert len(item_frames) == 1
+    assert "first" in item_frames[0]["item"]["content"][0]["text"]
+
+
+def test_loop_passes_prior_guidance_for_dedup():
+    ws = _FakeWS()
+    seen_prior = asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "a"), ("caller", "b")],
+        decisions=[
+            SupervisorDecision(action=ACTION_STEER, guidance="mention the deadline"),
+            SupervisorDecision(action=ACTION_STEER, guidance="mention the fee"),
+        ],
+        expect_sends=2,
+    ))
+    # First review sees no prior guidance; the second sees the first note so it
+    # can avoid repeating itself.
+    assert seen_prior[0] == []
+    assert seen_prior[1] == ["mention the deadline"]
+
+
+def test_loop_reviews_after_agent_turns_to_catch_errors():
+    # An agent turn (not just a caller turn) must wake a review — that's how the
+    # supervisor catches a wrong statement the moment the mouth makes it and
+    # interjects a correction, rather than waiting for the next caller turn.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+    consulted = {"n": 0}
+
+    async def _on_supervise(*_a):
+        consulted["n"] += 1
+        return SupervisorDecision(action=ACTION_INTERJECT, guidance="correct that")
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            # A caller turn already happened (min_caller_turns satisfied); the
+            # agent just answered.
+            transcript_snapshot=lambda: [("caller", "is it free?"), ("agent", "yes, totally free")],
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+        ))
+        events.put_nowait(("agent", "yes, totally free"))
+        await _wait_until(lambda: consulted["n"] >= 1, timeout=1.0)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    assert consulted["n"] >= 1
+    # An interject speaks now: item + response.create.
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create", "response.create"]
+
+
+def test_loop_respects_min_caller_turns():
+    ws = _FakeWS()
+    config = SupervisorConfig(
+        enabled=True, debounce_s=0.0, min_review_interval_s=0.0,
+        poll_interval_s=0.01, min_caller_turns=2,
+    )
+    # Only one caller turn in the transcript, but min_caller_turns=2 → no review.
+    asyncio.run(_run_loop_until(
+        ws,
+        transcript=[("caller", "just one turn")],
+        decisions=[SupervisorDecision(action=ACTION_STEER, guidance="nope")],
+        config=config,
+        expect_sends=0,
+        grow=False,
+    ))
+    assert ws.sent == []
+
+
+def test_loop_exits_when_closed_without_events():
+    # With no transcript events, the loop must still exit promptly once closed.
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+
+    async def _on_supervise(*_a):
+        return SupervisorDecision(action=ACTION_NONE)
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: [],
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(enabled=True, poll_interval_s=0.01),
+            meta=_meta(),
+            on_supervise=_on_supervise,
+        ))
+        await asyncio.sleep(0.05)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+        assert task.done()
+
+    asyncio.run(_run())
+
+
+def test_loop_survives_supervise_exception():
+    ws = _FakeWS()
+    events: "asyncio.Queue" = asyncio.Queue()
+    closed = {"v": False}
+
+    async def _boom(*_a):
+        raise RuntimeError("supervisor model down")
+
+    async def _run():
+        task = asyncio.create_task(run_supervisor_loop(
+            openai_ws=ws,
+            transcript_events=events,
+            transcript_snapshot=lambda: [("caller", "x")],
+            is_closed=lambda: closed["v"],
+            config=SupervisorConfig(
+                enabled=True, debounce_s=0.0, min_review_interval_s=0.0, poll_interval_s=0.01,
+            ),
+            meta=_meta(),
+            on_supervise=_boom,
+        ))
+        events.put_nowait(("caller", "x"))
+        await asyncio.sleep(0.1)
+        closed["v"] = True
+        await asyncio.wait_for(task, timeout=2.0)
+
+    asyncio.run(_run())
+    # A failing supervisor never disrupts the call: no frames, clean exit.
+    assert ws.sent == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bridge wiring: transcript turns are published onto the supervisor bus
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_pump_publishes_transcript_turns_to_bus():
+    inkbox_ws = _FakeWS()
+    openai_ws = _FakeOpenAIWS([
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "can you check the invoice"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "sure, one moment"},
+    ])
+    state = _BridgeState()
+    state.stream_id = "s-1"
+
+    async def _noop(*_a, **_k):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=inkbox_ws,
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+
+    drained = []
+    while not state.transcript_events.empty():
+        drained.append(state.transcript_events.get_nowait())
+    assert drained == [
+        ("caller", "can you check the invoice"),
+        ("agent", "sure, one moment"),
+    ]
+
+
+def test_maybe_start_supervisor_disabled_returns_none():
+    async def _run():
+        cfg = RealtimeConfig(enabled=True, api_key="sk-test")  # supervisor default: disabled
+        task = realtime_mod._maybe_start_supervisor(
+            openai_ws=_FakeWS(),
+            state=_BridgeState(),
+            config=cfg,
+            meta=_meta(),
+            on_supervise=lambda *_a: None,
+        )
+        assert task is None
+
+    asyncio.run(_run())
+
+
+def test_maybe_start_supervisor_none_callback_returns_none():
+    async def _run():
+        cfg = RealtimeConfig(enabled=True, api_key="sk-test", supervisor=SupervisorConfig(enabled=True))
+        task = realtime_mod._maybe_start_supervisor(
+            openai_ws=_FakeWS(),
+            state=_BridgeState(),
+            config=cfg,
+            meta=_meta(),
+            on_supervise=None,
+        )
+        assert task is None
+
+    asyncio.run(_run())
+
+
+def test_maybe_start_supervisor_enabled_spawns_and_cancels():
+    async def _run():
+        cfg = RealtimeConfig(
+            enabled=True, api_key="sk-test",
+            supervisor=SupervisorConfig(enabled=True, poll_interval_s=0.01),
+        )
+        state = _BridgeState()
+
+        async def _on_supervise(*_a):
+            return SupervisorDecision(action=ACTION_NONE)
+
+        task = realtime_mod._maybe_start_supervisor(
+            openai_ws=_FakeWS(),
+            state=state,
+            config=cfg,
+            meta=_meta(),
+            on_supervise=_on_supervise,
+        )
+        assert task is not None
+        await realtime_mod._cancel_supervisor_task(task)
+        assert task.cancelled() or task.done()
+
+    asyncio.run(_run())

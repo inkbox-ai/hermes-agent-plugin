@@ -1,0 +1,45 @@
+name: Live — supervisor quality
+
+# Runs the LLM-judged proof that the proactive realtime supervisor produces
+# higher-quality calls than the pull-only baseline. Uses real models (a fast
+# voice model, a supervisor model, and a stronger judge), so it is manual /
+# on-demand only — the deterministic proof in the unit suite
+# (tests/test_supervisor_proof.py) is what gates every PR.
+on:
+  workflow_dispatch:
+    inputs:
+      voice_model:
+        description: "Fast voice model (the 'mouth')"
+        default: "gpt-4o-mini"
+      brain_model:
+        description: "Supervisor model (the 'mid' brain)"
+        default: "gpt-4o-mini"
+      judge_model:
+        description: "Blind judge model"
+        default: "gpt-4o"
+
+permissions:
+  contents: read
+
+jobs:
+  supervisor-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install deps
+        run: uv sync --extra test --python 3.12
+
+      - name: Run LLM-judged supervisor proof
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LIVE_REAL_MODEL: "1"
+          SUPERVISOR_VOICE_MODEL: ${{ github.event.inputs.voice_model || 'gpt-4o-mini' }}
+          SUPERVISOR_BRAIN_MODEL: ${{ github.event.inputs.brain_model || 'gpt-4o-mini' }}
+          SUPERVISOR_JUDGE_MODEL: ${{ github.event.inputs.judge_model || 'gpt-4o' }}
+        run: uv run pytest tests/live/test_supervisor_quality.py -v -s

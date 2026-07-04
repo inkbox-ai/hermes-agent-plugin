@@ -7,3 +7,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# local test venv
+.venv-test/

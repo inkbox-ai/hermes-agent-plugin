@@ -54,6 +54,15 @@ try:
 except ImportError:  # pragma: no cover — aiohttp is a core dep on this fork
     aiohttp = None  # type: ignore
 
+try:  # sibling module; import shape mirrors how realtime itself is imported
+    from . import realtime_supervisor as _supervisor
+except ImportError:  # pragma: no cover — direct (non-package) import in tests/CLI
+    import realtime_supervisor as _supervisor
+
+SupervisorConfig = _supervisor.SupervisorConfig
+SupervisorDecision = _supervisor.SupervisorDecision
+SuperviseCallback = _supervisor.SuperviseCallback
+
 logger = logging.getLogger(__name__)
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
@@ -437,6 +446,10 @@ class RealtimeConfig:
     fallback_to_inkbox_stt_tts: bool = True
     # ``api.openai.com`` by default; override for Azure / proxies.
     base_url: str = REALTIME_URL
+    # Proactive supervisor: a background loop that watches the transcript and
+    # injects steering guidance into the live session. Disabled by default so
+    # the base pull-only behavior is unchanged unless opted in.
+    supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
     @property
     def has_credential(self) -> bool:
@@ -479,6 +492,12 @@ class _BridgeState:
     # the OpenAI→Inkbox audio pump flowing; we track the tasks here so they can
     # be cancelled when the call tears down.
     consult_tasks: Set["asyncio.Task[None]"] = field(default_factory=set)
+    # Finalized transcript turns are published here as ``(party, text)`` so the
+    # proactive supervisor loop can watch the call in real time. Unbounded; the
+    # supervisor drains it. Unused when the supervisor is disabled.
+    transcript_events: "asyncio.Queue[Tuple[str, str]]" = field(
+        default_factory=asyncio.Queue,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -693,10 +712,19 @@ class OpenedRealtimeBridge:
         on_agent_consult: AgentConsultCallback,
         on_post_call_actions: PostCallActionsCallback,
         on_call_ended: CallEndedCallback,
+        on_supervise: Optional[SuperviseCallback] = None,
     ) -> None:
-        """Bridge one already-opened OpenAI Realtime connection to Inkbox."""
+        """Bridge one already-opened OpenAI Realtime connection to Inkbox.
+
+        When ``on_supervise`` is supplied and the config's supervisor is enabled,
+        a background supervisor loop runs alongside the two audio pumps: it
+        watches the transcript and proactively injects steering guidance into the
+        OpenAI session. It is not part of the pump race — it simply lives for the
+        duration of the call and is cancelled on teardown.
+        """
         state = self.state
         openai_ws = self.openai_ws
+        supervisor_task: Optional["asyncio.Task[None]"] = None
         try:
             inkbox_task = asyncio.create_task(
                 _inkbox_to_openai_pump(inkbox_ws, openai_ws, state, self.meta),
@@ -712,6 +740,13 @@ class OpenedRealtimeBridge:
                     on_agent_consult=on_agent_consult,
                 ),
                 name=f"realtime-openai-pump-{self.meta.call_id}",
+            )
+            supervisor_task = _maybe_start_supervisor(
+                openai_ws=openai_ws,
+                state=state,
+                config=self.config,
+                meta=self.meta,
+                on_supervise=on_supervise,
             )
 
             done, pending = await asyncio.wait(
@@ -733,6 +768,7 @@ class OpenedRealtimeBridge:
                     )
         finally:
             state.closed = True
+            await _cancel_supervisor_task(supervisor_task)
             # The call is over, so any consult still mid-flight can no longer be
             # spoken to the caller — cancel the background tasks and let them
             # settle before we close the sockets.
@@ -808,6 +844,7 @@ async def run_inkbox_realtime_bridge(
     on_agent_consult: AgentConsultCallback,
     on_post_call_actions: PostCallActionsCallback,
     on_call_ended: CallEndedCallback,
+    on_supervise: Optional[SuperviseCallback] = None,
 ) -> None:
     """Run the bridge for the duration of one call.
 
@@ -828,7 +865,45 @@ async def run_inkbox_realtime_bridge(
         on_agent_consult=on_agent_consult,
         on_post_call_actions=on_post_call_actions,
         on_call_ended=on_call_ended,
+        on_supervise=on_supervise,
     )
+
+
+def _maybe_start_supervisor(
+    *,
+    openai_ws: Any,
+    state: _BridgeState,
+    config: RealtimeConfig,
+    meta: RealtimeCallMeta,
+    on_supervise: Optional[SuperviseCallback],
+) -> Optional["asyncio.Task[None]"]:
+    """Start the proactive supervisor loop if enabled and a callback is present."""
+    sup_config = getattr(config, "supervisor", None)
+    if on_supervise is None or sup_config is None or not sup_config.enabled:
+        return None
+    task = asyncio.create_task(
+        _supervisor.run_supervisor_loop(
+            openai_ws=openai_ws,
+            transcript_events=state.transcript_events,
+            transcript_snapshot=lambda: list(state.transcript),
+            is_closed=lambda: state.closed,
+            config=sup_config,
+            meta=meta,
+            on_supervise=on_supervise,
+        ),
+        name=f"realtime-supervisor-{meta.call_id}",
+    )
+    logger.info("[Inkbox realtime] supervisor loop started for call_id=%s", meta.call_id)
+    return task
+
+
+async def _cancel_supervisor_task(task: Optional["asyncio.Task[None]"]) -> None:
+    """Cancel the supervisor loop and await its teardown, if it was started."""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 async def _cancel_consult_tasks(state: _BridgeState) -> None:
@@ -977,6 +1052,18 @@ async def _send_session_update(
         },
     }
     await openai_ws.send_str(json.dumps(payload))
+
+
+def _publish_transcript_turn(state: _BridgeState, party: str, text: str) -> None:
+    """Publish a finalized transcript turn to the supervisor bus (best-effort).
+
+    The queue is unbounded, so ``put_nowait`` never blocks or raises in practice;
+    a failure here must never disrupt the audio pump, so it is swallowed.
+    """
+    try:
+        state.transcript_events.put_nowait((party, text))
+    except Exception:  # pragma: no cover — unbounded queue; defensive only
+        pass
 
 
 async def _inkbox_to_openai_pump(
@@ -1143,12 +1230,14 @@ async def _openai_to_inkbox_pump(
             text = (frame.get("transcript") or "").strip()
             if text:
                 state.transcript.append(("agent", text))
+                _publish_transcript_turn(state, "agent", text)
                 await _relay_transcript("local", text)
 
         elif ftype == "conversation.item.input_audio_transcription.completed":
             text = (frame.get("transcript") or "").strip()
             if text:
                 state.transcript.append(("caller", text))
+                _publish_transcript_turn(state, "caller", text)
                 await _relay_transcript("remote", text)
 
         # Function-call item announced — capture name/call_id by item_id.

@@ -145,6 +145,7 @@ try:
         RealtimeConsultResult,
         open_inkbox_realtime_bridge,
     )
+    from .realtime_supervisor import SupervisorConfig, SupervisorDecision, parse_supervisor_decision
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from webhook_providers import match_provider
@@ -158,6 +159,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         RealtimeConsultResult,
         open_inkbox_realtime_bridge,
     )
+    from realtime_supervisor import SupervisorConfig, SupervisorDecision, parse_supervisor_decision
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +389,56 @@ def _realtime_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _resolve_supervisor_config(rt_extra: Dict[str, Any]) -> SupervisorConfig:
+    """Resolve the proactive-supervisor config from ``realtime.supervisor``.
+
+    Config shape under ``platforms.inkbox.realtime.supervisor`` in config.yaml,
+    with an ``INKBOX_REALTIME_SUPERVISOR`` env override for the on/off switch:
+
+        supervisor:
+          enabled: bool          # default false
+          debounce_s: float
+          review_timeout_s: float
+          min_review_interval_s: float
+          max_interjections: int
+          min_caller_turns: int
+    """
+    sup_extra = rt_extra.get("supervisor") if isinstance(rt_extra.get("supervisor"), dict) else {}
+    enabled = _realtime_bool(
+        sup_extra.get("enabled")
+        if "enabled" in sup_extra
+        else os.getenv("INKBOX_REALTIME_SUPERVISOR"),
+        False,
+    )
+    defaults = SupervisorConfig()
+
+    def _num(key: str, env: str, default: float) -> float:
+        raw = sup_extra.get(key)
+        if raw is None:
+            raw = os.getenv(env)
+        try:
+            return float(raw) if raw not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+
+    return SupervisorConfig(
+        enabled=enabled,
+        debounce_s=_num("debounce_s", "INKBOX_REALTIME_SUPERVISOR_DEBOUNCE_S", defaults.debounce_s),
+        review_timeout_s=_num(
+            "review_timeout_s", "INKBOX_REALTIME_SUPERVISOR_REVIEW_TIMEOUT_S", defaults.review_timeout_s,
+        ),
+        min_review_interval_s=_num(
+            "min_review_interval_s", "INKBOX_REALTIME_SUPERVISOR_MIN_INTERVAL_S", defaults.min_review_interval_s,
+        ),
+        max_interjections=int(_num(
+            "max_interjections", "INKBOX_REALTIME_SUPERVISOR_MAX_INTERJECTIONS", defaults.max_interjections,
+        )),
+        min_caller_turns=int(_num(
+            "min_caller_turns", "INKBOX_REALTIME_SUPERVISOR_MIN_CALLER_TURNS", defaults.min_caller_turns,
+        )),
+    )
+
+
 def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     rt_extra = extra.get("realtime") if isinstance(extra.get("realtime"), dict) else {}
     rt_api_key = (
@@ -428,6 +480,7 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
             else os.getenv("INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS"),
             True,
         ),
+        supervisor=_resolve_supervisor_config(rt_extra),
     )
     if rt_enabled_text in ("true", "1", "yes", "on") and not rt_has_cred:
         logger.warning(
@@ -3925,6 +3978,11 @@ class InkboxAdapter(BasePlatformAdapter):
                         on_agent_consult=self._realtime_agent_consult,
                         on_post_call_actions=self._realtime_post_call_actions,
                         on_call_ended=self._realtime_call_ended,
+                        on_supervise=(
+                            self._realtime_supervise
+                            if self._realtime_config.supervisor.enabled
+                            else None
+                        ),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -4300,6 +4358,127 @@ class InkboxAdapter(BasePlatformAdapter):
                 "briefly and ask if you can help another way."
             )
         return text
+
+    # Supervisor prompt: the Tier-2 "mid" brain. Cheaper + smarter-at-reasoning
+    # than the realtime voice model, it watches the transcript and decides
+    # whether the voice model needs a proactive nudge. It does NOT execute tools
+    # (that stays with the full agent via consult_agent) — it only steers.
+    _SUPERVISOR_SYSTEM_PROMPT = (
+        "You are a silent SUPERVISOR monitoring a live phone call handled by a "
+        "fast voice AI (the 'agent'). You see the running transcript but the "
+        "caller cannot hear you. The voice AI is fluent but can state facts "
+        "wrongly, miss context it was given, over-promise, or fail to realize a "
+        "request needs the main Hermes agent's tools. Decide if the agent needs "
+        "a nudge RIGHT NOW.\n"
+        'Reply with ONLY a JSON object: {"action": "none"|"steer"|"interject", '
+        '"guidance": "<one short instruction to the agent>", "reason": "<why>"}.\n'
+        "- none: the agent is handling it well — do not interrupt. This is the "
+        "default; prefer it unless there is a concrete problem.\n"
+        "- steer: inject a short note the agent folds into its NEXT reply — add "
+        "missing context, gently redirect, or tell it to consult the main agent "
+        "for a request that needs live data or a tool.\n"
+        "- interject: the agent just said something wrong or misleading and must "
+        "correct it immediately.\n"
+        "guidance must be one imperative sentence addressed to the agent, "
+        "spoken-friendly, and must never invent facts you were not given."
+    )
+
+    async def _realtime_supervise(
+        self,
+        meta: RealtimeCallMeta,
+        transcript: List[Tuple[str, str]],
+        prior_guidance: List[str],
+    ) -> SupervisorDecision:
+        """Tier-2 supervisor: ask a cheap reasoning model whether to nudge.
+
+        Runs a single, short chat-completions call (not the full agent loop) so
+        it is cheap and low-latency enough to run once per caller turn. Returns a
+        :class:`SupervisorDecision`; on any error it returns ``none`` so the call
+        is never disrupted by a supervisor failure.
+        """
+        api_key = self._realtime_config.api_key
+        if not api_key:
+            return SupervisorDecision(action="none")
+        try:
+            import aiohttp
+        except ImportError:
+            return SupervisorDecision(action="none")
+
+        model = (os.getenv("INKBOX_REALTIME_SUPERVISOR_MODEL") or "gpt-4o-mini").strip()
+        base_url = (
+            os.getenv("INKBOX_REALTIME_SUPERVISOR_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).rstrip("/")
+
+        context_lines = [
+            f"Call direction: {meta.direction}.",
+            (
+                "Caller is a known Inkbox contact: "
+                f"{meta.contact_name}." if meta.contact_known
+                else "Caller is NOT a known contact — treat as unverified; the "
+                "agent must not disclose third-party data."
+            ),
+        ]
+        if meta.direction == "outbound" and meta.outbound_purpose:
+            context_lines.append(f"Reason we called: {meta.outbound_purpose}")
+        if meta.contact_notes:
+            context_lines.append(f"Notes on file about the caller: {meta.contact_notes}")
+        if prior_guidance:
+            context_lines.append(
+                "Guidance you already sent (do NOT repeat these): "
+                + " | ".join(prior_guidance[-5:])
+            )
+        transcript_block = "\n".join(
+            f"{'CALLER' if role == 'caller' else 'AGENT'}: {text}"
+            for role, text in transcript[-20:]
+        )
+        user_content = (
+            "\n".join(context_lines)
+            + "\n\nTranscript so far:\n"
+            + transcript_block
+            + "\n\nDecide now. JSON only."
+        )
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": self._SUPERVISOR_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "max_tokens": 200,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        try:
+            timeout = aiohttp.ClientTimeout(total=self._realtime_config.supervisor.review_timeout_s)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{base_url}/chat/completions", json=payload, headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.debug(
+                            "[Inkbox] supervisor model returned %s: %s",
+                            resp.status, body[:200],
+                        )
+                        return SupervisorDecision(action="none")
+                    data = await resp.json()
+        except Exception as exc:
+            logger.debug("[Inkbox] supervisor model call failed: %s", exc)
+            return SupervisorDecision(action="none")
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return SupervisorDecision(action="none")
+        decision = parse_supervisor_decision(content)
+        if decision.is_actionable:
+            logger.info(
+                "[Inkbox] supervisor -> %s for call_id=%s", decision.action, meta.call_id,
+            )
+        return decision
 
     async def _realtime_call_ended(
         self,
