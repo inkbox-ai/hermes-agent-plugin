@@ -3873,13 +3873,6 @@ class InkboxAdapter(BasePlatformAdapter):
                         or call_context.get("openingMessage")
                         or ""
                     ).strip() or None,
-                    outbound_reason=str(call_context.get("reason") or "").strip() or None,
-                    outbound_scheduled_by=str(
-                        call_context.get("scheduled_by") or ""
-                    ).strip() or None,
-                    outbound_conversation_summary=str(
-                        call_context.get("conversation_summary") or ""
-                    ).strip() or None,
                 )
                 realtime_bridge = await open_inkbox_realtime_bridge(
                     config=self._realtime_config,
@@ -4052,8 +4045,6 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] Failed to enqueue outbound opener: %s", exc,
                 )
 
-        first_transcript_seen = False
-
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -4087,28 +4078,9 @@ class InkboxAdapter(BasePlatformAdapter):
                     )
                     contact_block = self._contact_marker(meta.get("contact"))
 
-                    # On the FIRST transcript only, prepend the call-purpose
-                    # block (if any) so the in-call agent — which has no
-                    # memory of why it's calling — has authoritative context.
-                    purpose_block = ""
-                    if call_context and not first_transcript_seen:
-                        reason = (call_context.get("reason") or "").strip()
-                        scheduled_by = (call_context.get("scheduled_by") or "").strip()
-                        prior = (call_context.get("conversation_summary") or "").strip()
-                        lines = ["[outbound_call_context]"]
-                        if reason:
-                            lines.append(f"reason: {reason}")
-                        if scheduled_by:
-                            lines.append(f"scheduled_by: {scheduled_by}")
-                        if prior:
-                            lines.append(f"prior_conversation: {prior}")
-                        lines.append("[/outbound_call_context]")
-                        purpose_block = "\n".join(lines) + "\n"
-                    first_transcript_seen = True
-
                     tagged = (
                         f"[inkbox:voice_call call_id={call_id} | {contact_block}]\n"
-                        f"{purpose_block}{text}"
+                        f"{text}"
                     )
                     channel_prompt, auto_skill = self._resolve_channel_overrides(
                         "voice", contact_id, "inkbox:inkbox-troubleshooting"

@@ -417,12 +417,6 @@ class RealtimeCallMeta:
     contact_notes: Optional[str] = None
     outbound_purpose: Optional[str] = None
     outbound_opening: Optional[str] = None
-    # Richer outbound-call context loaded from the call-context file. These
-    # are the keys the legacy text-mode call handler reads, so realtime calls
-    # keep the same "why we called" continuity.
-    outbound_reason: Optional[str] = None
-    outbound_scheduled_by: Optional[str] = None
-    outbound_conversation_summary: Optional[str] = None
 
 
 @dataclass
@@ -549,15 +543,6 @@ def build_realtime_instructions(
     if meta.direction == "outbound":
         if meta.outbound_purpose:
             lines.append(f"This is an outbound call you placed. Purpose: {meta.outbound_purpose}")
-        if meta.outbound_reason:
-            lines.append(f"Reason for the call: {meta.outbound_reason}")
-        if meta.outbound_scheduled_by:
-            lines.append(f"This call was scheduled by: {meta.outbound_scheduled_by}")
-        if meta.outbound_conversation_summary:
-            lines.append(
-                f"Summary of the prior conversation that led to this call:\n"
-                f"{meta.outbound_conversation_summary}",
-            )
         if meta.outbound_opening:
             lines.append(
                 f"Preferred opening message (say this naturally as your first turn): "
