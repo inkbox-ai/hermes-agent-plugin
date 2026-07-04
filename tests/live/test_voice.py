@@ -198,7 +198,7 @@ def test_outbound_call_realtime_direct_contact_lookup():
     )
     try:
         def _inbound_from_aut():
-            return [c for c in remote.calls.list(st["number_id"], limit=30)
+            return [c for c in remote.calls.list(limit=30)
                     if (getattr(c, "direction", "") or "").lower() == "inbound"
                     and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
