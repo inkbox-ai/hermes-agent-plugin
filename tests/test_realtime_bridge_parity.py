@@ -120,9 +120,6 @@ def test_instructions_include_full_contact_and_outbound_context():
         contact_notes="Prefers SMS.",
         direction="outbound",
         outbound_purpose="Confirm the 3pm meeting",
-        outbound_reason="Follow up on the overdue invoice",
-        outbound_scheduled_by="billing workflow",
-        outbound_conversation_summary="Customer promised to pay by Friday.",
     ))
 
     assert "do NOT look them up" in text
@@ -130,9 +127,7 @@ def test_instructions_include_full_contact_and_outbound_context():
     assert "+15167251294" in text
     assert "Inkbox" in text
     assert "Prefers SMS." in text
-    assert "Follow up on the overdue invoice" in text
-    assert "billing workflow" in text
-    assert "Customer promised to pay by Friday." in text
+    assert "Confirm the 3pm meeting" in text
 
 
 def test_open_realtime_bridge_preflights_openai_before_inkbox_accept(monkeypatch):
@@ -188,6 +183,8 @@ def test_session_update_exposes_post_call_edit_and_delete_tools():
         EDIT_POST_CALL_ACTION_TOOL_NAME,
         DELETE_POST_CALL_ACTION_TOOL_NAME,
         HANG_UP_CALL_TOOL_NAME,
+        "inkbox_lookup_contact",
+        "inkbox_list_contacts",
     ]
 
     instructions = ws.sent[0]["session"]["instructions"]
