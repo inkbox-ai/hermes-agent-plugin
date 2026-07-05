@@ -118,7 +118,7 @@ def run_call(
       3. agent replies, incorporating any pending notes,
       4. supervisor reviews again (interject opportunity) — if it interjects on
          a wrong agent turn, the agent immediately voices a correction, modeling
-         the ``response.create`` speak-now path.
+         the ``inject`` ``mode: "say"`` speak-now path.
 
     ``supervisor=None`` is the baseline (pull-only) architecture.
 

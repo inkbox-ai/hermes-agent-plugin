@@ -725,9 +725,10 @@ class OpenedRealtimeBridge:
 
         When ``on_supervise`` is supplied and the config's supervisor is enabled,
         a background supervisor loop runs alongside the two audio pumps: it
-        watches the transcript and proactively injects steering guidance into the
-        OpenAI session. It is not part of the pump race — it simply lives for the
-        duration of the call and is cancelled on teardown.
+        watches the transcript and proactively pushes steering guidance as
+        ``inject`` frames onto the single call WS (the supervisor channel). It is
+        not part of the pump race — it simply lives for the duration of the call
+        and is cancelled on teardown.
         """
         state = self.state
         openai_ws = self.openai_ws
@@ -749,7 +750,9 @@ class OpenedRealtimeBridge:
                 name=f"realtime-openai-pump-{self.meta.call_id}",
             )
             supervisor_task = _maybe_start_supervisor(
-                openai_ws=openai_ws,
+                # Steering rides the one call WS (the platform supervisor
+                # channel), not the OpenAI socket.
+                ws=inkbox_ws,
                 state=state,
                 config=self.config,
                 meta=self.meta,
@@ -883,20 +886,24 @@ async def run_inkbox_realtime_bridge(
 
 def _maybe_start_supervisor(
     *,
-    openai_ws: Any,
+    ws: Any,
     state: _BridgeState,
     config: RealtimeConfig,
     meta: RealtimeCallMeta,
     on_supervise: Optional[SuperviseCallback],
 ) -> Optional["asyncio.Task[None]"]:
-    """Start the proactive supervisor loop if enabled and a callback is present."""
+    """Start the proactive supervisor loop if enabled and a callback is present.
+
+    ``ws`` is the single per-call supervisor WebSocket the loop pushes ``inject``
+    intervene frames onto.
+    """
     sup_config = getattr(config, "supervisor", None)
     if on_supervise is None or sup_config is None or not sup_config.enabled:
         return None
     state.supervisor_active = True
     task = asyncio.create_task(
         _supervisor.run_supervisor_loop(
-            openai_ws=openai_ws,
+            ws=ws,
             transcript_events=state.transcript_events,
             transcript_snapshot=lambda: list(state.transcript),
             # Stop supervising once the call is closing OR a hangup has been
@@ -906,11 +913,10 @@ def _maybe_start_supervisor(
             meta=meta,
             on_supervise=on_supervise,
             # "Unsafe to speak now": a response is already generating, OR a
-            # consult is pending (its result readback will fire its own
-            # response.create shortly). Firing a speak-now interjection in either
-            # case collides with that response.create and OpenAI rejects one,
-            # which could drop the consult answer the caller is waiting on. When
-            # unsafe, the note is still injected silently and picked up next turn.
+            # consult is pending (its result readback will speak shortly). A
+            # speak-now interjection in either case would talk over that turn, so
+            # the loop downgrades to a silent context inject that is picked up on
+            # the next turn instead.
             is_response_active=lambda: state.response_active or bool(state.pending_consult_keys),
         ),
         name=f"realtime-supervisor-{meta.call_id}",
