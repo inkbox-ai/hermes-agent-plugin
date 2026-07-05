@@ -1295,6 +1295,70 @@ def check_inkbox_requirements() -> bool:
     return INKBOX_AVAILABLE and AIOHTTP_AVAILABLE
 
 
+class _HostedSupervisorChannel:
+    """Intervene half of a hosted call's supervisor WS.
+
+    In platform-hosted agent mode the brain runs server-side and the plugin
+    keeps the one call WS open as a supervisor channel. This wraps that socket
+    so observe-event handlers can push intervene frames back down it as JSON,
+    matching the wire contract's ``event`` discriminator.
+
+    Args:
+        ws (web.WebSocketResponse): the live per-call supervisor socket.
+    """
+
+    def __init__(self, ws: Any) -> None:
+        self._ws = ws
+
+    async def _send(self, frame: Dict[str, Any]) -> None:
+        # One JSON frame per intervene command; the platform reads them off
+        # the same connection it emits observe frames on.
+        await self._ws.send_str(json.dumps(frame))
+
+    async def answer_consult(
+        self, consult_id: str, answer: str, instructions: Optional[str] = None,
+    ) -> None:
+        """Resolve a pending consult; optional ``instructions`` steer the brain."""
+        frame: Dict[str, Any] = {
+            "event": "consult.answer",
+            "consult_id": consult_id,
+            "answer": answer,
+        }
+        if instructions:
+            frame["instructions"] = instructions
+        await self._send(frame)
+
+    async def inject(self, text: str, mode: str = "say") -> None:
+        """Push text into the call — ``say`` speaks now, ``context`` is hidden."""
+        await self._send({"event": "inject", "mode": mode, "text": text})
+
+    async def update_instructions(self, instructions: str) -> None:
+        """Replace the running brain's system instructions mid-call."""
+        await self._send(
+            {"event": "update_instructions", "instructions": instructions}
+        )
+
+    async def tool_decision(
+        self, tool_call_id: str, decision: str, reason: Optional[str] = None,
+    ) -> None:
+        """Approve or deny an approval-gated tool call by id."""
+        frame: Dict[str, Any] = {
+            "event": "tool.decision",
+            "tool_call_id": tool_call_id,
+            "decision": decision,
+        }
+        if reason:
+            frame["reason"] = reason
+        await self._send(frame)
+
+    async def hang_up(self, reason: Optional[str] = None) -> None:
+        """Ask the platform to end the call."""
+        frame: Dict[str, Any] = {"event": "hang_up"}
+        if reason:
+            frame["reason"] = reason
+        await self._send(frame)
+
+
 class InkboxAdapter(BasePlatformAdapter):
     """Hermes platform adapter for Inkbox (email + SMS + voice)."""
 
@@ -1406,13 +1470,6 @@ class InkboxAdapter(BasePlatformAdapter):
         self._site: Optional[Any] = None
         self._tunnel: Optional[Any] = None  # inkbox.tunnels.client.TunnelListener
         self._tunnel_runtime_thread: Optional["threading.Thread"] = None
-        # Hosted-realtime observe/intervene control channel. Populated only in
-        # hosted mode: the long-lived subscription task, the SDK session it
-        # drives, and per-call metadata (keyed by call_id) resolved from the
-        # observe stream so consult/post-call handling has caller context.
-        self._realtime_control_task: Optional["asyncio.Task"] = None
-        self._realtime_control_session: Optional[Any] = None
-        self._hosted_call_meta: Dict[str, RealtimeCallMeta] = {}
         # contact_id → active call WebSocket. Used by send()/edit_message() to
         # push voice replies to the correct ongoing call.
         self._active_call_ws: Dict[str, Any] = {}
@@ -1567,13 +1624,6 @@ class InkboxAdapter(BasePlatformAdapter):
             self._identity_handle, self._public_url, self._host, self._port,
         )
 
-        # Hosted realtime: enable the platform-run voice leg for this identity
-        # and open the observe/intervene control channel. Best-effort — a
-        # failure here must not sink an otherwise-healthy connection.
-        if self._realtime_config.hosted:
-            with suppress(Exception):
-                await self._start_hosted_realtime()
-
         return True
 
     async def disconnect(self) -> None:
@@ -1605,18 +1655,6 @@ class InkboxAdapter(BasePlatformAdapter):
                 return_exceptions=True,
             )
         self._imessage_typing_tasks.clear()
-
-        # Tear down the hosted-realtime control channel and its subscription task.
-        if self._realtime_control_task is not None:
-            self._realtime_control_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await self._realtime_control_task
-            self._realtime_control_task = None
-        if self._realtime_control_session is not None:
-            with suppress(Exception):
-                await self._realtime_control_session.close()
-            self._realtime_control_session = None
-        self._hosted_call_meta.clear()
 
         # Close any live call WS so callers don't hang on a half-open socket.
         for ws in list(self._active_call_ws.values()):
@@ -3765,8 +3803,18 @@ class InkboxAdapter(BasePlatformAdapter):
         # commits Inkbox to raw-media mode before we know Realtime is reachable.
         ws = web.WebSocketResponse()
 
-        async def _prepare_call_ws(*, use_realtime: bool) -> None:
-            if use_realtime:
+        async def _prepare_call_ws(
+            *, use_realtime: bool, use_agent: bool = False,
+        ) -> None:
+            if use_agent:
+                # Platform-hosted agent mode: the platform runs the whole voice
+                # brain (LLM + STT + TTS + VAD). Opting in is just this one
+                # response header, set alongside the STT/TTS flags — which the
+                # platform also owns here, so both stay "true".
+                ws.headers["x-use-inkbox-agent"] = "true"
+                ws.headers["x-use-inkbox-text-to-speech"] = "true"
+                ws.headers["x-use-inkbox-speech-to-text"] = "true"
+            elif use_realtime:
                 ws.headers["x-use-inkbox-text-to-speech"] = "false"
                 ws.headers["x-use-inkbox-speech-to-text"] = "false"
             else:
@@ -3891,14 +3939,46 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] Failed to load context_token %s: %s", ctx_token, exc,
                 )
 
+        # Platform-hosted agent voice — the platform runs the whole brain, so
+        # we open no local voice bridge and never enter the text-event flow.
+        # We accept this same call WS with the ``x-use-inkbox-agent`` header
+        # and keep it open as a supervisor channel: observe frames come up,
+        # intervene frames go back down (see _run_hosted_supervisor).
+        if self._realtime_config.hosted:
+            await _prepare_call_ws(use_agent=True)
+            logger.info(
+                "[Inkbox] Hosted agent call WS open: call_id=%s contact_id=%s "
+                "remote=%s direction=%s thread=%s",
+                call_id, contact_id, remote_phone_number, direction,
+                call_thread_id,
+            )
+            try:
+                await self._run_hosted_supervisor(ws, meta)
+            except Exception as exc:
+                logger.warning(
+                    "[Inkbox] hosted supervisor crashed for call_id=%s: %s",
+                    call_id, exc,
+                )
+            finally:
+                # Unbind the voice sink and mark the call recently-closed so the
+                # gateway's outbound routing falls back to SMS/email.
+                self._active_call_ws.pop(contact_id, None)
+                if self._last_inbound_modality.get(str(contact_id)) == "voice":
+                    self._last_inbound_modality.pop(str(contact_id), None)
+                self._voice_recently_closed[str(contact_id)] = time.time()
+                with suppress(Exception):
+                    if not ws.closed:
+                        await ws.close()
+                logger.info(
+                    "[Inkbox] Hosted agent call WS closed: call_id=%s", call_id,
+                )
+            return ws
+
         # Realtime voice bridge — when configured, pre-open OpenAI Realtime
         # before accepting the Inkbox websocket in raw-media mode. If preflight
         # fails and fallback is allowed, we still accept the same phone call
         # with Inkbox STT/TTS and continue into the text-event flow below.
-        # In hosted mode the platform runs the voice leg, so we never open a
-        # local bridge here — the observe/intervene control channel handles the
-        # call out of band (see _run_realtime_control_channel).
-        if self._realtime_config.enabled and not self._realtime_config.hosted:
+        if self._realtime_config.enabled:
             realtime_bridge = None
             try:
                 identity_for_meta = None
@@ -4520,101 +4600,75 @@ class InkboxAdapter(BasePlatformAdapter):
             )
 
     # ------------------------------------------------------------------
-    # Hosted realtime — observe/intervene control channel
+    # Hosted realtime — single-WS observe/intervene supervisor
     # ------------------------------------------------------------------
 
-    async def _start_hosted_realtime(self) -> None:
-        """Enable the platform-hosted voice leg and open the control channel.
+    async def _run_hosted_supervisor(self, ws: Any, meta: Dict[str, Any]) -> None:
+        """Supervise a platform-hosted voice call over its own call WS.
 
-        Turns on hosted realtime for this identity (voice / model / extra
-        instructions from local config) so the server runs the voice agent,
-        then launches the long-lived task that consumes observe events and
-        answers consults.
+        In hosted mode the platform runs the whole voice brain; this same call
+        WS carries observe frames (transcript, tool calls, consult requests,
+        call end) up and intervene frames (consult answers, injects, tool
+        decisions) back down. Builds a :class:`RealtimeCallMeta` from the
+        already-resolved call context, then pumps observe frames until the
+        platform closes the call.
+
+        Args:
+            ws (web.WebSocketResponse): the live per-call supervisor socket.
+            meta (Dict[str, Any]): call context resolved by the WS handler
+                (contact id/name, remote number, direction, contact record).
+
+        Returns:
+            None
         """
-        if self._inkbox is None:
-            logger.warning("[Inkbox] hosted realtime requested but SDK client is unavailable")
-            return
-        cfg = self._realtime_config
-        try:
-            await asyncio.to_thread(
-                self._inkbox.phone.hosted_realtime.set_config,
-                enabled=True,
-                voice=cfg.voice or None,
-                model=cfg.model or None,
-                instructions=cfg.additional_instructions or None,
-                agent_identity_id=self._identity_id,
-            )
-            logger.info(
-                "[Inkbox] hosted realtime enabled for identity=%s (voice=%s model=%s)",
-                self._identity_handle, cfg.voice, cfg.model,
-            )
-        except AttributeError:
-            logger.warning(
-                "[Inkbox] installed SDK exposes no hosted-realtime config surface; "
-                "cannot enable hosted voice for identity=%s", self._identity_handle,
-            )
-            return
-        except Exception as exc:
-            # The identity may already be enabled server-side; still open the
-            # control channel so we can observe and intervene.
-            logger.warning("[Inkbox] failed to enable hosted realtime: %s", exc)
+        # Wrap the socket so observe-event handlers can push intervene frames.
+        channel = _HostedSupervisorChannel(ws)
+        call_meta = self._hosted_call_meta_from(meta)
+        # Observe frames arrive as JSON text on the same WS; drain until close.
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                event = json.loads(msg.data)
+            except json.JSONDecodeError:
+                continue
+            with suppress(Exception):
+                await self._hosted_dispatch_event(channel, event, call_meta)
 
-        self._realtime_control_task = asyncio.create_task(
-            self._run_realtime_control_channel(),
-            name="inkbox-realtime-control",
+    def _hosted_call_meta_from(self, meta: Dict[str, Any]) -> RealtimeCallMeta:
+        """Build supervisor call metadata from the WS-resolved call context.
+
+        Args:
+            meta (Dict[str, Any]): the call context dict assembled in the WS
+                handler (call_id, contact_id/name, remote number, direction,
+                full contact record).
+
+        Returns:
+            RealtimeCallMeta: metadata threaded into consult / post-call handling.
+        """
+        contact = meta.get("contact") or {}
+        return RealtimeCallMeta(
+            call_id=str(meta.get("call_id") or "unknown"),
+            contact_id=str(meta.get("contact_id") or "unknown"),
+            contact_name=str(meta.get("contact_name") or "unknown"),
+            remote_phone_number=(meta.get("remote_phone_number") or "").strip() or None,
+            direction=(meta.get("direction") or "inbound").strip().lower() or "inbound",
+            agent_identity_handle=self._identity_handle,
+            contact_known=bool(meta.get("contact")),
+            contact_emails=list(contact.get("emails") or []),
+            contact_phones=list(contact.get("phones") or []),
+            contact_company=contact.get("company") or None,
+            contact_notes=contact.get("notes") or None,
         )
 
-    async def _run_realtime_control_channel(self) -> None:
-        """Observe live hosted calls and drive intervene commands.
-
-        Subscribes to this identity's live and future calls, logs transcript
-        and tool activity so the main agent is informed as a call happens,
-        answers consult requests via the existing main-agent oneshot, and
-        enqueues the post-call reconciliation turn when a call ends.
-        Reconnects with backoff; exits cleanly on teardown cancellation.
-        """
-        backoff = 1.0
-        while True:
-            session = None
-            try:
-                session = await self._inkbox.phone.realtime.connect(
-                    agent_identity_id=self._identity_id,
-                )
-                self._realtime_control_session = session
-                backoff = 1.0
-                logger.info(
-                    "[Inkbox] hosted realtime control channel open for identity=%s",
-                    self._identity_handle,
-                )
-                async for event in session:
-                    with suppress(Exception):
-                        await self._hosted_dispatch_event(session, event)
-            except asyncio.CancelledError:
-                if session is not None:
-                    with suppress(Exception):
-                        await session.close()
-                raise
-            except AttributeError:
-                logger.warning(
-                    "[Inkbox] installed SDK exposes no realtime control channel; "
-                    "hosted observe/intervene disabled",
-                )
-                return
-            except Exception as exc:
-                logger.warning("[Inkbox] hosted realtime control channel error: %s", exc)
-            finally:
-                if self._realtime_control_session is session:
-                    self._realtime_control_session = None
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
-
-    async def _hosted_dispatch_event(self, session: Any, event: Any) -> None:
-        """Route one observe event to logging, consult, or post-call handling."""
+    async def _hosted_dispatch_event(
+        self, channel: "_HostedSupervisorChannel", event: Any,
+        call_meta: RealtimeCallMeta,
+    ) -> None:
+        """Route one observe frame to logging, consult, or post-call handling."""
         kind = str(_field(event, "event") or "").strip()
-        call_id = str(_field(event, "call_id") or "").strip()
-        if kind == "call.started":
-            await self._hosted_register_call(event, call_id)
-        elif kind == "transcript":
+        call_id = call_meta.call_id
+        if kind == "transcript":
             logger.info(
                 "[Inkbox] hosted realtime transcript call_id=%s party=%s: %s",
                 call_id, _field(event, "party"), _field(event, "text"),
@@ -4625,57 +4679,17 @@ class InkboxAdapter(BasePlatformAdapter):
                 call_id, _field(event, "tool_name"), _field(event, "requires_approval"),
             )
         elif kind == "consult.requested":
-            await self._hosted_handle_consult(session, event, call_id)
+            await self._hosted_handle_consult(channel, event, call_meta)
         elif kind == "call.ended":
-            await self._hosted_handle_call_ended(event, call_id)
-        # call.answered / barge_in and other observe events need no action.
+            await self._hosted_handle_call_ended(event, call_meta)
+        # call.started / call.answered / barge_in need no supervisor action.
 
-    async def _hosted_register_call(self, event: Any, call_id: str) -> None:
-        """Resolve caller context on call.started and cache it by call_id."""
-        phone = str(_field(event, "phone_number") or "").strip() or None
-        direction = str(_field(event, "direction") or "inbound").strip().lower() or "inbound"
-        contact_id = phone or call_id or "unknown"
-        contact_name = phone or "unknown"
-        contact_known = False
-        if phone:
-            with suppress(Exception):
-                details = await self._resolve_contact_full(kind="phone", value=phone)
-                if details:
-                    contact_id = str(details.get("id") or contact_id)
-                    contact_name = str(details.get("name") or contact_name)
-                    contact_known = True
-        self._hosted_call_meta[call_id] = RealtimeCallMeta(
-            call_id=call_id or "unknown",
-            contact_id=contact_id,
-            contact_name=contact_name,
-            remote_phone_number=phone,
-            direction=direction,
-            agent_identity_handle=self._identity_handle,
-            contact_known=contact_known,
-        )
-        logger.info(
-            "[Inkbox] hosted realtime call.started call_id=%s direction=%s",
-            call_id, direction,
-        )
-
-    def _hosted_meta_for(self, event: Any, call_id: str) -> RealtimeCallMeta:
-        """Return cached call metadata, or a minimal record from the event."""
-        meta = self._hosted_call_meta.get(call_id)
-        if meta is not None:
-            return meta
-        phone = str(_field(event, "phone_number") or "").strip() or None
-        direction = str(_field(event, "direction") or "inbound").strip().lower() or "inbound"
-        return RealtimeCallMeta(
-            call_id=call_id or "unknown",
-            contact_id=phone or call_id or "unknown",
-            contact_name=phone or "unknown",
-            remote_phone_number=phone,
-            direction=direction,
-            agent_identity_handle=self._identity_handle,
-        )
-
-    async def _hosted_handle_consult(self, session: Any, event: Any, call_id: str) -> None:
-        """Run the main-agent consult and push the answer back to the call."""
+    async def _hosted_handle_consult(
+        self, channel: "_HostedSupervisorChannel", event: Any,
+        call_meta: RealtimeCallMeta,
+    ) -> None:
+        """Run the main-agent consult and push the answer back over the WS."""
+        call_id = call_meta.call_id
         consult_id = str(_field(event, "consult_id") or "").strip()
         query = str(_field(event, "query") or "").strip()
         if not consult_id or not query:
@@ -4683,10 +4697,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] hosted consult missing consult_id/query for call_id=%s", call_id,
             )
             return
-        meta = self._hosted_meta_for(event, call_id)
         transcript = self._hosted_transcript(_field(event, "transcript_tail"))
         try:
-            answer = await self._realtime_agent_consult(meta, query, transcript)
+            answer = await self._realtime_agent_consult(call_meta, query, transcript)
         except Exception as exc:
             logger.warning("[Inkbox] hosted consult failed for call_id=%s: %s", call_id, exc)
             answer = (
@@ -4694,23 +4707,24 @@ class InkboxAdapter(BasePlatformAdapter):
                 "follow up after the call."
             )
         with suppress(Exception):
-            await session.answer_consult(consult_id, answer)
+            await channel.answer_consult(consult_id, answer)
         logger.info(
             "[Inkbox] hosted consult answered call_id=%s consult_id=%s", call_id, consult_id,
         )
 
-    async def _hosted_handle_call_ended(self, event: Any, call_id: str) -> None:
-        """Enqueue post-call reconciliation from the call.ended event."""
-        meta = self._hosted_call_meta.pop(call_id, None) or self._hosted_meta_for(event, call_id)
+    async def _hosted_handle_call_ended(
+        self, event: Any, call_meta: RealtimeCallMeta,
+    ) -> None:
+        """Enqueue post-call reconciliation from the call.ended frame."""
         transcript = self._hosted_transcript(_field(event, "transcript"))
         actions = self._hosted_actions(_field(event, "post_call_actions"))
         if actions:
-            await self._realtime_post_call_actions(meta, actions, transcript)
+            await self._realtime_post_call_actions(call_meta, actions, transcript)
         else:
-            await self._realtime_call_ended(meta, transcript)
+            await self._realtime_call_ended(call_meta, transcript)
         logger.info(
             "[Inkbox] hosted realtime call.ended call_id=%s actions=%d",
-            call_id, len(actions),
+            call_meta.call_id, len(actions),
         )
 
     @staticmethod

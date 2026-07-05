@@ -1,9 +1,12 @@
-"""Tests for the hosted realtime voice path (config resolution + control channel)."""
+"""Tests for the hosted realtime voice path (config resolution + supervisor WS)."""
 
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
+
+from aiohttp import WSMsgType
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,7 +16,7 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin.adapter import InkboxAdapter
-from inkbox_plugin.realtime import MODE_HOSTED, MODE_LOCAL, RealtimeConfig
+from inkbox_plugin.realtime import MODE_HOSTED, MODE_LOCAL, RealtimeCallMeta, RealtimeConfig
 
 
 def _clear_realtime_env(monkeypatch):
@@ -97,64 +100,39 @@ def test_hosted_carries_voice_and_model(monkeypatch):
     assert cfg.model == "voice-x"
 
 
-# ── control-channel fakes ────────────────────────────────────────────────────
+# ── supervisor WS fakes ──────────────────────────────────────────────────────
 
 
-class _FakeControlSession:
-    def __init__(self, events=None):
-        self._events = list(events or [])
-        self.answers = []
+class _FakeWS:
+    """Minimal call WS: async-iterates observe frames, captures intervene ones."""
+
+    def __init__(self, messages=None):
+        self._messages = list(messages or [])
+        self.sent = []
         self.closed = False
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
-        if self._events:
-            return self._events.pop(0)
+        if self._messages:
+            return self._messages.pop(0)
         raise StopAsyncIteration
 
-    async def answer_consult(self, consult_id, answer, instructions=None):
-        self.answers.append((consult_id, answer, instructions))
+    async def send_str(self, data):
+        self.sent.append(data)
 
     async def close(self):
         self.closed = True
 
 
-class _FakeHostedRealtime:
-    def __init__(self):
-        self.config_calls = []
-
-    def set_config(self, **kwargs):
-        self.config_calls.append(kwargs)
+def _text_msg(**frame):
+    """Wrap a wire frame dict as a TEXT WS message."""
+    return types.SimpleNamespace(type=WSMsgType.TEXT, data=json.dumps(frame))
 
 
-class _FakeRealtime:
-    def __init__(self, sessions):
-        self._sessions = list(sessions)
-        self.connects = []
-
-    async def connect(self, **kwargs):
-        self.connects.append(kwargs)
-        if self._sessions:
-            return self._sessions.pop(0)
-        # No further sessions — surface as "no control channel" to end the loop.
-        raise AttributeError("no more sessions")
-
-
-class _FakePhone:
-    def __init__(self, sessions):
-        self.hosted_realtime = _FakeHostedRealtime()
-        self.realtime = _FakeRealtime(sessions)
-
-
-class _FakeInkbox:
-    def __init__(self, sessions=None):
-        self.phone = _FakePhone(sessions or [])
-
-
-def _event(kind, **fields):
-    return types.SimpleNamespace(event=kind, **fields)
+def _channel(ws):
+    return adapter_mod._HostedSupervisorChannel(ws)
 
 
 def _adapter():
@@ -162,16 +140,89 @@ def _adapter():
     a._identity_handle = "acme"
     a._identity_id = "identity-123"
     a._inkbox = None
-    a._realtime_control_task = None
-    a._realtime_control_session = None
-    a._hosted_call_meta = {}
     a._contact_cache = {}
     a._realtime_config = RealtimeConfig(enabled=True, mode=MODE_HOSTED, voice="cedar", model="voice-x")
     a.config = types.SimpleNamespace(extra={})
     return a
 
 
-# ── control-channel consult answer ───────────────────────────────────────────
+def _call_meta(**overrides):
+    fields = dict(
+        call_id="call-1",
+        contact_id="c-1",
+        contact_name="Bob",
+        remote_phone_number="+15550001111",
+        direction="inbound",
+        agent_identity_handle="acme",
+        contact_known=True,
+    )
+    fields.update(overrides)
+    return RealtimeCallMeta(**fields)
+
+
+# ── intervene channel frames ─────────────────────────────────────────────────
+
+
+def test_channel_answer_consult_frame():
+    ws = _FakeWS()
+    asyncio.run(_channel(ws).answer_consult("c-9", "at 3pm"))
+    assert json.loads(ws.sent[0]) == {
+        "event": "consult.answer", "consult_id": "c-9", "answer": "at 3pm",
+    }
+
+
+def test_channel_answer_consult_with_instructions():
+    ws = _FakeWS()
+    asyncio.run(_channel(ws).answer_consult("c-9", "at 3pm", instructions="be brief"))
+    assert json.loads(ws.sent[0]) == {
+        "event": "consult.answer", "consult_id": "c-9", "answer": "at 3pm",
+        "instructions": "be brief",
+    }
+
+
+def test_channel_inject_and_update_instructions():
+    ws = _FakeWS()
+    asyncio.run(_channel(ws).inject("hold on", mode="context"))
+    asyncio.run(_channel(ws).update_instructions("stay on topic"))
+    assert json.loads(ws.sent[0]) == {
+        "event": "inject", "mode": "context", "text": "hold on",
+    }
+    assert json.loads(ws.sent[1]) == {
+        "event": "update_instructions", "instructions": "stay on topic",
+    }
+
+
+def test_channel_tool_decision_and_hang_up():
+    ws = _FakeWS()
+    asyncio.run(_channel(ws).tool_decision("t-1", "approve"))
+    asyncio.run(_channel(ws).hang_up(reason="done"))
+    assert json.loads(ws.sent[0]) == {
+        "event": "tool.decision", "tool_call_id": "t-1", "decision": "approve",
+    }
+    assert json.loads(ws.sent[1]) == {"event": "hang_up", "reason": "done"}
+
+
+# ── meta from WS-resolved context ────────────────────────────────────────────
+
+
+def test_call_meta_from_ws_context():
+    a = _adapter()
+    meta = a._hosted_call_meta_from({
+        "call_id": "call-9",
+        "contact_id": "c-9",
+        "contact_name": "Bob",
+        "remote_phone_number": "+15550001111",
+        "direction": "Outbound",
+        "contact": {"emails": ["bob@x.com"], "company": "Acme"},
+    })
+    assert meta.call_id == "call-9"
+    assert meta.direction == "outbound"
+    assert meta.contact_known is True
+    assert meta.contact_emails == ["bob@x.com"]
+    assert meta.contact_company == "Acme"
+
+
+# ── consult over the supervisor WS ───────────────────────────────────────────
 
 
 def test_consult_requested_answers_via_main_agent():
@@ -185,20 +236,24 @@ def test_consult_requested_answers_via_main_agent():
         return "The meeting is at 3pm."
 
     a._realtime_agent_consult = fake_consult
-    session = _FakeControlSession()
-    event = _event(
-        "consult.requested",
-        call_id="call-1",
-        consult_id="consult-9",
-        query="when is the meeting?",
-        transcript_tail=[{"speaker": "remote", "text": "hi"}],
-    )
+    ws = _FakeWS()
+    event = {
+        "event": "consult.requested",
+        "consult_id": "consult-9",
+        "query": "when is the meeting?",
+        "transcript_tail": [{"speaker": "remote", "text": "hi"}],
+    }
 
-    asyncio.run(a._hosted_dispatch_event(session, event))
+    asyncio.run(a._hosted_dispatch_event(_channel(ws), event, _call_meta()))
 
-    assert session.answers == [("consult-9", "The meeting is at 3pm.", None)]
+    assert json.loads(ws.sent[0]) == {
+        "event": "consult.answer", "consult_id": "consult-9",
+        "answer": "The meeting is at 3pm.",
+    }
     assert seen["query"] == "when is the meeting?"
     assert seen["transcript"] == [("remote", "hi")]
+    # The consult runs against the WS-resolved caller context.
+    assert seen["meta"].contact_name == "Bob"
 
 
 def test_consult_failure_pushes_graceful_answer():
@@ -208,45 +263,27 @@ def test_consult_failure_pushes_graceful_answer():
         raise RuntimeError("agent unreachable")
 
     a._realtime_agent_consult = boom
-    session = _FakeControlSession()
-    event = _event(
-        "consult.requested",
-        call_id="call-1",
-        consult_id="consult-9",
-        query="anything?",
-        transcript_tail=[],
-    )
+    ws = _FakeWS()
+    event = {
+        "event": "consult.requested",
+        "consult_id": "consult-9",
+        "query": "anything?",
+        "transcript_tail": [],
+    }
 
-    asyncio.run(a._hosted_dispatch_event(session, event))
+    asyncio.run(a._hosted_dispatch_event(_channel(ws), event, _call_meta()))
 
-    assert len(session.answers) == 1
-    consult_id, answer, _instr = session.answers[0]
-    assert consult_id == "consult-9"
-    assert "follow up" in answer.lower()
+    frame = json.loads(ws.sent[0])
+    assert frame["consult_id"] == "consult-9"
+    assert "follow up" in frame["answer"].lower()
 
 
-def test_consult_uses_cached_call_meta():
+def test_consult_missing_fields_is_noop():
     a = _adapter()
-    a._hosted_call_meta["call-1"] = types.SimpleNamespace(
-        call_id="call-1", contact_name="Bob", remote_phone_number="+15550001111",
-        direction="inbound", contact_known=True,
-    )
-    captured = {}
-
-    async def fake_consult(meta, query, transcript, *_a, **_kw):
-        captured["meta"] = meta
-        return "ok"
-
-    a._realtime_agent_consult = fake_consult
-    session = _FakeControlSession()
-    event = _event(
-        "consult.requested", call_id="call-1", consult_id="c-1", query="q",
-        transcript_tail=[],
-    )
-
-    asyncio.run(a._hosted_dispatch_event(session, event))
-
-    assert captured["meta"].contact_name == "Bob"
+    ws = _FakeWS()
+    event = {"event": "consult.requested", "consult_id": "", "query": ""}
+    asyncio.run(a._hosted_dispatch_event(_channel(ws), event, _call_meta()))
+    assert ws.sent == []
 
 
 # ── post-call handling ───────────────────────────────────────────────────────
@@ -260,15 +297,14 @@ def test_call_ended_with_actions_enqueues_post_call_turn():
         captured.append(event)
 
     a._enqueue = fake_enqueue
-    event = _event(
-        "call.ended",
-        call_id="call-1",
-        reason="completed",
-        post_call_actions=[{"action": "email bob the quote", "details": "re: pricing"}],
-        transcript=[{"speaker": "remote", "text": "thanks, bye"}],
-    )
+    event = {
+        "event": "call.ended",
+        "reason": "completed",
+        "post_call_actions": [{"action": "email bob the quote", "details": "re: pricing"}],
+        "transcript": [{"speaker": "remote", "text": "thanks, bye"}],
+    }
 
-    asyncio.run(a._hosted_dispatch_event(None, event))
+    asyncio.run(a._hosted_dispatch_event(_channel(_FakeWS()), event, _call_meta()))
 
     assert len(captured) == 1
     assert "email bob the quote" in captured[0].text
@@ -283,81 +319,59 @@ def test_call_ended_without_actions_enqueues_reflection():
         captured.append(event)
 
     a._enqueue = fake_enqueue
-    event = _event(
-        "call.ended",
-        call_id="call-1",
-        reason="completed",
-        post_call_actions=[],
-        transcript=[{"speaker": "remote", "text": "bye"}],
-    )
+    event = {
+        "event": "call.ended",
+        "reason": "completed",
+        "post_call_actions": [],
+        "transcript": [{"speaker": "remote", "text": "bye"}],
+    }
 
-    asyncio.run(a._hosted_dispatch_event(None, event))
+    asyncio.run(a._hosted_dispatch_event(_channel(_FakeWS()), event, _call_meta()))
 
     assert len(captured) == 1
     assert "[call_ended]" in captured[0].text
 
 
-def test_call_ended_pops_cached_meta():
-    a = _adapter()
-    a._hosted_call_meta["call-1"] = types.SimpleNamespace(
-        call_id="call-1", contact_id="c", contact_name="Bob",
-        remote_phone_number=None, direction="inbound",
-    )
-
-    async def fake_enqueue(event):
-        pass
-
-    a._enqueue = fake_enqueue
-    event = _event(
-        "call.ended", call_id="call-1", reason="done",
-        post_call_actions=[], transcript=[],
-    )
-
-    asyncio.run(a._hosted_dispatch_event(None, event))
-
-    assert "call-1" not in a._hosted_call_meta
+# ── supervisor pump over the one call WS ─────────────────────────────────────
 
 
-# ── start + subscription loop ────────────────────────────────────────────────
-
-
-def test_start_hosted_realtime_enables_config_and_subscribes():
+def test_run_hosted_supervisor_drains_frames_and_answers_consult():
     a = _adapter()
 
     async def fake_consult(meta, query, transcript, *_a, **_kw):
         return "answer"
 
     a._realtime_agent_consult = fake_consult
-    session = _FakeControlSession([
-        _event(
-            "consult.requested", call_id="call-1", consult_id="c-1",
-            query="q", transcript_tail=[],
+    ws = _FakeWS([
+        _text_msg(event="call.started", call_id="call-1", direction="inbound"),
+        _text_msg(event="transcript", party="remote", text="hi", is_final=True),
+        _text_msg(
+            event="consult.requested", consult_id="c-1", query="q",
+            transcript_tail=[],
         ),
     ])
-    a._inkbox = _FakeInkbox([session])
 
-    async def scenario():
-        await a._start_hosted_realtime()
-        # The subscription task connects, drains the one session, then exits the
-        # reconnect loop when the fake client reports no further sessions.
-        await a._realtime_control_task
+    meta = {
+        "call_id": "call-1",
+        "contact_id": "c-1",
+        "contact_name": "Bob",
+        "remote_phone_number": "+15550001111",
+        "direction": "inbound",
+    }
+    asyncio.run(a._run_hosted_supervisor(ws, meta))
 
-    asyncio.run(scenario())
-
-    hosted = a._inkbox.phone.hosted_realtime
-    assert hosted.config_calls[0]["enabled"] is True
-    assert hosted.config_calls[0]["agent_identity_id"] == "identity-123"
-    assert a._inkbox.phone.realtime.connects[0]["agent_identity_id"] == "identity-123"
-    assert session.answers == [("c-1", "answer", None)]
+    # The consult answer rode back down the same call WS.
+    assert json.loads(ws.sent[0]) == {
+        "event": "consult.answer", "consult_id": "c-1", "answer": "answer",
+    }
 
 
-def test_start_hosted_realtime_without_config_surface_is_safe():
+def test_run_hosted_supervisor_ignores_non_text_frames():
     a = _adapter()
-
-    class _NoSurface:
-        phone = types.SimpleNamespace()
-
-    a._inkbox = _NoSurface()
-    # Missing hosted_realtime attribute must not raise out of start.
-    asyncio.run(a._start_hosted_realtime())
-    assert a._realtime_control_task is None
+    ws = _FakeWS([
+        types.SimpleNamespace(type=WSMsgType.BINARY, data=b"\x00"),
+        types.SimpleNamespace(type=WSMsgType.TEXT, data="not-json"),
+    ])
+    # Neither a binary frame nor malformed JSON should raise out of the pump.
+    asyncio.run(a._run_hosted_supervisor(ws, {"call_id": "call-1"}))
+    assert ws.sent == []

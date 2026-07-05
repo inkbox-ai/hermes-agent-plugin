@@ -62,8 +62,10 @@ DEFAULT_VOICE = "cedar"
 
 # Realtime voice mode. ``local`` runs the voice bridge in this process, bringing
 # its own provider credential. ``hosted`` hands the voice leg to the platform:
-# the server runs the voice agent and this plugin only opens the observe +
-# intervene control channel (see adapter._run_realtime_control_channel).
+# the server runs the whole voice brain and this plugin keeps the one call WS
+# open as a supervisor channel, opting in via the ``x-use-inkbox-agent`` header
+# and exchanging observe/intervene frames over it (see
+# adapter._run_hosted_supervisor).
 MODE_LOCAL = "local"
 MODE_HOSTED = "hosted"
 AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
@@ -445,7 +447,7 @@ class RealtimeConfig:
     # ``api.openai.com`` by default; override for Azure / proxies.
     base_url: str = REALTIME_URL
     # ``local`` (in-process voice bridge) or ``hosted`` (platform runs the voice
-    # agent; this plugin only opens the control channel). See MODE_* constants.
+    # brain; this plugin supervises over the one call WS). See MODE_* constants.
     mode: str = MODE_LOCAL
 
     @property
