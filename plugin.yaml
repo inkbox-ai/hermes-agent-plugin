@@ -58,6 +58,14 @@ optional_env:
     description: "Realtime voice name. Defaults to cedar."
     prompt: "Realtime voice"
     secret: false
+  - name: INKBOX_REALTIME_HOSTED
+    description: "Let the Inkbox platform host the realtime voice agent for inbound calls (no local OpenAI key needed). Set true to enable."
+    prompt: "Host realtime voice on Inkbox"
+    secret: false
+  - name: INKBOX_REALTIME_INSTRUCTIONS
+    description: "Extra system instructions appended to the voice agent's base prompt (e.g. tone, persona, do/don't rules). Applies to both local and Inkbox-hosted realtime."
+    prompt: "Realtime extra instructions"
+    secret: false
   - name: INKBOX_REALTIME_CONNECT_TIMEOUT_S
     description: "Seconds to wait for OpenAI Realtime preflight before falling back or failing."
     prompt: "Realtime connect timeout"

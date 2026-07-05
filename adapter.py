@@ -442,7 +442,11 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
         api_key=rt_api_key,
         model=str(rt_extra.get("model") or os.getenv("INKBOX_REALTIME_MODEL") or REALTIME_DEFAULT_MODEL),
         voice=str(rt_extra.get("voice") or os.getenv("INKBOX_REALTIME_VOICE") or REALTIME_DEFAULT_VOICE),
-        additional_instructions=str(rt_extra.get("additional_instructions") or ""),
+        additional_instructions=str(
+            rt_extra.get("additional_instructions")
+            or os.getenv("INKBOX_REALTIME_INSTRUCTIONS")
+            or ""
+        ),
         consult_timeout_s=float(
             rt_extra.get("consult_timeout_s")
             or os.getenv("INKBOX_REALTIME_CONSULT_TIMEOUT_S")
@@ -1858,6 +1862,29 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info(
                 "[Inkbox] Patched incoming-call action for identity %s → %s + %s",
                 self._identity_handle, webhook_url, ws_url,
+            )
+
+        # Platform-hosted realtime voice: in hosted mode the Inkbox server runs
+        # the whole voice agent, so persist the identity's hosted-voice config
+        # (which also flips the server-side enable flag the hosted path gates on).
+        # ``additional_instructions`` is appended to the base system prompt
+        # server-side, so callers hear the user's persona/tone rules.
+        if (
+            self._realtime_config.enabled
+            and self._realtime_config.hosted
+            and hasattr(identity, "set_hosted_realtime_config")
+        ):
+            identity.set_hosted_realtime_config(
+                enabled=True,
+                voice=self._realtime_config.voice or None,
+                model=self._realtime_config.model or None,
+                instructions=(self._realtime_config.additional_instructions or None),
+            )
+            logger.info(
+                "[Inkbox] Enabled Inkbox-hosted realtime voice for identity %s "
+                "(extra instructions: %s)",
+                self._identity_handle,
+                "set" if self._realtime_config.additional_instructions else "none",
             )
 
         # iMessage: identity-owned subscription, only while the identity is
