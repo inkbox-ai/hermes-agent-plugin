@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import secrets
 import time
@@ -177,6 +178,73 @@ def _write_outbound_call_context(params: Dict[str, Any]) -> str:
 # `spinoff` is absent none of the helpers below run, so an ordinary send keeps
 # today's behavior exactly.
 # ----------------------------------------------------------------------------
+logger = logging.getLogger("inkbox.plugin.tools")
+
+
+def _identity_digits(value: str) -> str:
+    """Return the trailing 10 digits of a phone-bearing identity string.
+
+    Args:
+        value (str): any string that may embed a phone number.
+
+    Returns:
+        str: up to the last 10 digits, or ``""`` when there are none.
+    """
+    digits = "".join(c for c in (value or "") if c.isdigit())
+    return digits[-10:] if len(digits) > 10 else digits
+
+
+def _mask_identity(value: str) -> str:
+    """Redact a session/identity string for logs, keeping only its shape.
+
+    Args:
+        value (str): the identity string to redact.
+
+    Returns:
+        str: the leading channel prefix (if any) plus the last 4 characters,
+        with the middle elided — enough to diagnose a shape mismatch, not
+        enough to expose a full address.
+    """
+    if not value:
+        return ""
+    prefix = f"{value.split(':', 1)[0]}:" if ":" in value else ""
+    tail = value.split(":", 1)[-1]
+    return f"{prefix}…{tail[-4:]}" if len(tail) > 4 else f"{prefix}…"
+
+
+def _relay_authorized(caller: str, edge: Dict[str, Any]) -> bool:
+    """Whether the current turn owns ``edge`` and may relay its answer.
+
+    Only the child conversation that received the spawned message may relay it.
+    The host's session-thread id and the value stamped on the edge at bind can
+    carry the same identity in different shapes — a bare id vs a channel-prefixed
+    one (``sms:<id>``), or a differently formatted phone number — so match on the
+    core identity rather than requiring byte-for-byte equality.
+
+    Args:
+        caller (str): the current turn's session thread id.
+        edge (Dict[str, Any]): the spawn edge being relayed.
+
+    Returns:
+        bool: True when the caller owns the edge.
+    """
+    child = str(edge.get("childSessionKey") or "")
+    if not caller or not child:
+        return False
+    if caller == child:
+        return True
+    # Strip a leading channel prefix so "sms:<id>" and the bare "<id>" match.
+    if caller.split(":", 1)[-1].strip().lower() == child.split(":", 1)[-1].strip().lower():
+        return True
+    # Phone-keyed sessions: the recipient the spawn was sent to is the one now
+    # replying, so authorize when the caller resolves to the recipient's number.
+    caller_digits = _identity_digits(caller)
+    recipient_digits = _identity_digits(str(edge.get("recipientKey") or ""))
+    if caller_digits and caller_digits == recipient_digits:
+        return True
+    return False
+
+
 def _current_session_thread_id() -> str:
     """Return the current agent turn's session thread id, or ``""``.
 
@@ -1405,8 +1473,13 @@ def inkbox_relay_answer(args: dict, **kwargs) -> str:
         # Caller authorization: only the child conversation that owns this edge
         # (its childSessionKey, stamped at bind) may relay an answer for it.
         caller = _current_session_thread_id()
-        child = str(edge.get("childSessionKey") or "")
-        if not child or caller != child:
+        if not _relay_authorized(caller, edge):
+            # Log the redacted identities so a bind/relay id-shape mismatch is
+            # diagnosable from failure logs without leaking full addresses.
+            logger.warning(
+                "[Inkbox] relay auth rejected for edge %s: caller=%r child=%r",
+                edge_id, _mask_identity(caller), _mask_identity(str(edge.get("childSessionKey") or "")),
+            )
             return _json({"error": "Not authorized to relay this spin-off: it is owned by a different conversation."})
 
         # Not-yet-satisfied: leave the edge awaiting_reply so its brief keeps

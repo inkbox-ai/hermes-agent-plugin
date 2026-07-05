@@ -341,3 +341,22 @@ def test_relay_edge_is_exactly_once_across_two_calls(adapter_ledger):
 
     assert len(events) == 1  # the answered→relayed CAS gated the duplicate
     assert store._read_edge(edge["edgeId"])["status"] == store.STATUS_RELAYED
+
+
+def test_relay_authorized_tolerates_identity_shapes():
+    """Caller-auth matches the same identity across host/bind id shapes.
+
+    The host session-thread id and the bind-stamped childSessionKey can carry
+    the same identity differently (a channel prefix, or a differently formatted
+    phone number), so authorization matches on the core identity — while a truly
+    unrelated caller is still rejected.
+    """
+    # Bare id stamped at bind; host prefixes the same id with the channel.
+    edge = {"childSessionKey": "contact-abc", "recipientKey": "sms:5551234567"}
+    assert tools._relay_authorized("contact-abc", edge)          # exact
+    assert tools._relay_authorized("sms:contact-abc", edge)      # prefix-stripped
+    # Phone-keyed session: the recipient number is the one replying.
+    assert tools._relay_authorized("sms:+1 (555) 123-4567", edge)
+    # Unrelated conversation is refused.
+    assert not tools._relay_authorized("sms:contact-xyz", edge)
+    assert not tools._relay_authorized("", edge)
