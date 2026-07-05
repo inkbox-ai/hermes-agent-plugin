@@ -249,8 +249,8 @@ def _current_session_thread_id() -> str:
     """Return the current agent turn's session thread id, or ``""``.
 
     Reads the host-stamped per-turn env (falls back to ``os.environ`` for
-    CLI/cron/tests). This is the value bind stamps onto an edge's
-    ``childSessionKey``, so the relay tool authorizes a caller by matching it.
+    CLI/cron/tests). This is a *thread-within-chat* id — ``None`` for a flat DM —
+    so it is used only for channel-modality hints, not caller identity.
 
     Returns:
         str: the ``HERMES_SESSION_THREAD_ID`` value, or ``""`` when unknown.
@@ -261,6 +261,25 @@ def _current_session_thread_id() -> str:
         return (get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
     except Exception:
         return (os.environ.get("HERMES_SESSION_THREAD_ID", "") or "").strip()
+
+
+def _current_session_chat_id() -> str:
+    """Return the current turn's session chat id, or ``""``.
+
+    The host stamps ``HERMES_SESSION_CHAT_ID`` = the source's ``chat_id`` — the
+    same value the bind hook records as an edge's ``childSessionKey`` — so the
+    relay tool authorizes a caller by matching it. (``HERMES_SESSION_THREAD_ID``
+    is a per-thread id that is ``None`` for a flat DM, so it cannot serve here.)
+
+    Returns:
+        str: the ``HERMES_SESSION_CHAT_ID`` value, or ``""`` when unknown.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        return (get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+    except Exception:
+        return (os.environ.get("HERMES_SESSION_CHAT_ID", "") or "").strip()
 
 
 def _all_edges() -> List[Dict[str, Any]]:
@@ -1471,8 +1490,8 @@ def inkbox_relay_answer(args: dict, **kwargs) -> str:
             return _json({"error": f"No spin-off edge {edge_id}"})
 
         # Caller authorization: only the child conversation that owns this edge
-        # (its childSessionKey, stamped at bind) may relay an answer for it.
-        caller = _current_session_thread_id()
+        # (its childSessionKey == the session chat id, stamped at bind) may relay.
+        caller = _current_session_chat_id()
         if not _relay_authorized(caller, edge):
             # Log the redacted identities so a bind/relay id-shape mismatch is
             # diagnosable from failure logs without leaking full addresses.

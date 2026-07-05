@@ -92,7 +92,8 @@ def _as_child(monkeypatch, session=CHILD_SK):
     """Make the relay caller present as ``session`` (the edge's child owner)."""
     # Host-independent: patch the helper directly rather than the env it reads,
     # so the auth check resolves identically offline and against the real host.
-    monkeypatch.setattr(tools, "_current_session_thread_id", lambda: session)
+    # Auth keys on the session chat id (HERMES_SESSION_CHAT_ID == childSessionKey).
+    monkeypatch.setattr(tools, "_current_session_chat_id", lambda: session)
 
 
 def _seed_awaiting_edge(*, child=CHILD_SK, address="alex@example.com", intent="ask Alex for the Q3 figure"):
