@@ -22,6 +22,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -177,6 +178,13 @@ def recipient_key(channel: str, address_or_conv: str) -> str:
     addr = (address_or_conv or "").strip()
     if chan == "email":
         addr = addr.lower()
+    elif chan in ("sms", "voice"):
+        # Phone numbers arrive in many shapes ("+1 (555) 123-4567",
+        # "15551234567", "555-123-4567"); collapse to the trailing 10 digits so
+        # the key built at spawn (agent-typed number) and at bind (inbound
+        # webhook number) always agree — otherwise the reply never binds.
+        digits = re.sub(r"\D", "", addr)
+        addr = digits[-10:] if len(digits) > 10 else (digits or addr)
     return f"{chan}:{addr}"
 
 

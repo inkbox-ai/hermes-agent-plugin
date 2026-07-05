@@ -202,7 +202,10 @@ def test_spinoff_baseline_no_edge_no_followup(sx):
     """
     remote, remote_pid, aut_phone = sx["remote"], sx["remote_pid"], sx["aut_phone"]
     remote_email, aut_email, remote_phone = sx["remote_email"], sx["aut_email"], sx["remote_phone"]
-    token = _token()
+    # `ask` only ever appears in the email thread subject; `ans` is a private
+    # nonce that lives ONLY in B's SMS reply, so if it reaches A it can only have
+    # been relayed — never a normal in-thread acknowledgement.
+    ask, ans = _token(), _token()
 
     # Snapshots taken right before the trigger so nothing pre-existing counts.
     edges_before = _edge_files()
@@ -211,7 +214,7 @@ def test_spinoff_baseline_no_edge_no_followup(sx):
 
     # A -> agent: fire-and-forget errand, explicitly no report-back.
     remote.messages.send(
-        remote_email, to=[aut_email], subject=f"[{token}] quick favor",
+        remote_email, to=[aut_email], subject=f"[{ask}] quick favor",
         body_text=(f"Please send a text to {remote_phone} letting them know the plan is on. "
                    f"No need to report anything back to me."),
     )
@@ -229,18 +232,20 @@ def test_spinoff_baseline_no_edge_no_followup(sx):
         time.sleep(POLL_EVERY_S)
     assert got_sms is not None, "agent never texted B in the baseline leg"
 
-    # B replies with a token A never asked about.
-    remote.texts.send(remote_pid, to=aut_phone, text=f"Got it. FYI my desk code is {token}.")
+    # B replies with a private nonce A never asked about.
+    remote.texts.send(remote_pid, to=aut_phone, text=f"Got it. FYI my desk code is {ans}.")
 
-    # b3: over the settle window A must receive NO email carrying B's token.
+    # b3: over the settle window A must receive NO email carrying B's nonce. (A
+    # may still get a normal ack that threads `ask` in the subject — that is not
+    # a relay, which is exactly why we key on `ans`.)
     deadline = time.monotonic() + BASELINE_WINDOW_S
     while time.monotonic() < deadline:
         for m in _inbound_email_from(remote, remote_email, aut_email):
             if m.id in email_before:
                 continue
-            assert not _email_carries_token(remote, remote_email, m, token), (
-                "baseline relayed B's token back to A — expected the amnesiac gap "
-                f"(token {token})"
+            assert not _email_carries_token(remote, remote_email, m, ans), (
+                "baseline relayed B's private nonce back to A — expected the "
+                f"amnesiac gap (nonce {ans})"
             )
         time.sleep(POLL_EVERY_S)
 
@@ -259,7 +264,9 @@ def test_spinoff_delegation_relays_answer_once(sx):
     """
     remote, remote_pid, aut_phone = sx["remote"], sx["remote_pid"], sx["aut_phone"]
     remote_email, aut_email, remote_phone = sx["remote_email"], sx["aut_email"], sx["remote_phone"]
-    token = _token()
+    # `ask` threads the email; `ans` is the private codeword only B knows, so it
+    # reaches A ONLY through the relay (never a normal ack).
+    ask, ans = _token(), _token()
 
     # Snapshots so no pre-existing edge/send/inbound satisfies an assertion.
     edges_before = _edge_files()
@@ -280,18 +287,30 @@ def test_spinoff_delegation_relays_answer_once(sx):
                 if st:
                     seen_status.add(st)
 
+    def _await_status(target: str, window: float) -> bool:
+        # Poll the on-disk edge until it is observed in `target`. This is the
+        # model-independent proof: it does not depend on what the agent chooses
+        # to write in an email, only on the lineage machinery advancing.
+        deadline = time.monotonic() + window
+        while time.monotonic() < deadline:
+            _accumulate_statuses()
+            if target in seen_status:
+                return True
+            time.sleep(POLL_EVERY_S)
+        return False
+
     # A -> agent: an explicit delegation with a report-back.
     remote.messages.send(
-        remote_email, to=[aut_email], subject=f"[{token}] need the codeword",
+        remote_email, to=[aut_email], subject=f"[{ask}] need the codeword",
         body_text=(f"Please send a text to {remote_phone} and ask them for today's secret "
-                   f"codeword, then email me back exactly what they tell you."),
+                   f"codeword. When they reply, email me back the exact codeword they give you."),
     )
 
-    # 1) Wait for the agent's outbound SMS to B (the spawn fires).
+    # 1) The spawn fires: the agent texts B and a 'delivered' edge is created.
     got_sms = None
     deadline = time.monotonic() + TIMEOUT_S
     while time.monotonic() < deadline:
-        _accumulate_statuses()  # catch the freshly-created 'delivered' edge
+        _accumulate_statuses()
         for m in _inbound_sms_from(remote, remote_pid, aut_phone):
             if m.id not in sms_before:
                 got_sms = m
@@ -300,71 +319,74 @@ def test_spinoff_delegation_relays_answer_once(sx):
             break
         time.sleep(POLL_EVERY_S)
     assert got_sms is not None, "agent never texted B (the spawn did not fire)"
+    assert _await_status("delivered", 5), "no spin-off edge was created for the delegation"
 
-    # 2) B answers over SMS with the codeword token.
-    remote.texts.send(remote_pid, to=aut_phone, text=f"Sure — today's secret codeword is {token}.")
+    # 2) B answers over SMS with the private codeword nonce.
+    remote.texts.send(remote_pid, to=aut_phone, text=f"Sure — today's secret codeword is {ans}.")
 
-    # 3) Wait for the relay: a NEW email to A carrying B's answer token.
-    relay = None
-    deadline = time.monotonic() + TIMEOUT_S
-    while time.monotonic() < deadline:
-        _accumulate_statuses()  # catch 'awaiting_reply' then 'relayed'
-        for m in _inbound_email_from(remote, remote_email, aut_email):
-            if m.id in email_before:
-                continue
-            if _email_carries_token(remote, remote_email, m, token):
-                body = (getattr(remote.messages.get(remote_email, m.id), "body_text", "") or "").lower()
-                bad = [x for x in ERROR_MARKERS if x in body]
-                assert not bad, f"relay email is an error, not a real answer: {bad}"
-                relay = m
-                break
-        if relay:
-            break
-        time.sleep(POLL_EVERY_S)
-    assert relay is not None, f"agent never relayed B's answer ({token}) back to A"
-    _accumulate_statuses()
+    # 3) STRUCTURAL PROOF (model-independent) — staged so a failure names the
+    # exact stage that broke: B's reply must BIND the edge, then the relay fires.
+    assert _await_status("awaiting_reply", TIMEOUT_S), (
+        f"B's reply never bound the edge (saw {sorted(seen_status)}) — bind failed"
+    )
+    assert _await_status("relayed", TIMEOUT_S), (
+        f"edge bound but never reached 'relayed' (saw {sorted(seen_status)}) — relay did not fire"
+    )
 
-    # n2: the durable edge exists, is bound, and progressed to 'relayed'.
+    # n2: the durable edge is bound, carries A's route, and holds a distilled result.
     new_edges = [_read_edge_file(n) for n in (_edge_files() - edges_before)]
     new_edges = [e for e in new_edges if e and e.get("channelChild") == "sms"]
-    assert new_edges, "no spin-off edge was recorded for the delegation"
-    # Prefer the edge that carries a distilled result (the one that got relayed).
     edge = next((e for e in new_edges if e.get("result")), new_edges[0])
     assert edge.get("recipientBinding", {}).get("outboundMessageId"), "edge missing recipientBinding"
     assert edge.get("parentRoute"), "edge missing parentRoute (relay could not target A)"
     assert edge.get("result"), "edge has no distilled result recorded"
-    assert "relayed" in seen_status, f"edge never reached 'relayed' (saw {sorted(seen_status)})"
-    assert len(seen_status) >= 2, f"edge did not progress through its lifecycle (saw {sorted(seen_status)})"
 
-    # n1: the spy shows BOTH the A->B SMS send and a later email send to A.
-    new_spy = _spy_lines()[spy_before:]
-    b_tail = _digits(remote_phone)[-10:]
-    sms_sends = [r for r in new_spy
-                 if r.get("method", "").endswith("TextsResource.send")
-                 and b_tail in _digits(_spy_haystack(r))]
-    email_sends = [r for r in new_spy
-                   if r.get("method", "").endswith("MessagesResource.send")
-                   and remote_email.lower() in _spy_haystack(r).lower()]
-    assert sms_sends, "spy shows no A->B SMS send"
-    assert email_sends, "spy shows no later email send back to A"
-
-    # n4: A got exactly ONE inbound carrying B's token.
-    def _a_inbounds_with_token() -> set:
+    # n4: END-TO-END — A's inbox gets exactly ONE email whose BODY carries B's
+    # private nonce (proof the answer content actually made it home).
+    def _a_inbounds_with_ans() -> set:
         hits = set()
         for m in _inbound_email_from(remote, remote_email, aut_email):
             if m.id in email_before:
                 continue
-            if _email_carries_token(remote, remote_email, m, token):
+            if _email_carries_token(remote, remote_email, m, ans):
                 hits.add(m.id)
         return hits
 
-    assert len(_a_inbounds_with_token()) == 1, "expected exactly one relayed answer to A"
+    relay = None
+    deadline = time.monotonic() + TIMEOUT_S
+    while time.monotonic() < deadline:
+        hits = _a_inbounds_with_ans()
+        if hits:
+            m = remote.messages.get(remote_email, next(iter(hits)))
+            body = (getattr(m, "body_text", "") or "").lower()
+            bad = [x for x in ERROR_MARKERS if x in body]
+            assert not bad, f"relay email is an error, not a real answer: {bad}"
+            relay = hits
+            break
+        time.sleep(POLL_EVERY_S)
+    assert relay is not None, f"edge relayed but B's answer ({ans}) never reached A's inbox"
+    assert len(relay) == 1, "expected exactly one relayed answer to A"
 
     # n5: replay B's answer; the answered->relayed CAS must keep it to ONE relay.
-    remote.texts.send(remote_pid, to=aut_phone, text=f"(resending) the secret codeword is {token}.")
+    remote.texts.send(remote_pid, to=aut_phone, text=f"(resending) the secret codeword is {ans}.")
     deadline = time.monotonic() + REDELIVERY_WINDOW_S
     while time.monotonic() < deadline:
         time.sleep(POLL_EVERY_S)
-        if len(_a_inbounds_with_token()) > 1:
+        if len(_a_inbounds_with_ans()) > 1:
             pytest.fail("redelivery produced a duplicate relay to A")
-    assert len(_a_inbounds_with_token()) == 1, "redelivery must not add a second relay to A"
+
+    # n1: the spy shows BOTH the A->B SMS send and a later email send to A. The
+    # spy is best-effort (in-process client only); the durable edge + real inbox
+    # above are authoritative, so only assert it when it captured anything.
+    new_spy = _spy_lines()[spy_before:]
+    if new_spy:
+        b_tail = _digits(remote_phone)[-10:]
+        sms_sends = [r for r in new_spy
+                     if r.get("method", "").endswith("TextsResource.send")
+                     and b_tail in _digits(_spy_haystack(r))]
+        email_sends = [r for r in new_spy
+                       if r.get("method", "").endswith("MessagesResource.send")
+                       and remote_email.lower() in _spy_haystack(r).lower()]
+        assert sms_sends, "spy shows no A->B SMS send"
+        assert email_sends, "spy shows no later email send back to A"
+    assert len(_a_inbounds_with_ans()) == 1, "redelivery must not add a second relay to A"

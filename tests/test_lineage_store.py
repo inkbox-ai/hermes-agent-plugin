@@ -98,8 +98,10 @@ def test_spawn_key_deterministic_and_distinct():
 def test_recipient_key_normalization():
     # Email is case-folded so variants collapse; channel is lower-cased.
     assert lineage.recipient_key("Email", "Alex@Example.com") == "email:alex@example.com"
-    # Non-email addresses keep their case (phone numbers, handles).
-    assert lineage.recipient_key("sms", " +15551234 ") == "sms:+15551234"
+    # Phone numbers collapse to the trailing 10 digits so the format the agent
+    # typed at spawn and the inbound webhook's format bind to the same edge.
+    assert lineage.recipient_key("sms", " +1 (555) 123-4567 ") == "sms:5551234567"
+    assert lineage.recipient_key("sms", "+15551234567") == lineage.recipient_key("sms", "5551234567")
     # Same human, two channels → two distinct keys.
     assert lineage.recipient_key("email", "a@b.com") != lineage.recipient_key("sms", "a@b.com")
 
