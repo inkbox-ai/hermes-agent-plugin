@@ -159,6 +159,13 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         open_inkbox_realtime_bridge,
     )
 
+try:
+    from . import inkbox_lineage as lineage
+    from . import turn_context
+except ImportError:  # pragma: no cover - direct local import/test fallback
+    import inkbox_lineage as lineage
+    import turn_context
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "0.0.0.0"
@@ -209,6 +216,37 @@ SMS_TEXT_BATCH_MAX_CHARS = 4000
 def _inkbox_platform() -> Platform:
     """Resolve the dynamic Inkbox platform after plugin registration."""
     return Platform("inkbox")
+
+
+# The most-recently constructed adapter. A module-level relay tool runs outside
+# the adapter instance, so it reaches back through this handle to wake the
+# parent session on the adapter's own event loop (in-process fast path).
+_ACTIVE_ADAPTER: "Optional[InkboxAdapter]" = None
+
+
+def active_adapter() -> "Optional[InkboxAdapter]":
+    """Return the live adapter instance, if one has been constructed.
+
+    Returns:
+        Optional[InkboxAdapter]: the most-recent adapter, or None when the
+        gateway has not started an Inkbox adapter in this process.
+    """
+    return _ACTIVE_ADAPTER
+
+
+def _strip_angle(value: Any) -> str:
+    """Strip surrounding angle brackets/whitespace from a message id.
+
+    RFC 5322 ids arrive wrapped like ``<abc@host>`` in reply headers but are
+    often stored bare, so both sides are normalized before comparison.
+
+    Args:
+        value (Any): the raw id token.
+
+    Returns:
+        str: the id without angle brackets or surrounding whitespace.
+    """
+    return str(value or "").strip().strip("<>").strip()
 
 # Mail: agent only acts on inbound; lifecycle events fire-and-forget at the
 # wire layer, so subscribing to them would pay signature cost for no behaviour.
@@ -1421,6 +1459,17 @@ class InkboxAdapter(BasePlatformAdapter):
         # voice-intended text into the user's inbox.
         self._voice_recently_closed: Dict[str, float] = {}
 
+        # The running event loop, captured lazily in _enqueue/connect so the
+        # module-level relay tool can hop a relay coroutine back onto it from
+        # any thread (see schedule_relay).
+        self._loop: Optional["asyncio.AbstractEventLoop"] = None
+
+        # Expose this instance so the module-level relay tool can reach a live
+        # adapter's loop in-process. Last writer wins — a single adapter per
+        # process is the norm (connect() takes a per-identity platform lock).
+        global _ACTIVE_ADAPTER
+        _ACTIVE_ADAPTER = self
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -1520,6 +1569,15 @@ class InkboxAdapter(BasePlatformAdapter):
             return False
 
         self._mark_connected()
+        # Capture the loop up front so a relay requested before the first
+        # inbound turn still has a loop to hop onto.
+        with suppress(Exception):
+            self._loop = asyncio.get_running_loop()
+        # Boot backstop: expire stale spawn edges and deliver any relay a prior
+        # run answered but could not hand off (e.g. it ran out-of-process).
+        with suppress(Exception):
+            lineage.sweep_ttl()
+            self._drain_pending_relays()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
             self._identity_handle, self._public_url, self._host, self._port,
@@ -2316,6 +2374,14 @@ class InkboxAdapter(BasePlatformAdapter):
             # assumes a dict. Reject rather than raise AttributeError → 500.
             return web.Response(status=400, text="invalid json")
 
+        # Opportunistic maintenance on every inbound webhook: expire stale
+        # spawn edges and deliver any relay that was answered but not yet
+        # handed off. The answered→relayed CAS in relay_edge keeps this drain
+        # and the in-process fast path from ever double-relaying.
+        with suppress(Exception):
+            lineage.sweep_ttl()
+            self._drain_pending_relays()
+
         # Authenticate FIRST, then route on the verified source — never on the
         # body's claimed ``event_type``. We identify the source by its signature
         # header (each source has its own), verify with that source's scheme,
@@ -2572,6 +2638,16 @@ class InkboxAdapter(BasePlatformAdapter):
         channel_prompt, auto_skill = self._resolve_channel_overrides(
             "email", chat_id, "inkbox:inkbox-troubleshooting"
         )
+        # Spin-off bind: if this reply answers an outbound the agent spawned
+        # (matched by In-Reply-To/References, else by from-address within the
+        # bind window), transition that edge and brief the follow-up agent.
+        brief_block = self._bind_spinoff_on_inbound(
+            channel="email",
+            chat_id=chat_id,
+            address=from_address,
+            header_message_ids=self._email_reply_reference_ids(message),
+        )
+        channel_prompt = self._merge_spinoff_brief(channel_prompt, brief_block)
         event = MessageEvent(
             text=tagged,
             message_type=MessageType.TEXT,
@@ -3185,6 +3261,13 @@ class InkboxAdapter(BasePlatformAdapter):
         if conversation_id:
             self._last_inbound_sms[_sms_state_key(chat_id, f"sms:{conversation_id}")] = sms_state
 
+        # Spin-off bind: SMS has no threading headers, so match every open edge
+        # to this number within its bind window (a candidate set). Runs after
+        # the direction/control-word guards above, so an echo never binds.
+        spinoff_brief = self._bind_spinoff_on_inbound(
+            channel="sms", chat_id=chat_id, address=remote
+        )
+
         if raw_body.lstrip().startswith("/"):
             event = self._build_sms_text_event(
                 envelope=envelope,
@@ -3204,6 +3287,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 local_phone=local_phone,
                 participants=participants,
             )
+            event.channel_prompt = self._merge_spinoff_brief(event.channel_prompt, spinoff_brief)
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
 
@@ -3223,6 +3307,7 @@ class InkboxAdapter(BasePlatformAdapter):
             local_phone=local_phone,
             participants=participants,
         )
+        event.channel_prompt = self._merge_spinoff_brief(event.channel_prompt, spinoff_brief)
         await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
 
@@ -3370,6 +3455,16 @@ class InkboxAdapter(BasePlatformAdapter):
                 _sms_state_key(chat_id, f"imessage:{conversation_id}")
             ] = imessage_state
 
+        # Spin-off bind: match by conversation id first (the stable iMessage
+        # reply target), else the remote number. Runs after the direction
+        # guard above, so an outbound echo never binds.
+        spinoff_brief = self._bind_spinoff_on_inbound(
+            channel="imessage",
+            chat_id=chat_id,
+            address=remote,
+            conversation_id=conversation_id or None,
+        )
+
         if raw_body.lstrip().startswith("/"):
             event = self._build_imessage_event(
                 envelope=envelope,
@@ -3386,6 +3481,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 media_types=media_types,
                 conversation_id=conversation_id,
             )
+            event.channel_prompt = self._merge_spinoff_brief(event.channel_prompt, spinoff_brief)
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
 
@@ -3402,6 +3498,7 @@ class InkboxAdapter(BasePlatformAdapter):
             media_types=media_types,
             conversation_id=conversation_id,
         )
+        event.channel_prompt = self._merge_spinoff_brief(event.channel_prompt, spinoff_brief)
         # Show the recipient a typing indicator while the agent works on the
         # reply. The pulse is cancelled in send() once the response goes out.
         self._start_imessage_typing(conversation_id)
@@ -3813,7 +3910,24 @@ class InkboxAdapter(BasePlatformAdapter):
                 ctx_path = get_hermes_home() / "inkbox_call_contexts" / f"{ctx_token}.json"
                 if ctx_path.exists():
                     call_context = json.loads(ctx_path.read_text())
-                    # Single-use: drop the file so abandoned tokens don't pile up.
+                    # Promote-not-delete: the seed is single-use, but when it
+                    # names a durable spawn edge, bind that edge (it outlives
+                    # the seed) before dropping ONLY the ephemeral seed file.
+                    edge_id = (
+                        call_context.get("edgeId")
+                        if isinstance(call_context, dict) else None
+                    )
+                    if edge_id:
+                        def _stamp(edge: Dict[str, Any]) -> None:
+                            edge["childSessionKey"] = str(contact_id)
+                        with suppress(Exception):
+                            lineage.cas_status(
+                                edge_id,
+                                lineage.STATUS_DELIVERED,
+                                lineage.STATUS_AWAITING_REPLY,
+                                mutate=_stamp,
+                            )
+                    # Single-use: drop the seed so abandoned tokens don't pile up.
                     with suppress(Exception):
                         ctx_path.unlink()
                 else:
@@ -4575,9 +4689,373 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _enqueue(self, event: MessageEvent) -> None:
         """Dispatch an inbound event to the gateway runner as a background task."""
+        # Capture the loop so out-of-turn relay requests can hop onto it.
+        with suppress(Exception):
+            if getattr(self, "_loop", None) is None:
+                self._loop = asyncio.get_running_loop()
+
+        # Stamp the parent route into a contextvar BEFORE create_task, so the
+        # child task (and any send tool it calls) inherits A's route via the
+        # copied context — the in-repo stand-in for a host session stamp. A
+        # send made outside a spawn simply reads this and records provenance;
+        # it never changes today's behaviour when no spinoff is requested.
+        with suppress(Exception):
+            src = event.source
+            chat_id = getattr(src, "chat_id", None) if src is not None else None
+            modalities = getattr(self, "_last_inbound_modality", {}) or {}
+            turn_context.set_current_turn(
+                {
+                    "chatId": chat_id,
+                    "threadId": getattr(src, "thread_id", None) if src is not None else None,
+                    "modality": modalities.get(str(chat_id)) if chat_id else None,
+                    "contactId": chat_id,
+                    "messageId": getattr(event, "message_id", None),
+                }
+            )
+
+        # Cheap opportunistic TTL sweep so abandoned edges advance even on
+        # quiet identities that never hit the webhook drain path.
+        with suppress(Exception):
+            lineage.sweep_ttl()
+
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+    # ------------------------------------------------------------------
+    # Spin-off lineage: relay a spawned child's answer back to the parent
+    # ------------------------------------------------------------------
+
+    def schedule_relay(self, edge_id: str) -> None:
+        """Wake the parent session for ``edge_id`` on the adapter's loop.
+
+        Thread-safe entry point for the module-level relay tool, which may run
+        on a worker thread. Hops the actual relay coroutine onto the adapter's
+        event loop; the exactly-once guard lives in :meth:`relay_edge`.
+
+        Args:
+            edge_id (str): the spawn edge whose answer to relay.
+
+        Returns:
+            None
+        """
+        loop = self._loop
+        if loop is None:
+            with suppress(Exception):
+                loop = asyncio.get_event_loop()
+        if loop is None:
+            # No loop yet — the durable webhook/boot drain will pick it up.
+            logger.warning("[Inkbox] No loop for relay of edge %s; deferring to drain", edge_id)
+            return
+        # run_coroutine_threadsafe is safe from any thread, including the loop's.
+        with suppress(Exception):
+            asyncio.run_coroutine_threadsafe(self.relay_edge(edge_id), loop)
+
+    async def relay_edge(self, edge_id: str) -> None:
+        """Deliver a spawned child's distilled answer back to the parent thread.
+
+        The ``answered → relayed`` CAS below is the exactly-once gate: only the
+        caller that wins it enqueues, so the in-process fast path and the
+        webhook/boot drain can never relay the same edge twice. The parent's
+        :class:`MessageEvent` source is rebuilt from the edge's stored
+        ``parentRoute``; when that route is ephemeral (no durable thread), the
+        relay falls back to the parent contact's main session.
+
+        Args:
+            edge_id (str): the spawn edge to relay.
+
+        Returns:
+            None
+        """
+        # Claim the relay atomically. A losing/repeat call sees status !=
+        # answered and returns without enqueueing.
+        edge = lineage.cas_status(
+            edge_id, lineage.STATUS_ANSWERED, lineage.STATUS_RELAYED
+        )
+        if not edge:
+            return
+
+        route = edge.get("parentRoute") or {}
+        contact = edge.get("parentContact") or {}
+        # Prefer the captured parent route; fall back to the durable contact.
+        chat_id = str(route.get("chatId") or contact.get("contactId") or "").strip()
+        if not chat_id:
+            logger.warning("[Inkbox] Relay edge %s has no parent route/contact; dropping", edge_id)
+            return
+        thread_id = route.get("threadId")
+        modality = route.get("modality")
+        # Ephemeral parent (no durable thread captured) → route into the
+        # contact's main session so send() picks the channel by modality.
+        if modality:
+            modalities = getattr(self, "_last_inbound_modality", None)
+            if modalities is not None:
+                modalities[chat_id] = modality
+
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat_id,
+            chat_type="dm",
+            user_id=chat_id,
+            user_name=chat_id,
+            thread_id=thread_id,
+            message_id=route.get("messageId"),
+        )
+        event = MessageEvent(
+            text=self._render_relay_text(edge),
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=f"relay:{edge_id}",
+            internal=True,  # a self-directed wake, not a message from a human
+        )
+        await self._enqueue(event)
+
+    def _render_relay_text(self, edge: Dict[str, Any]) -> str:
+        """Render the parent-facing relay message for a resolved edge.
+
+        Args:
+            edge (Dict[str, Any]): the relayed edge, carrying ``brief`` and the
+                distilled ``result``.
+
+        Returns:
+            str: the internal turn text (attribution + summary + a directive to
+            pass the answer along to the person on the parent thread).
+        """
+        brief = edge.get("brief") or {}
+        intent = str(brief.get("intent") or "").strip()
+        binding = edge.get("recipientBinding") or {}
+        recipient = binding.get("address") or binding.get("conversationId") or "the contact"
+
+        # The distilled answer may be stored as a dict or a bare string.
+        result = edge.get("result")
+        if isinstance(result, dict):
+            summary = str(result.get("summary") or result.get("text") or "").strip()
+        elif isinstance(result, str):
+            summary = result.strip()
+        else:
+            summary = ""
+        if not summary:
+            summary = "(no answer summary was captured)"
+
+        lines = [f"[inkbox:spinoff-relay edge={edge.get('edgeId')}] A follow-up you delegated has come back."]
+        if intent:
+            lines.append(f"You asked: {intent}")
+        lines.append(f"Reply received from {recipient}:")
+        lines.append(summary)
+        lines.append("Pass this answer along to the person on this thread — they are waiting on it.")
+        return "\n".join(lines)
+
+    def _drain_pending_relays(self) -> None:
+        """Relay every edge stuck in ``answered`` (a durable backstop).
+
+        Covers the case where the relay tool ran out-of-process and could not
+        reach this adapter in-process: each such edge is re-scheduled here. The
+        ``answered → relayed`` CAS in :meth:`relay_edge` guarantees the drain
+        and the fast path never double-relay.
+
+        Returns:
+            None
+        """
+        try:
+            edges_dir = lineage._edges_dir()
+            if not edges_dir.exists():
+                return
+            for path in edges_dir.glob("*.json"):
+                edge = lineage._read_edge(path.stem)
+                if edge is not None and edge.get("status") == lineage.STATUS_ANSWERED:
+                    self.schedule_relay(edge["edgeId"])
+        except Exception:
+            logger.debug("[Inkbox] Relay drain skipped", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Spin-off lineage: bind an inbound reply to the edge that spawned it
+    # ------------------------------------------------------------------
+
+    def _spinoff_brief_block(self, edges: List[Dict[str, Any]]) -> str:
+        """Render bound spawn edges into a ``[Spawned thread]`` prompt block.
+
+        Args:
+            edges (List[Dict[str, Any]]): the edges this inbound just bound.
+
+        Returns:
+            str: a channel-prompt block briefing the follow-up agent, or ``""``
+            when nothing bound.
+        """
+        if not edges:
+            return ""
+        lines = [
+            "[Spawned thread] You are acting as the follow-up for a task another "
+            "conversation delegated. The message below is from the party you were "
+            "asked to reach — it is NOT the person who gave you the task. When you "
+            "have what was asked for, call inkbox_relay_answer with the matching "
+            "edge_id to send the answer back; do not treat this reply as a request "
+            "of your own.",
+        ]
+        for edge in edges:
+            brief = edge.get("brief") or {}
+            intent = str(brief.get("intent") or "").strip()
+            end_state = str(brief.get("endState") or "").strip()
+            lines.append(f"- edge_id: {edge.get('edgeId')}")
+            if intent:
+                lines.append(f"  task: {intent}")
+            if end_state:
+                lines.append(f"  done when: {end_state}")
+            for fact in brief.get("facts") or []:
+                if isinstance(fact, dict):
+                    label = str(fact.get("label") or "").strip()
+                    value = str(fact.get("value") or "").strip()
+                    if label or value:
+                        lines.append(f"  fact: {label}: {value}".rstrip(": "))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _email_reply_reference_ids(message: Dict[str, Any]) -> List[str]:
+        """Collect the outbound message ids an inbound email replies to.
+
+        Reads the In-Reply-To and References headers (References is a
+        whitespace/comma-separated chain) from whatever shape the webhook
+        surfaces them in, so a threaded reply can be matched back to the exact
+        outbound spawn send. None of these fields are guaranteed present.
+
+        Args:
+            message (Dict[str, Any]): the inbound mail message object.
+
+        Returns:
+            List[str]: de-duplicated, angle-stripped message ids (possibly
+            empty).
+        """
+        ids: List[str] = []
+
+        def _add(raw: Any) -> None:
+            # References/In-Reply-To may pack several ids separated by commas
+            # or whitespace; split on both and normalize each.
+            for tok in str(raw or "").replace(",", " ").split():
+                stripped = _strip_angle(tok)
+                if stripped and stripped not in ids:
+                    ids.append(stripped)
+
+        _add(
+            message.get("in_reply_to")
+            or message.get("inReplyTo")
+            or message.get("in_reply_to_message_id")
+        )
+        _add(message.get("references") or message.get("References"))
+        headers = message.get("headers")
+        if isinstance(headers, dict):
+            _add(headers.get("In-Reply-To") or headers.get("in-reply-to"))
+            _add(headers.get("References") or headers.get("references"))
+        return ids
+
+    def _bind_spinoff_on_inbound(
+        self,
+        *,
+        channel: str,
+        chat_id: Any,
+        address: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        header_message_ids: Optional[List[str]] = None,
+        now: Optional[float] = None,
+    ) -> str:
+        """Bind any open spawn edges this inbound answers; return their brief.
+
+        Looks up delivered edges to the sender (by outbound message id when the
+        inbound carries reply headers, else by address/conversation within the
+        bind window), transitions each ``delivered → awaiting_reply`` under the
+        ledger CAS, stamps ``childSessionKey`` = this chat, and renders the
+        matched edges into a ``[Spawned thread]`` prompt block. Runs only after
+        the caller's self/echo guard, so an outbound echo never binds.
+
+        Args:
+            channel (str): child channel — ``email``/``sms``/``imessage``.
+            chat_id (Any): the child session key to record on each edge.
+            address (Optional[str]): the sender's address/number, if any.
+            conversation_id (Optional[str]): the sender's conversation id, if
+                any (preferred for iMessage).
+            header_message_ids (Optional[List[str]]): outbound message ids the
+                inbound references (email reply headers), if any.
+            now (Optional[float]): reference time (injectable for tests).
+
+        Returns:
+            str: the ``[Spawned thread]`` block to merge into channel_prompt,
+            or ``""`` when nothing bound.
+        """
+        ref = time.time() if now is None else now
+        try:
+            # Candidate edges: everything delivered to this recipient key. A
+            # conversation id and a raw address bucket separately, so check both.
+            candidate_keys: List[str] = []
+            if conversation_id:
+                candidate_keys.append(lineage.recipient_key(channel, conversation_id))
+            if address:
+                candidate_keys.append(lineage.recipient_key(channel, address))
+
+            seen: set = set()
+            candidates: List[Dict[str, Any]] = []
+            for key in candidate_keys:
+                for edge in lineage.index_edges("recipient", key):
+                    edge_id = edge.get("edgeId")
+                    if edge_id in seen:
+                        continue
+                    seen.add(edge_id)
+                    if edge.get("status") == lineage.STATUS_DELIVERED:
+                        candidates.append(edge)
+            if not candidates:
+                return ""
+
+            header_ids = set(header_message_ids or [])
+            matched: List[Dict[str, Any]] = []
+            if header_ids:
+                # Strong match: the inbound explicitly references our outbound id.
+                for edge in candidates:
+                    out_id = (edge.get("recipientBinding") or {}).get("outboundMessageId")
+                    if out_id and _strip_angle(out_id) in header_ids:
+                        matched.append(edge)
+            if not matched:
+                # Fall back to the bind window: open edges to this sender that
+                # have not yet expired (SMS/iMessage have no threading headers).
+                for edge in candidates:
+                    until = (edge.get("recipientBinding") or {}).get("bindWindowUntil")
+                    if until is None or ref <= until:
+                        matched.append(edge)
+
+            # Stamp this inbound's chat as the child session on each bound edge.
+            def _stamp(target: Dict[str, Any]) -> None:
+                target["childSessionKey"] = str(chat_id)
+
+            bound: List[Dict[str, Any]] = []
+            for edge in matched:
+                result = lineage.cas_status(
+                    edge["edgeId"],
+                    lineage.STATUS_DELIVERED,
+                    lineage.STATUS_AWAITING_REPLY,
+                    mutate=_stamp,
+                )
+                if result:
+                    bound.append(result)
+            return self._spinoff_brief_block(bound)
+        except Exception:
+            # Binding is best-effort provenance; a ledger error must never
+            # change today's inbound behaviour, so fail safe to "no bind".
+            logger.debug("[Inkbox] Spin-off bind skipped", exc_info=True)
+            return ""
+
+    @staticmethod
+    def _merge_spinoff_brief(channel_prompt: Optional[str], brief_block: str) -> Optional[str]:
+        """Prepend a bound-edge brief block to an existing channel prompt.
+
+        Args:
+            channel_prompt (Optional[str]): the prompt already resolved for this
+                inbound, if any.
+            brief_block (str): the ``[Spawned thread]`` block (may be empty).
+
+        Returns:
+            Optional[str]: the merged prompt, the brief alone, or the original
+            prompt unchanged when there is nothing to merge.
+        """
+        if not brief_block:
+            return channel_prompt
+        if channel_prompt:
+            return f"{brief_block}\n\n{channel_prompt}"
+        return brief_block
 
 
 # ---------------------------------------------------------------------------

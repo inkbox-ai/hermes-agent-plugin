@@ -94,3 +94,7 @@ provides_tools:
   - inkbox_send_imessage_reaction
   - inkbox_mark_imessage_conversation_read
   - inkbox_place_call
+  - inkbox_relay_answer
+  - inkbox_spinoff_list
+  - inkbox_lineage_status
+  - inkbox_spinoff_origin

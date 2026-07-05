@@ -101,6 +101,10 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_send_imessage_reaction",
         "inkbox_mark_imessage_conversation_read",
         "inkbox_place_call",
+        "inkbox_relay_answer",
+        "inkbox_spinoff_list",
+        "inkbox_lineage_status",
+        "inkbox_spinoff_origin",
     }
     assert _manifest_provides_tools() == tool_names
 

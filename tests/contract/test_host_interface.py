@@ -24,8 +24,33 @@ HOST_SYMBOLS = {
     "gateway.platforms.base": ["BasePlatformAdapter", "MessageEvent", "MessageType", "SendResult"],
     "gateway.platforms.helpers": ["redact_phone"],
     "gateway.session": ["build_session_key"],
+    # The send tools read the current turn's session env through this seam
+    # (tools.py get_session_env import); the spin-off lineage layer rides it too.
+    "gateway.session_context": ["get_session_env"],
     "hermes_cli.config": ["save_env_value", "get_env_value", "load_config"],
 }
+
+# The complete field set the plugin ever passes to an inbound/relay MessageEvent
+# (see adapter.py). The spin-off lineage layer deliberately adds NOTHING to this
+# — it reuses ``internal`` (relay wake) and ``channel_prompt`` (the injected
+# "[Spawned thread]" brief) — so this set stays frozen. A red diff here means the
+# feature reached for a new host field instead of an existing seam.
+PLUGIN_MESSAGE_EVENT_FIELDS = frozenset(
+    {
+        "text",
+        "message_type",
+        "source",
+        "raw_message",
+        "message_id",
+        "auto_skill",
+        "channel_prompt",
+        "media_urls",
+        "media_types",
+        "reply_to_message_id",
+        "internal",
+        "timestamp",
+    }
+)
 
 
 @pytest.mark.parametrize("module, names", list(HOST_SYMBOLS.items()))
@@ -89,3 +114,55 @@ def test_base_adapter_methods_present(method):
     assert hasattr(BasePlatformAdapter, method), (
         f"BasePlatformAdapter.{method} is missing — Hermes host interface drifted"
     )
+
+
+def test_spinoff_relay_rides_existing_message_event():
+    """The relay wake + bind brief ride existing MessageEvent fields, not new ones.
+
+    The lineage layer wakes the parent thread by enqueuing a self-directed
+    ``MessageEvent(internal=True, ...)`` (adapter.py ``relay_edge``) and injects
+    the "[Spawned thread]" brief through the ephemeral ``channel_prompt`` seam on
+    the child's inbound turn. This exercises exactly that combination against the
+    real host so a dropped/renamed field surfaces here, not in production.
+    """
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    # The relay wake: internal self-turn carrying the distilled answer.
+    MessageEvent(
+        text="[relay] the answer is 42",
+        message_type=MessageType.TEXT,
+        source=None,
+        message_id="relay:edge123",
+        internal=True,
+    )
+    # The bind side: the spawn brief merged into channel_prompt on a real inbound.
+    MessageEvent(
+        text="hi",
+        message_type=MessageType.TEXT,
+        source=None,
+        message_id="m1",
+        channel_prompt="[Spawned thread] acting on behalf of A — ask B for X.",
+        internal=False,
+    )
+
+
+def test_message_event_gains_no_new_plugin_field():
+    """The plugin's MessageEvent field set is a frozen subset of the host's.
+
+    The spin-off lineage layer must ride existing seams only: it introduces no
+    new host symbol and no new MessageEvent field. We assert every field the
+    plugin passes still exists on the real host constructor, and that the frozen
+    plugin field set matches what the acceptance test above constructs — so any
+    future edit that reaches for a brand-new host field trips this guard.
+    """
+    from gateway.platforms.base import MessageEvent
+
+    host_params = set(inspect.signature(MessageEvent).parameters)
+    unknown = PLUGIN_MESSAGE_EVENT_FIELDS - host_params
+    assert not unknown, (
+        f"MessageEvent no longer accepts plugin fields {sorted(unknown)} "
+        "— Hermes host interface drifted"
+    )
+    # The two seams the lineage feature relies on must remain real fields, not
+    # something the feature would have had to add to the host contract.
+    assert {"internal", "channel_prompt"} <= PLUGIN_MESSAGE_EVENT_FIELDS <= host_params
