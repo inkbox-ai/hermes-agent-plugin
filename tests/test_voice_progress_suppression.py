@@ -48,6 +48,14 @@ def test_clock_prefixed_human_reply_is_not_admin_notice():
     assert _is_hermes_admin_notice("⏰ Meeting starts at 5.") is False
 
 
+def test_session_search_progress_ping_is_admin_notice():
+    # 🔍 (U+1F50D) is the session/memory-search narration glyph. Its twin 🔎
+    # was already dropped unconditionally; 🔍 leaked because it only lived in
+    # the stricter tool-call-shaped list, and "🔍 searching past sessions" is
+    # prose, not "name(...)" — so the tail regex never matched it.
+    assert _is_hermes_admin_notice("🔍 searching past sessions") is True
+
+
 def test_voice_calls_do_not_support_tool_progress():
     adapter = _bare_adapter()
     adapter._active_call_ws["contact-voice"] = object()
