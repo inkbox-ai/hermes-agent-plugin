@@ -3804,7 +3804,7 @@ class InkboxAdapter(BasePlatformAdapter):
         ws = web.WebSocketResponse()
 
         async def _prepare_call_ws(
-            *, use_realtime: bool, use_agent: bool = False,
+            *, use_realtime: bool = False, use_agent: bool = False,
         ) -> None:
             if use_agent:
                 # Platform-hosted agent mode: the platform runs the whole voice
