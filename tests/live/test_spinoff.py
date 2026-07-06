@@ -287,14 +287,17 @@ def test_spinoff_delegation_relays_answer_once(sx):
                 if st:
                     seen_status.add(st)
 
-    def _await_status(target: str, window: float) -> bool:
-        # Poll the on-disk edge until it is observed in `target`. This is the
-        # model-independent proof: it does not depend on what the agent chooses
-        # to write in an email, only on the lineage machinery advancing.
+    def _await_status(targets, window: float) -> bool:
+        # Poll the on-disk edge until it is observed in any of `targets`. This is
+        # the model-independent proof: it does not depend on what the agent
+        # chooses to write in an email, only on the lineage machinery advancing.
+        # `targets` may be one status or a set (an at-or-past-this-stage gate),
+        # since a fast relay can skip a transient state between polls.
+        want = {targets} if isinstance(targets, str) else set(targets)
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
             _accumulate_statuses()
-            if target in seen_status:
+            if seen_status & want:
                 return True
             time.sleep(POLL_EVERY_S)
         return False
@@ -326,7 +329,9 @@ def test_spinoff_delegation_relays_answer_once(sx):
 
     # 3) STRUCTURAL PROOF (model-independent) — staged so a failure names the
     # exact stage that broke: B's reply must BIND the edge, then the relay fires.
-    assert _await_status("awaiting_reply", TIMEOUT_S), (
+    # `awaiting_reply` is transient (a fast relay skips it between polls), so the
+    # bind is proven by reaching it OR any later state — `relayed` implies it.
+    assert _await_status({"awaiting_reply", "answered", "relayed"}, TIMEOUT_S), (
         f"B's reply never bound the edge (saw {sorted(seen_status)}) — bind failed"
     )
     assert _await_status("relayed", TIMEOUT_S), (
