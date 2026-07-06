@@ -4836,12 +4836,30 @@ class InkboxAdapter(BasePlatformAdapter):
         if not summary:
             summary = "(no answer summary was captured)"
 
+        # Name the send tool for the originating party's channel so the agent has
+        # an unambiguous action (an internal wake is NOT auto-delivered).
+        modality = str(
+            (edge.get("parentReplyTarget") or {}).get("modality")
+            or (edge.get("parentRoute") or {}).get("modality")
+            or ""
+        ).lower()
+        send_tool = {
+            "email": "inkbox_send_email",
+            "sms": "inkbox_send_sms",
+            "imessage": "inkbox_send_imessage",
+        }.get(modality, "the send tool for their channel")
+
         lines = [f"[inkbox:spinoff-relay edge={edge.get('edgeId')}] A follow-up you delegated has come back."]
         if intent:
             lines.append(f"You asked: {intent}")
         lines.append(f"Reply received from {recipient}:")
         lines.append(summary)
-        lines.append("Pass this answer along to the person on this thread — they are waiting on it.")
+        lines.append(
+            "This is an internal note — it is NOT delivered to anyone on its own. To finish the task, "
+            f"send this answer to the person who asked (the contact on this thread) by calling {send_tool} now, "
+            "quoting any exact codes, numbers, names, or times verbatim. If the request is stale or already "
+            "handled, you may skip it instead."
+        )
         return "\n".join(lines)
 
     def _drain_pending_relays(self) -> None:
