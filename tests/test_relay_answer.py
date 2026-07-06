@@ -11,17 +11,18 @@ and proves the genuine relay enqueue that the tool schedules:
 * ``satisfied=false`` leaves the edge ``awaiting_reply`` so the brief keeps
   riding future turns until a real answer lands;
 * the ``awaiting_reply → answered`` claim is exactly-once: two concurrent relay
-  calls for one edge produce exactly ONE enqueue, and the loser no-ops;
-* the enqueued parent-facing :class:`MessageEvent` is ``internal=True`` with its
-  source rebuilt from the edge's stored ``parentRoute`` and its text carrying the
-  attribution (who answered) plus the distilled summary.
+  calls for one edge produce exactly ONE delivery, and the loser no-ops;
+* ``relay_edge`` delivers the distilled answer straight to the parent via
+  ``send()`` (routed by the stored ``parentRoute`` channel + chat id, no agent
+  turn in the loop), and holds a stale answer (``stale_held``) rather than
+  auto-sending it to a human who asked long ago.
 
 Every assertion is deterministic and runs fully offline: the ledger's
 ``_hermes_home`` seam is redirected at ``tmp_path``, the per-turn caller identity
-is stubbed on ``tools._current_session_thread_id``, and the in-process adapter is
-a capturing fake. The one test that exercises the real ``relay_edge`` primitive
-drives a bare ``InkboxAdapter`` with a monkeypatched ``_enqueue``, the same stub
-pattern the sibling adapter tests use — no gateway host required.
+is stubbed on ``tools._current_session_chat_id``, and the in-process adapter is
+a capturing fake. The tests that exercise the real ``relay_edge`` primitive drive
+a bare ``InkboxAdapter`` with a monkeypatched ``send``, the same stub pattern the
+sibling adapter tests use — no gateway host required.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import asyncio
 import json
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -286,62 +288,70 @@ def _seed_answered_edge(store):
     return edge
 
 
-def _relay_adapter(events):
-    """A bare adapter wired with only what relay_edge touches (capturing enqueue)."""
+def _relay_adapter(sends):
+    """A bare adapter wired with only what relay_edge touches (capturing send)."""
     adapter = object.__new__(InkboxAdapter)
     adapter._last_inbound_modality = {}
 
-    async def _enqueue(event):
-        events.append(event)
+    async def _send(chat_id, content, reply_to=None, metadata=None):
+        sends.append({"chat_id": chat_id, "content": content, "metadata": metadata or {}})
+        return adapter_mod.SendResult(success=True, message_id="relayed-1")
 
-    adapter._enqueue = _enqueue
+    adapter.send = _send
     return adapter
 
 
-def test_relay_edge_enqueues_internal_wake_from_parent_route(adapter_ledger):
+def test_relay_edge_delivers_answer_to_parent_directly(adapter_ledger):
     store = adapter_mod.lineage
     edge = _seed_answered_edge(store)
 
-    events = []
-    adapter = _relay_adapter(events)
+    sends = []
+    adapter = _relay_adapter(sends)
     asyncio.run(adapter.relay_edge(edge["edgeId"]))
 
     # Exactly-once claim consumed: the edge is now relayed.
     assert store._read_edge(edge["edgeId"])["status"] == store.STATUS_RELAYED
 
-    # One internal wake enqueued back to the parent thread.
-    assert len(events) == 1
-    event = events[0]
-    assert event.internal is True
-    assert event.message_type == adapter_mod.MessageType.TEXT
-    assert event.message_id == f"relay:{edge['edgeId']}"
-
-    # Source rebuilt from the stored parentRoute (chat_id / thread_id), so the
-    # wake lands on A's conversation without any host session stamp.
-    assert event.source.chat_id == "chat-A"
-    assert event.source.thread_id == "email:thread-A"
-    # Modality was promoted onto the routing map so send() picks A's channel.
-    assert adapter._last_inbound_modality.get("chat-A") == "email"
-
-    # Text carries the attribution (who answered) plus the distilled summary.
-    assert "alex@example.com" in event.text
-    assert "Q3 revenue was 4.2M" in event.text
-    assert "ask Alex for the Q3 revenue figure" in event.text
+    # The answer was delivered straight to A's conversation — no agent turn.
+    assert len(sends) == 1
+    call = sends[0]
+    assert call["chat_id"] == "chat-A"                        # from parentRoute
+    assert call["metadata"].get("mode") == "email"            # A's channel
+    assert "Q3 revenue was 4.2M" in call["content"]           # the distilled answer
+    assert "alex@example.com" in call["content"]              # attribution
+    assert "ask Alex for the Q3 revenue figure" in call["content"]
 
 
 def test_relay_edge_is_exactly_once_across_two_calls(adapter_ledger):
     # A second relay of the same edge (e.g. fast path + durable drain) must find
-    # it already out of `answered` and enqueue nothing.
+    # it already out of `answered` and deliver nothing.
     store = adapter_mod.lineage
     edge = _seed_answered_edge(store)
 
-    events = []
-    adapter = _relay_adapter(events)
+    sends = []
+    adapter = _relay_adapter(sends)
     asyncio.run(adapter.relay_edge(edge["edgeId"]))
     asyncio.run(adapter.relay_edge(edge["edgeId"]))
 
-    assert len(events) == 1  # the answered→relayed CAS gated the duplicate
+    assert len(sends) == 1  # the answered→relayed CAS gated the duplicate
     assert store._read_edge(edge["edgeId"])["status"] == store.STATUS_RELAYED
+
+
+def test_relay_edge_holds_stale_answer_instead_of_auto_sending(adapter_ledger):
+    # An answer that returns long after the parent asked must NOT be auto-sent to
+    # a human — it is held (stale_held) for follow-up.
+    store = adapter_mod.lineage
+    edge = _seed_answered_edge(store)
+    stale = store._read_edge(edge["edgeId"])
+    stale["createdAt"] = time.time() - (adapter_mod.RELAY_AUTO_DELIVER_MAX_AGE_S + 3600)
+    store._persist(stale)
+
+    sends = []
+    adapter = _relay_adapter(sends)
+    asyncio.run(adapter.relay_edge(edge["edgeId"]))
+
+    assert len(sends) == 0
+    assert store._read_edge(edge["edgeId"])["status"] == store.STATUS_STALE_HELD
 
 
 def test_relay_authorized_tolerates_identity_shapes():

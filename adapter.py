@@ -174,6 +174,10 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
+# A spin-off answer that comes back within this window of the original ask is
+# delivered straight to the parent; older answers are held (stale_held) rather
+# than auto-sent to a human who has likely moved on.
+RELAY_AUTO_DELIVER_MAX_AGE_S = 6 * 3600
 
 # Injected as the per-turn system prompt whenever an external event wakes the
 # agent. The agent's text reply on an external thread is not delivered to a
@@ -4752,14 +4756,15 @@ class InkboxAdapter(BasePlatformAdapter):
             asyncio.run_coroutine_threadsafe(self.relay_edge(edge_id), loop)
 
     async def relay_edge(self, edge_id: str) -> None:
-        """Deliver a spawned child's distilled answer back to the parent thread.
+        """Deliver a spawned child's distilled answer back to the parent, directly.
 
         The ``answered → relayed`` CAS below is the exactly-once gate: only the
-        caller that wins it enqueues, so the in-process fast path and the
-        webhook/boot drain can never relay the same edge twice. The parent's
-        :class:`MessageEvent` source is rebuilt from the edge's stored
-        ``parentRoute``; when that route is ephemeral (no durable thread), the
-        relay falls back to the parent contact's main session.
+        caller that wins it delivers, so the in-process fast path and the
+        webhook/boot drain can never relay the same edge twice. A *fresh* answer
+        is sent straight to the originating party via :meth:`send` — deterministic,
+        with no agent turn in the loop — routed by the parent's captured channel.
+        A *stale* answer (the parent asked long enough ago that they may have
+        moved on) is held as ``stale_held`` rather than auto-sent to a human.
 
         Args:
             edge_id (str): the spawn edge to relay.
@@ -4767,58 +4772,66 @@ class InkboxAdapter(BasePlatformAdapter):
         Returns:
             None
         """
-        # Claim the relay atomically. A losing/repeat call sees status !=
-        # answered and returns without enqueueing.
-        edge = lineage.cas_status(
-            edge_id, lineage.STATUS_ANSWERED, lineage.STATUS_RELAYED
-        )
+        edge = lineage._read_edge(edge_id)
+        if not edge or edge.get("status") != lineage.STATUS_ANSWERED:
+            return
+
+        # Staleness guard: never auto-fire an answer at a human long after they
+        # asked — hold it for follow-up instead of surprising them out of context.
+        created = edge.get("createdAt") or 0
+        if created and (time.time() - created) > RELAY_AUTO_DELIVER_MAX_AGE_S:
+            lineage.cas_status(edge_id, lineage.STATUS_ANSWERED, lineage.STATUS_STALE_HELD)
+            logger.info("[Inkbox] Relay edge %s held (answer is stale); not auto-delivered", edge_id)
+            return
+
+        # Claim the relay atomically. A losing/repeat call sees status != answered.
+        edge = lineage.cas_status(edge_id, lineage.STATUS_ANSWERED, lineage.STATUS_RELAYED)
         if not edge:
             return
 
         route = edge.get("parentRoute") or {}
         contact = edge.get("parentContact") or {}
-        # Prefer the captured parent route; fall back to the durable contact.
+        # Prefer the captured parent route; fall back to the durable contact id.
         chat_id = str(route.get("chatId") or contact.get("contactId") or "").strip()
         if not chat_id:
             logger.warning("[Inkbox] Relay edge %s has no parent route/contact; dropping", edge_id)
             return
-        thread_id = route.get("threadId")
-        modality = route.get("modality")
-        # Ephemeral parent (no durable thread captured) → route into the
-        # contact's main session so send() picks the channel by modality.
-        if modality:
-            modalities = getattr(self, "_last_inbound_modality", None)
-            if modalities is not None:
-                modalities[chat_id] = modality
 
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=chat_id,
-            chat_type="dm",
-            user_id=chat_id,
-            user_name=chat_id,
-            thread_id=thread_id,
-            message_id=route.get("messageId"),
-        )
-        event = MessageEvent(
-            text=self._render_relay_text(edge),
-            message_type=MessageType.TEXT,
-            source=source,
-            message_id=f"relay:{edge_id}",
-            internal=True,  # a self-directed wake, not a message from a human
-        )
-        await self._enqueue(event)
+        # Route to the parent's channel. An ephemeral origin (a voice call that is
+        # long gone by now) falls back to email so the answer still lands somewhere
+        # the parent can actually read it — send() resolves the address from chat_id.
+        modality = str(
+            route.get("modality")
+            or (edge.get("parentReplyTarget") or {}).get("modality")
+            or "email"
+        ).lower()
+        if modality in ("voice", "call", ""):
+            modality = "email"
+
+        text = self._render_relay_text(edge)
+        try:
+            result = await self.send(chat_id, text, metadata={"mode": modality})
+            if not getattr(result, "success", True):
+                logger.warning(
+                    "[Inkbox] Relay edge %s delivery failed: %s",
+                    edge_id, getattr(result, "error", "unknown"),
+                )
+        except Exception:
+            logger.warning("[Inkbox] Relay edge %s delivery raised", edge_id, exc_info=True)
 
     def _render_relay_text(self, edge: Dict[str, Any]) -> str:
-        """Render the parent-facing relay message for a resolved edge.
+        """Render the parent-facing answer message for a resolved edge.
+
+        This text is delivered straight to the originating party, so it reads as
+        a normal human-facing note — what they asked, who replied, and the
+        distilled answer — with no tool directives.
 
         Args:
             edge (Dict[str, Any]): the relayed edge, carrying ``brief`` and the
                 distilled ``result``.
 
         Returns:
-            str: the internal turn text (attribution + summary + a directive to
-            pass the answer along to the person on the parent thread).
+            str: the message to send to the parent.
         """
         brief = edge.get("brief") or {}
         intent = str(brief.get("intent") or "").strip()
@@ -4836,30 +4849,10 @@ class InkboxAdapter(BasePlatformAdapter):
         if not summary:
             summary = "(no answer summary was captured)"
 
-        # Name the send tool for the originating party's channel so the agent has
-        # an unambiguous action (an internal wake is NOT auto-delivered).
-        modality = str(
-            (edge.get("parentReplyTarget") or {}).get("modality")
-            or (edge.get("parentRoute") or {}).get("modality")
-            or ""
-        ).lower()
-        send_tool = {
-            "email": "inkbox_send_email",
-            "sms": "inkbox_send_sms",
-            "imessage": "inkbox_send_imessage",
-        }.get(modality, "the send tool for their channel")
-
-        lines = [f"[inkbox:spinoff-relay edge={edge.get('edgeId')}] A follow-up you delegated has come back."]
+        lines = []
         if intent:
-            lines.append(f"You asked: {intent}")
-        lines.append(f"Reply received from {recipient}:")
-        lines.append(summary)
-        lines.append(
-            "This is an internal note — it is NOT delivered to anyone on its own. To finish the task, "
-            f"send this answer to the person who asked (the contact on this thread) by calling {send_tool} now, "
-            "quoting any exact codes, numbers, names, or times verbatim. If the request is stale or already "
-            "handled, you may skip it instead."
-        )
+            lines.append(f"Following up on what you asked ({intent}) —")
+        lines.append(f"{recipient} replied: {summary}")
         return "\n".join(lines)
 
     def _drain_pending_relays(self) -> None:
