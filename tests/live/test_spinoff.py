@@ -377,7 +377,9 @@ def test_spinoff_delegation_relays_answer_once(sx):
         raise AssertionError(
             f"edge relayed but B's answer ({ans}) never reached A's inbox — "
             f"nonce_in_stored_summary={ans in stored}; "
-            f"delivery={fresh.get('relayDelivery')}; summary={stored[:180]!r}"
+            f"delivery={fresh.get('relayDelivery')}; "
+            f"parentRoute={fresh.get('parentRoute')}; parentContact={fresh.get('parentContact')}; "
+            f"parentSessionKey={fresh.get('parentSessionKey')!r}; summary={stored[:120]!r}"
         )
     assert len(relay) == 1, "expected exactly one relayed answer to A"
 
