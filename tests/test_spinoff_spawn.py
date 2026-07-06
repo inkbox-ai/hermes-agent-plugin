@@ -323,3 +323,22 @@ def test_place_call_spinoff_writes_edge_id_into_capsule(home, monkeypatch, tmp_p
     assert edge["status"] == lineage.STATUS_DELIVERED
     assert edge["channelChild"] == "voice"
     assert edge["recipientBinding"]["outboundMessageId"] == "call-777"
+
+
+def test_current_turn_route_falls_back_to_host_chat_id(monkeypatch):
+    """When the plugin contextvar does not propagate into tool execution, the
+    parent chat id must still come from the host-stamped session env — otherwise
+    the relay has no address to deliver the answer to.
+    """
+    import tools as tools_mod
+
+    tools_mod.turn_context._CURRENT_TURN.set(None)  # contextvar lost (real case)
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "contact-A")
+    monkeypatch.setenv("HERMES_SESSION_THREAD_ID", "email:thread-A")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "sess-A")
+
+    route = tools_mod._current_turn_route()
+    assert route is not None
+    assert route["chatId"] == "contact-A"       # the anchor relay_edge routes on
+    assert route["contactId"] == "contact-A"
+    assert route["sessionThreadId"] == "sess-A"

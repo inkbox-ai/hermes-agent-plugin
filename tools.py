@@ -1299,38 +1299,48 @@ def _current_channel_hint() -> str | None:
 def _current_turn_route() -> Optional[Dict[str, Any]]:
     """Best-effort parent route for the current agent turn.
 
-    Primary source is the plugin-owned contextvar the adapter stamps in
-    ``_enqueue``; the child task and its tool calls inherit it. Falls back to the
-    host session env (a forward-compatible enhancement if the host ever stamps
-    ``HERMES_SESSION_KEY``/``HERMES_ORIGIN_TURN_ID``), and finally to ``None`` so
-    a CLI/test invocation degrades gracefully — the spin-off edge is still
-    created, but with an empty parent route.
+    The routing-critical ids (chat id / thread / message) come from the
+    host-stamped per-turn session env, which reliably reaches tool execution —
+    unlike the plugin contextvar, which can be lost across the thread/process
+    boundary where tools run, leaving the relay with no address to send to. The
+    contextvar, when present, only supplies extra hints (modality / reply
+    target). Returns ``None`` for a CLI/test invocation with no session at all,
+    so the spin-off edge is still created with an empty route and the relay
+    simply degrades.
 
     Returns:
         Optional[Dict[str, Any]]: the parent route descriptor, or ``None``.
     """
-    route = turn_context.get_current_turn()
-    if route:
-        return route
-    # Forward-compatible fallback: read any host-stamped session env (guarded +
-    # lazy, mirroring _current_channel_hint).
-    try:
-        from gateway.session_context import get_session_env
+    ctx = turn_context.get_current_turn() or {}
 
-        skey = get_session_env("HERMES_SESSION_KEY", "") or ""
-        tid = get_session_env("HERMES_SESSION_THREAD_ID", "") or ""
-        origin = get_session_env("HERMES_ORIGIN_TURN_ID", "") or ""
+    # Host session env — guarded + lazy, mirroring _current_channel_hint.
+    try:
+        from gateway.session_context import get_session_env as _gse
+
+        def _env(key: str) -> str:
+            return (_gse(key, "") or "").strip()
     except Exception:
-        skey = os.environ.get("HERMES_SESSION_KEY", "") or ""
-        tid = os.environ.get("HERMES_SESSION_THREAD_ID", "") or ""
-        origin = os.environ.get("HERMES_ORIGIN_TURN_ID", "") or ""
-    if not (skey or tid or origin):
-        return None
-    return {
-        "sessionThreadId": skey or tid or None,
-        "threadId": tid or None,
-        "messageId": origin or None,
+        def _env(key: str) -> str:
+            return (os.environ.get(key, "") or "").strip()
+
+    # HERMES_SESSION_CHAT_ID is the contact/chat the relay must route back to and
+    # the value send() resolves an address from; it is the reliable anchor here.
+    chat_id = _env("HERMES_SESSION_CHAT_ID")
+    thread_id = _env("HERMES_SESSION_THREAD_ID")
+    message_id = _env("HERMES_SESSION_MESSAGE_ID") or _env("HERMES_ORIGIN_TURN_ID")
+
+    route = {
+        "sessionThreadId": ctx.get("sessionThreadId") or _env("HERMES_SESSION_KEY") or thread_id or None,
+        "chatId": ctx.get("chatId") or chat_id or None,
+        "contactId": ctx.get("contactId") or chat_id or None,
+        "threadId": ctx.get("threadId") or thread_id or None,
+        "modality": ctx.get("modality") or None,
+        "messageId": ctx.get("messageId") or message_id or None,
+        "replyTo": ctx.get("replyTo") or None,
     }
+    if not any(route.values()):
+        return None
+    return route
 
 
 def _resolve_call_origination(identity, explicit: str) -> str | None:
