@@ -4809,15 +4809,23 @@ class InkboxAdapter(BasePlatformAdapter):
             modality = "email"
 
         text = self._render_relay_text(edge)
+        ok, err = False, None
         try:
             result = await self.send(chat_id, text, metadata={"mode": modality})
-            if not getattr(result, "success", True):
-                logger.warning(
-                    "[Inkbox] Relay edge %s delivery failed: %s",
-                    edge_id, getattr(result, "error", "unknown"),
-                )
-        except Exception:
+            ok = bool(getattr(result, "success", True))
+            if not ok:
+                err = getattr(result, "error", "unknown")
+                logger.warning("[Inkbox] Relay edge %s delivery failed: %s", edge_id, err)
+        except Exception as exc:  # noqa: BLE001 - delivery must never crash the turn
+            err = repr(exc)
             logger.warning("[Inkbox] Relay edge %s delivery raised", edge_id, exc_info=True)
+
+        # Record a best-effort delivery marker for observability (does not gate
+        # the relay — the answered→relayed CAS above already made it exactly-once).
+        with suppress(Exception):
+            latest = lineage._read_edge(edge_id) or edge
+            latest["relayDelivery"] = {"ok": ok, "mode": modality, "error": err}
+            lineage._persist(latest)
 
     def _render_relay_text(self, edge: Dict[str, Any]) -> str:
         """Render the parent-facing answer message for a resolved edge.

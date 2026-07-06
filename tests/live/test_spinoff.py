@@ -369,7 +369,16 @@ def test_spinoff_delegation_relays_answer_once(sx):
             relay = hits
             break
         time.sleep(POLL_EVERY_S)
-    assert relay is not None, f"edge relayed but B's answer ({ans}) never reached A's inbox"
+    if relay is None:
+        # Pinpoint the cause: did the child capture the nonce, and did delivery
+        # succeed? (Read fresh — relay_edge stamps the delivery marker.)
+        fresh = _read_edge_file(f"{edge['edgeId']}.json") or edge
+        stored = str((fresh.get("result") or {}).get("summary") or "")
+        raise AssertionError(
+            f"edge relayed but B's answer ({ans}) never reached A's inbox — "
+            f"nonce_in_stored_summary={ans in stored}; "
+            f"delivery={fresh.get('relayDelivery')}; summary={stored[:180]!r}"
+        )
     assert len(relay) == 1, "expected exactly one relayed answer to A"
 
     # n5: replay B's answer; the answered->relayed CAS must keep it to ONE relay.

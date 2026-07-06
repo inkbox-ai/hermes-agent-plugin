@@ -2059,7 +2059,7 @@ RELAY_ANSWER_SCHEMA = {
         "type": "object",
         "properties": {
             "edge_id": {"type": "string", "description": "The spin-off edge id you are answering (from inkbox_spinoff_origin)."},
-            "summary": {"type": "string", "description": "Distilled answer to relay back to the originator. Required when satisfied is true."},
+            "summary": {"type": "string", "description": "The answer to relay back to the originator, distilled to the point but INCLUDING the exact content they need — any specific codes, numbers, names, dates, or wording quoted verbatim. Required when satisfied is true."},
             "satisfied": {"type": "boolean", "description": "True if this completes the delegated task; false keeps the spin-off open."},
             "fields": {
                 "type": "array",
