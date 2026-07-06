@@ -192,14 +192,10 @@ def test_channel_inject_and_update_instructions():
     }
 
 
-def test_channel_tool_decision_and_hang_up():
+def test_channel_hang_up():
     ws = _FakeWS()
-    asyncio.run(_channel(ws).tool_decision("t-1", "approve"))
     asyncio.run(_channel(ws).hang_up(reason="done"))
-    assert json.loads(ws.sent[0]) == {
-        "event": "tool.decision", "tool_call_id": "t-1", "decision": "approve",
-    }
-    assert json.loads(ws.sent[1]) == {"event": "hang_up", "reason": "done"}
+    assert json.loads(ws.sent[0]) == {"event": "hang_up", "reason": "done"}
 
 
 # ── meta from WS-resolved context ────────────────────────────────────────────
@@ -330,6 +326,187 @@ def test_call_ended_without_actions_enqueues_reflection():
 
     assert len(captured) == 1
     assert "[call_ended]" in captured[0].text
+
+
+def test_call_ended_action_dict_details_are_json_not_repr():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+    event = {
+        "event": "call.ended",
+        "post_call_actions": [
+            {"action": "look it up", "details": {"query": "order status"}},
+        ],
+        "transcript": [],
+    }
+
+    asyncio.run(a._hosted_dispatch_event(_channel(_FakeWS()), event, _call_meta()))
+
+    assert len(captured) == 1
+    # Dict details render as JSON, never a Python repr with single quotes.
+    assert '{"query": "order status"}' in captured[0].text
+    assert "{'query'" not in captured[0].text
+
+
+# ── call.ended lifecycle webhook ─────────────────────────────────────────────
+
+
+def _call_ended_envelope(**call_overrides):
+    """Build a ``call.ended`` webhook envelope with an inline transcript."""
+    call = {
+        "id": "call-web-1",
+        "origin": "dedicated_number",
+        "remote_phone_number": "+15550002222",
+        "direction": "inbound",
+        "status": "completed",
+        "use_inkbox_agent": True,
+    }
+    call.update(call_overrides)
+    return {
+        "event_type": "call.ended",
+        "data": {
+            "call": call,
+            "contacts": [{"id": "c-web-1", "name": "Dana"}],
+            "agent_identities": [],
+            "transcript": {
+                "entries": [
+                    {"party": "remote", "text": "hi there", "ts_ms": 0},
+                    {"marker": "abridged", "omitted_turns": 3, "omitted_ms": 9000},
+                    {"party": "local", "text": "all set", "ts_ms": 12000},
+                ],
+                "abridged": True,
+                "url": "https://example.test/api/v1/phone/calls/call-web-1/transcripts",
+            },
+            "transcript_url": "https://example.test/api/v1/phone/calls/call-web-1/transcripts",
+        },
+    }
+
+
+def test_on_call_ended_webhook_reflects_with_inline_transcript():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+
+    resp = asyncio.run(a._on_call_ended(_call_ended_envelope()))
+
+    assert resp.status == 200
+    assert len(captured) == 1
+    body = captured[0].text
+    assert "[call_ended]" in body
+    # Inline transcript turns thread through; the abridged marker is dropped.
+    assert "remote: hi there" in body
+    assert "local: all set" in body
+    assert "abridged" not in body
+
+
+def test_on_call_ended_webhook_dedupes_redeliveries():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+    envelope = _call_ended_envelope()
+
+    # First delivery reflects; a webhook re-delivery for the same call_id is
+    # dropped by the claim but still 200s.
+    asyncio.run(a._on_call_ended(envelope))
+    asyncio.run(a._on_call_ended(envelope))
+
+    assert len(captured) == 1
+
+
+def test_on_call_ended_webhook_defers_to_supervised_ws():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+    envelope = _call_ended_envelope()
+    # A live supervisor WS owns this call — the richer WS frame reflects it, so
+    # the transcript-only webhook defers (no enqueue) but still 200s.
+    a._mark_supervised_call("call-web-1")
+
+    resp = asyncio.run(a._on_call_ended(envelope))
+
+    assert resp.status == 200
+    assert captured == []
+
+
+def test_on_call_ended_webhook_reflects_after_supervisor_closed():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+    envelope = _call_ended_envelope()
+    # Supervisor opened then closed (e.g. abnormal end) without reflecting; the
+    # webhook is now the only handover and must reflect.
+    a._mark_supervised_call("call-web-1")
+    a._clear_supervised_call("call-web-1")
+
+    asyncio.run(a._on_call_ended(envelope))
+
+    assert len(captured) == 1
+
+
+def test_on_call_ended_webhook_without_inline_transcript():
+    a = _adapter()
+    captured = []
+
+    async def fake_enqueue(event):
+        captured.append(event)
+
+    a._enqueue = fake_enqueue
+    envelope = _call_ended_envelope(use_inkbox_agent=False)
+    envelope["data"].pop("transcript", None)  # non-hosted: no inline transcript
+
+    resp = asyncio.run(a._on_call_ended(envelope))
+
+    assert resp.status == 200
+    assert len(captured) == 1
+    assert "[call_ended]" in captured[0].text
+
+
+def test_webhook_call_transcript_skips_markers():
+    turns = InkboxAdapter._webhook_call_transcript({
+        "entries": [
+            {"party": "remote", "text": "one"},
+            {"marker": "abridged", "omitted_turns": 2},
+            {"party": "local", "text": "two"},
+            {"party": "remote", "text": ""},  # empty text dropped
+        ],
+    })
+    assert turns == [("remote", "one"), ("local", "two")]
+
+
+def test_webhook_call_transcript_handles_missing_block():
+    assert InkboxAdapter._webhook_call_transcript(None) == []
+    assert InkboxAdapter._webhook_call_transcript({}) == []
+
+
+def test_call_lifecycle_webhook_url_is_distinct_from_base():
+    # The call-lifecycle sub must live on its own URL so it never collides with
+    # the identity's iMessage sub (one active subscription per identity+url).
+    base = "https://tunnel.example.test/webhook"
+    call_url = adapter_mod._call_lifecycle_webhook_url(base)
+    assert call_url != base
+    assert call_url.startswith(base)
+    # Idempotent shape so current/previous URLs line up during reconcile.
+    assert adapter_mod._call_lifecycle_webhook_url(base + "/") == call_url
 
 
 # ── supervisor pump over the one call WS ─────────────────────────────────────

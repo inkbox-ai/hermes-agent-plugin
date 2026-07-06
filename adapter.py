@@ -245,6 +245,13 @@ _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.reaction_received",
 )
 
+# Call lifecycle: identity-owned, fire-and-forget post-call fan-out. ``call.ended``
+# hands the ended-call summary + (when platform-hosted voice ran) the transcript to
+# the agent so it can follow up even when no live supervisor socket was held. This is
+# a SEPARATE identity-owned subscription from the iMessage one; see
+# ``_call_lifecycle_webhook_url`` for why it must live on its own URL.
+_DESIRED_CALL_EVENTS: tuple[str, ...] = ("call.ended",)
+
 
 def _inkbox_state_path():
     """Return the on-disk path used for the Inkbox identity state file.
@@ -632,6 +639,49 @@ def _reconcile_imessage_subscription(
 
     iMessage traffic rides shared Inkbox-managed numbers, so the
     subscription owner is the agent identity, not a phone number.
+    """
+    return _reconcile_subscription(
+        client,
+        owner_kwarg="agent_identity_id",
+        owner_id=agent_identity_id,
+        desired_url=desired_url,
+        previous_webhook_url=previous_webhook_url,
+        desired_events=desired_events,
+    )
+
+
+def _call_lifecycle_webhook_url(base_webhook_url: str) -> str:
+    """Derive the identity's call-lifecycle webhook URL from the base webhook URL.
+
+    iMessage and call-lifecycle subscriptions are BOTH owned by the agent
+    identity, and the server allows only one active subscription per
+    (identity, url). They therefore cannot share a URL — so the call sub gets
+    a dedicated path suffix on the same webhook server (routed to the same
+    handler, dispatched by ``event_type``). Applied identically to the current
+    and previously-registered base so reconcile cleanup lines up.
+
+    Args:
+        base_webhook_url (str): The base webhook URL (public URL + webhook path).
+
+    Returns:
+        str: The call-lifecycle webhook URL (base + ``/call-lifecycle``).
+    """
+    return base_webhook_url.rstrip("/") + "/call-lifecycle"
+
+
+def _reconcile_call_subscription(
+    client,
+    agent_identity_id,
+    desired_url: str,
+    previous_webhook_url: Optional[str],
+    desired_events: tuple[str, ...] = _DESIRED_CALL_EVENTS,
+):
+    """Reconcile the identity-owned call-lifecycle webhook subscription.
+
+    Independent of the iMessage row and of the ``incoming_call_webhook_url`` /
+    ``auto_accept`` config on the same identity: this reconcile only ever
+    touches rows whose URL equals the dedicated call-lifecycle URL, so it never
+    churns or strips those neighbours.
     """
     return _reconcile_subscription(
         client,
@@ -1342,19 +1392,6 @@ class _HostedSupervisorChannel:
             {"event": "update_instructions", "instructions": instructions}
         )
 
-    async def tool_decision(
-        self, tool_call_id: str, decision: str, reason: Optional[str] = None,
-    ) -> None:
-        """Approve or deny an approval-gated tool call by id."""
-        frame: Dict[str, Any] = {
-            "event": "tool.decision",
-            "tool_call_id": tool_call_id,
-            "decision": decision,
-        }
-        if reason:
-            frame["reason"] = reason
-        await self._send(frame)
-
     async def hang_up(self, reason: Optional[str] = None) -> None:
         """Ask the platform to end the call."""
         frame: Dict[str, Any] = {"event": "hang_up"}
@@ -1389,6 +1426,14 @@ class InkboxAdapter(BasePlatformAdapter):
         # Started in _start_imessage_typing, cancelled in _stop_imessage_typing
         # (on send or on failure).
         self._imessage_typing_tasks: Dict[str, "asyncio.Task"] = {}
+        # Post-call reflection dedup. A connected call surfaces call.ended over
+        # BOTH the supervisor WS (when one is held) and the call-lifecycle
+        # webhook. The WS frame is richer (it carries post_call_actions), so the
+        # webhook defers to it for calls we actively supervised; the claim map
+        # then keeps reflection exactly-once (guarding webhook re-deliveries and
+        # any WS/webhook overlap). Both keyed call_id -> timestamp, pruned by TTL.
+        self._supervised_call_ids: Dict[str, float] = {}
+        self._post_call_reflected: Dict[str, float] = {}
         self._base_url = (
             extra.get("base_url") or os.getenv("INKBOX_BASE_URL") or INKBOX_BASE_URL_DEFAULT
         ).strip()
@@ -1397,6 +1442,11 @@ class InkboxAdapter(BasePlatformAdapter):
             extra.get("port") or os.getenv("INKBOX_LISTEN_PORT") or DEFAULT_PORT
         )
         self._webhook_path = str(extra.get("webhook_path") or DEFAULT_WEBHOOK_PATH)
+        # Dedicated path for the identity-owned call-lifecycle subscription; it
+        # cannot share the base webhook URL with the iMessage sub (one active
+        # subscription per (identity, url) at the server). Routed to the same
+        # handler, dispatched by ``event_type``.
+        self._call_webhook_path = _call_lifecycle_webhook_url(self._webhook_path)
         self._ws_path = str(extra.get("ws_path") or DEFAULT_WS_PATH)
         # Default delivery target for messages with no human counterparty on
         # the source thread (e.g. external-event summaries). ``home_channel``
@@ -1579,6 +1629,9 @@ class InkboxAdapter(BasePlatformAdapter):
             self._app = web.Application()
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_post(self._webhook_path, self._handle_webhook)
+            # Call-lifecycle (call.ended) posts land on their own path but reuse
+            # the same verify-then-dispatch handler.
+            self._app.router.add_post(self._call_webhook_path, self._handle_webhook)
             self._app.router.add_get(self._ws_path, self._handle_call_ws)
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
@@ -1900,6 +1953,34 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info(
                 "[Inkbox] Patched iMessage for identity %s → %s",
                 self._identity_handle, webhook_url,
+            )
+
+        # Call lifecycle: identity-owned post-call fan-out (call.ended). Only for
+        # platform-hosted voice — that's the case where the brain runs remotely
+        # and the agent would otherwise miss the call end + transcript without a
+        # live supervisor socket (e.g. a call supervised on another worker). In
+        # local mode the in-process bridge already reflects on call end, so
+        # subscribing would double up. Its own URL keeps it an independent row
+        # from the iMessage sub and the incoming-call config on this identity.
+        hosted_realtime = (
+            self._realtime_config.enabled and self._realtime_config.hosted
+        )
+        if can_receive_calls and self._identity_id and hosted_realtime:
+            call_webhook_url = _call_lifecycle_webhook_url(webhook_url)
+            previous_call_webhook_url = (
+                _call_lifecycle_webhook_url(previous_webhook_url)
+                if previous_webhook_url else None
+            )
+            _reconcile_call_subscription(
+                self._inkbox,
+                self._identity_id,
+                desired_url=call_webhook_url,
+                previous_webhook_url=previous_call_webhook_url,
+                desired_events=_DESIRED_CALL_EVENTS,
+            )
+            logger.info(
+                "[Inkbox] Patched call-lifecycle subscription for identity %s → %s",
+                self._identity_handle, call_webhook_url,
             )
 
         # Persist the resolved identity so non-Inkbox sessions (CLI, etc.) can
@@ -2501,6 +2582,8 @@ class InkboxAdapter(BasePlatformAdapter):
                     response = await self._on_imessage_reaction(envelope)
                 elif event_type and event_type.startswith("imessage."):
                     response = await self._on_imessage_lifecycle(envelope)
+                elif event_type == "call.ended":
+                    response = await self._on_call_ended(envelope)
                 else:
                     response = await self._on_incoming_call(envelope)
             elif source is not None and source != "inkbox":
@@ -2535,10 +2618,10 @@ class InkboxAdapter(BasePlatformAdapter):
         """Whether a payload is a known Inkbox event shape (vs a forwarded external one).
 
         Used only as a secondary discriminator *after* the source is verified as
-        Inkbox: mail / text / iMessage arrive as ``{event_type: "<kind>.<...>"}``;
-        the incoming-call webhook is a flat object carrying ``phone_number_id`` +
-        ``remote_phone_number``. Everything else (e.g. an Inkbox-signed CI
-        escalation) is treated as external.
+        Inkbox: mail / text / iMessage / call-lifecycle arrive as
+        ``{event_type: "<kind>.<...>"}``; the incoming-call webhook is a flat
+        object carrying ``phone_number_id`` + ``remote_phone_number``. Everything
+        else (e.g. an Inkbox-signed CI escalation) is treated as external.
 
         Args:
             event_type (str | None): The payload's ``event_type`` field, if any.
@@ -2547,7 +2630,9 @@ class InkboxAdapter(BasePlatformAdapter):
         Returns:
             bool: True for a recognised Inkbox event shape.
         """
-        if event_type and event_type.startswith(("message.", "text.", "imessage.")):
+        if event_type and event_type.startswith(
+            ("message.", "text.", "imessage.", "call.")
+        ):
             return True
         return "phone_number_id" in envelope and "remote_phone_number" in envelope
 
@@ -4634,9 +4719,9 @@ class InkboxAdapter(BasePlatformAdapter):
         """Supervise a platform-hosted voice call over its own call WS.
 
         In hosted mode the platform runs the whole voice brain; this same call
-        WS carries observe frames (transcript, tool calls, consult requests,
-        call end) up and intervene frames (consult answers, injects, tool
-        decisions) back down. Builds a :class:`RealtimeCallMeta` from the
+        WS carries observe frames (transcript, consult requests, call end) up
+        and intervene frames (consult answers, injects, instruction updates,
+        hang up) back down. Builds a :class:`RealtimeCallMeta` from the
         already-resolved call context, then pumps observe frames until the
         platform closes the call.
 
@@ -4651,16 +4736,26 @@ class InkboxAdapter(BasePlatformAdapter):
         # Wrap the socket so observe-event handlers can push intervene frames.
         channel = _HostedSupervisorChannel(ws)
         call_meta = self._hosted_call_meta_from(meta)
-        # Observe frames arrive as JSON text on the same WS; drain until close.
-        async for msg in ws:
-            if msg.type != WSMsgType.TEXT:
-                continue
-            try:
-                event = json.loads(msg.data)
-            except json.JSONDecodeError:
-                continue
-            with suppress(Exception):
-                await self._hosted_dispatch_event(channel, event, call_meta)
+        # Mark this call supervised so the (redundant, transcript-only) webhook
+        # call.ended defers to the richer WS frame for it.
+        self._mark_supervised_call(call_meta.call_id)
+        try:
+            # Observe frames arrive as JSON text on the same WS; drain until close.
+            async for msg in ws:
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    event = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    continue
+                with suppress(Exception):
+                    await self._hosted_dispatch_event(channel, event, call_meta)
+        finally:
+            # Stop deferring once the socket is gone. If it closed before a
+            # call.ended frame (abnormal end), a webhook re-delivery can now
+            # reflect the call instead of being silently dropped; the claim map
+            # still prevents a double reflection when the WS did handle it.
+            self._clear_supervised_call(call_meta.call_id)
 
     def _hosted_call_meta_from(self, meta: Dict[str, Any]) -> RealtimeCallMeta:
         """Build supervisor call metadata from the WS-resolved call context.
@@ -4700,11 +4795,6 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] hosted realtime transcript call_id=%s party=%s: %s",
                 call_id, _field(event, "party"), _field(event, "text"),
             )
-        elif kind == "model.tool_call":
-            logger.info(
-                "[Inkbox] hosted realtime tool_call call_id=%s tool=%s approval=%s",
-                call_id, _field(event, "tool_name"), _field(event, "requires_approval"),
-            )
         elif kind == "consult.requested":
             await self._hosted_handle_consult(channel, event, call_meta)
         elif kind == "call.ended":
@@ -4743,6 +4833,14 @@ class InkboxAdapter(BasePlatformAdapter):
         self, event: Any, call_meta: RealtimeCallMeta,
     ) -> None:
         """Enqueue post-call reconciliation from the call.ended frame."""
+        # Claim the reflection so a duplicate frame (or a webhook that didn't
+        # defer) can't reflect the same call twice.
+        if not self._claim_post_call_reflection(call_meta.call_id):
+            logger.info(
+                "[Inkbox] hosted realtime call.ended already reflected call_id=%s (skip)",
+                call_meta.call_id,
+            )
+            return
         transcript = self._hosted_transcript(_field(event, "transcript"))
         actions = self._hosted_actions(_field(event, "post_call_actions"))
         if actions:
@@ -4755,6 +4853,159 @@ class InkboxAdapter(BasePlatformAdapter):
         )
 
     @staticmethod
+    def _prune_ttl_map(store: Dict[str, float], now: float) -> None:
+        """Drop entries older than the dedup TTL so a map can't grow unbounded."""
+        for key, ts in list(store.items()):
+            if now - ts >= WEBHOOK_DEDUP_TTL_SECONDS:
+                store.pop(key, None)
+
+    def _mark_supervised_call(self, call_id: str) -> None:
+        """Record that a live supervisor WS is handling ``call_id``.
+
+        Args:
+            call_id (str): The supervised call's id.
+
+        Returns:
+            None
+        """
+        if not hasattr(self, "_supervised_call_ids"):
+            self._supervised_call_ids = {}
+        now = time.time()
+        self._prune_ttl_map(self._supervised_call_ids, now)
+        key = str(call_id or "").strip()
+        if key:
+            self._supervised_call_ids[key] = now
+
+    def _clear_supervised_call(self, call_id: str) -> None:
+        """Drop the supervised mark for ``call_id`` (supervisor socket closed)."""
+        if not hasattr(self, "_supervised_call_ids"):
+            return
+        self._supervised_call_ids.pop(str(call_id or "").strip(), None)
+
+    def _is_supervised_call(self, call_id: str) -> bool:
+        """Whether ``call_id`` is (recently) handled by a live supervisor WS.
+
+        Args:
+            call_id (str): The ended call's id.
+
+        Returns:
+            bool: True if the WS path owns this call's post-call reflection.
+        """
+        if not hasattr(self, "_supervised_call_ids"):
+            return False
+        self._prune_ttl_map(self._supervised_call_ids, time.time())
+        return str(call_id or "").strip() in self._supervised_call_ids
+
+    def _claim_post_call_reflection(self, call_id: str) -> bool:
+        """Claim the one post-call reflection for ``call_id``; True if we won.
+
+        Guards against reflecting the same call twice — a webhook re-delivery,
+        or a WS frame and a webhook frame that both slip through. Old claims are
+        pruned by TTL so the map cannot grow unbounded.
+
+        Args:
+            call_id (str): The ended call's id.
+
+        Returns:
+            bool: True if this caller should perform the reflection.
+        """
+        if not hasattr(self, "_post_call_reflected"):
+            self._post_call_reflected = {}
+        now = time.time()
+        self._prune_ttl_map(self._post_call_reflected, now)
+        key = str(call_id or "").strip()
+        if not key:
+            # No id to dedupe on — reflect rather than silently swallow.
+            return True
+        if key in self._post_call_reflected:
+            return False
+        self._post_call_reflected[key] = now
+        return True
+
+    async def _on_call_ended(self, envelope: Dict[str, Any]) -> "web.Response":
+        """Handle a ``call.ended`` lifecycle webhook: reflect + hand over transcript.
+
+        Fired by the server once a connected call terminates, independent of any
+        supervisor socket. Builds call metadata from the payload, extracts the
+        inline transcript (present only for platform-hosted voice calls), and
+        threads both into the existing post-call reflection path so the agent can
+        follow up. Deduped against the WS ``call.ended`` path by call_id.
+
+        Args:
+            envelope (Dict[str, Any]): The parsed, signature-verified webhook body.
+
+        Returns:
+            web.Response: Always 200 — the fan-out is fire-and-forget.
+        """
+        data = envelope.get("data") or {}
+        call = data.get("call") or {}
+        call_id = str(call.get("id") or "").strip()
+        if not call_id:
+            return web.Response(status=200, text="ok")
+        # Defer to the richer WS frame for calls we actively supervised — it
+        # already reflects those (and carries post_call_actions this webhook
+        # doesn't). The webhook is the handover for calls with NO supervisor WS.
+        if self._is_supervised_call(call_id):
+            return web.Response(status=200, text="ok")
+        # Otherwise reflect once; the claim guards webhook re-deliveries.
+        if not self._claim_post_call_reflection(call_id):
+            return web.Response(status=200, text="ok")
+
+        contacts = _webhook_list(data, "contacts", "contact_list")
+        contact = contacts[0] if contacts else {}
+        contact_id = str(_field(contact, "id") or "").strip()
+        contact_name = str(_field(contact, "name") or "").strip()
+        remote = str(_field(call, "remote_phone_number") or "").strip() or None
+        direction = str(_field(call, "direction") or "inbound").strip().lower() or "inbound"
+
+        call_meta = RealtimeCallMeta(
+            call_id=call_id,
+            contact_id=contact_id or (remote or "unknown"),
+            contact_name=contact_name or (remote or "unknown"),
+            remote_phone_number=remote,
+            direction=direction,
+            agent_identity_handle=self._identity_handle,
+            contact_known=bool(contact_id),
+        )
+        # Inline transcript is present only for hosted-voice calls; absent
+        # otherwise (data.transcript_url stays authoritative for the full copy).
+        transcript = self._webhook_call_transcript(data.get("transcript"))
+        await self._realtime_call_ended(call_meta, transcript)
+        logger.info(
+            "[Inkbox] call-lifecycle call.ended reflected call_id=%s transcript_turns=%d",
+            call_id, len(transcript),
+        )
+        return web.Response(status=200, text="ok")
+
+    @staticmethod
+    def _webhook_call_transcript(raw: Any) -> List[Tuple[str, str]]:
+        """Flatten a ``call.ended`` transcript block into ``(party, text)`` pairs.
+
+        Reads ``raw["entries"]`` (``{party: local|remote, text, ts_ms}``),
+        skipping abridged-marker rows (``{marker: "abridged", ...}``) which carry
+        no speaker/text. Returns an empty list when no inline transcript rode the
+        payload (non-hosted calls, or a signing-secret-only consumer that must
+        rely on the inline abridged copy).
+
+        Args:
+            raw (Any): The ``data.transcript`` object, or None.
+
+        Returns:
+            List[Tuple[str, str]]: ``(party, text)`` pairs in wire order.
+        """
+        entries = _webhook_list(raw, "entries") if isinstance(raw, dict) else []
+        turns: List[Tuple[str, str]] = []
+        for entry in entries:
+            # Abridged markers have no party/text — they only note the cut.
+            if _field(entry, "marker"):
+                continue
+            text = str(_field(entry, "text") or "").strip()
+            if text:
+                party = str(_field(entry, "party") or "remote").strip() or "remote"
+                turns.append((party, text))
+        return turns
+
+    @staticmethod
     def _hosted_transcript(raw: Any) -> List[Tuple[str, str]]:
         """Flatten wire ``[{speaker, text}]`` turns into ``(speaker, text)`` pairs."""
         turns: List[Tuple[str, str]] = []
@@ -4765,6 +5016,27 @@ class InkboxAdapter(BasePlatformAdapter):
         return turns
 
     @staticmethod
+    def _coerce_details(raw: Any) -> str:
+        """Render a post-call action's ``details`` field as display text.
+
+        The server may send ``details`` as a plain string OR as a structured
+        object (e.g. ``{"query": "..."}``). A dict is JSON-encoded so it reads
+        cleanly in the reflection text instead of leaking a Python ``repr``.
+
+        Args:
+            raw (Any): the wire ``details`` value (str, dict, None, or other).
+
+        Returns:
+            str: a stripped, human-readable rendering of ``details``.
+        """
+        if raw is None:
+            return ""
+        # Structured details serialise as compact JSON rather than a repr.
+        if isinstance(raw, (dict, list)):
+            return json.dumps(raw, sort_keys=True)
+        return str(raw).strip()
+
+    @staticmethod
     def _hosted_actions(raw: Any) -> List[Dict[str, str]]:
         """Normalise wire ``[{action, details}]`` post-call actions."""
         actions: List[Dict[str, str]] = []
@@ -4773,7 +5045,7 @@ class InkboxAdapter(BasePlatformAdapter):
             if action:
                 actions.append({
                     "action": action,
-                    "details": str(_field(entry, "details") or "").strip(),
+                    "details": InkboxAdapter._coerce_details(_field(entry, "details")),
                 })
         return actions
 
