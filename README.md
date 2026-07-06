@@ -62,7 +62,7 @@ Start the gateway:
 hermes gateway run
 ```
 
-Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text/iMessage webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
+Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text/iMessage/call-lifecycle webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, iMessage, and calls (live and post-call) into Hermes sessions.
 
 To update an existing install:
 
@@ -185,6 +185,8 @@ Calls — inbound and outbound — can run over either of two lines, and the age
 - **The shared Inkbox iMessage line.** The agent can also place and receive voice calls with a person it's connected to over iMessage, over the same shared line that person already messages. The underlying number is never surfaced — Inkbox resolves it from the iMessage connection — and it only works for people already connected over iMessage (an unknown caller is rejected; an outbound call with no connection is refused).
 
 Inbound answering is configured once per identity (`auto_accept` → open the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it when only one line is available.
+
+When a call ends, the plugin also receives a `call.ended` webhook (an identity-owned, fire-and-forget, replayable fan-out — separate from the `auto_accept` answering config) and wakes the agent on a fresh per-call thread with the call summary and transcript for post-call follow-up. This delivers the hand-off even when the agent held no live call connection. The transcript is inline for platform-hosted realtime calls (abridged, middle-cut past a size cap); a `transcript_url` to the authoritative full record is always included.
 
 ## iMessage
 
@@ -358,7 +360,8 @@ python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.p
 ## Architecture Notes
 
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
-- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions (plus an identity-owned iMessage subscription when enabled), and wires the incoming-call URL.
+- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions (plus identity-owned iMessage and call-lifecycle subscriptions when applicable), and wires the incoming-call URL.
+- Post-call hand-off: a `call.ended` webhook wakes the agent on a fresh thread with the call summary + transcript, independent of any live call connection.
 - Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
 - Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main Hermes agent after hangup.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.

@@ -26,12 +26,11 @@ from inkbox_plugin.realtime_supervisor import (
     ACTION_INTERJECT,
     ACTION_NONE,
     ACTION_STEER,
-    INJECT_MODE_CONTEXT,
-    INJECT_MODE_SAY,
+    SUPERVISOR_ITEM_ROLE,
     SUPERVISOR_NOTE_PREFIX,
     SupervisorConfig,
     SupervisorDecision,
-    build_inject_frame,
+    build_supervisor_item,
     inject_guidance,
     parse_supervisor_decision,
     run_supervisor_loop,
@@ -153,39 +152,36 @@ def test_parse_invalid_action_falls_back_to_none():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_build_inject_frame_shape():
-    frame = build_inject_frame("correct the price", speak=False)
-    assert frame["event"] == "inject"
-    assert frame["mode"] == INJECT_MODE_CONTEXT
-    assert frame["text"].startswith(SUPERVISOR_NOTE_PREFIX)
-    assert "correct the price" in frame["text"]
+def test_build_supervisor_item_shape():
+    item = build_supervisor_item("correct the price")
+    assert item["type"] == "conversation.item.create"
+    assert item["item"]["type"] == "message"
+    assert item["item"]["role"] == SUPERVISOR_ITEM_ROLE
+    part = item["item"]["content"][0]
+    assert part["type"] == "input_text"
+    assert part["text"].startswith(SUPERVISOR_NOTE_PREFIX)
+    assert "correct the price" in part["text"]
 
 
-def test_build_inject_frame_speak_mode():
-    frame = build_inject_frame("say this now", speak=True)
-    assert frame["mode"] == INJECT_MODE_SAY
+def test_build_supervisor_item_does_not_double_prefix():
+    item = build_supervisor_item(f"{SUPERVISOR_NOTE_PREFIX} already tagged")
+    assert item["item"]["content"][0]["text"].count(SUPERVISOR_NOTE_PREFIX) == 1
 
 
-def test_build_inject_frame_does_not_double_prefix():
-    frame = build_inject_frame(f"{SUPERVISOR_NOTE_PREFIX} already tagged", speak=False)
-    assert frame["text"].count(SUPERVISOR_NOTE_PREFIX) == 1
-
-
-def test_inject_steer_sends_context_frame():
+def test_inject_steer_sends_item_only():
     ws = _FakeWS()
     asyncio.run(inject_guidance(ws, "add context", speak=False))
     assert len(ws.sent) == 1
-    assert ws.sent[0]["event"] == "inject"
-    assert ws.sent[0]["mode"] == INJECT_MODE_CONTEXT
+    assert ws.sent[0]["type"] == "conversation.item.create"
 
 
-def test_inject_interject_sends_single_say_frame():
+def test_inject_interject_sends_item_then_response_create():
     ws = _FakeWS()
     asyncio.run(inject_guidance(ws, "correct that now", speak=True))
-    # One frame — the say mode replaces the old item + response.create pair.
-    assert len(ws.sent) == 1
-    assert ws.sent[0]["event"] == "inject"
-    assert ws.sent[0]["mode"] == INJECT_MODE_SAY
+    assert [f["type"] for f in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,7 +222,7 @@ async def _run_loop_until(openai_ws, transcript, decisions, *, config=None, expe
         return decisions[i] if i < len(decisions) else SupervisorDecision(action=ACTION_NONE)
 
     task = asyncio.create_task(run_supervisor_loop(
-        ws=openai_ws,
+        openai_ws=openai_ws,
         transcript_events=events,
         transcript_snapshot=lambda: list(transcript),
         is_closed=lambda: closed["v"],
@@ -267,9 +263,9 @@ def test_loop_injects_silent_steer_on_caller_turn():
         decisions=[SupervisorDecision(action=ACTION_STEER, guidance="offer to check the balance")],
         expect_sends=1,
     ))
-    assert [f["event"] for f in ws.sent] == ["inject"]
-    assert ws.sent[0]["mode"] == INJECT_MODE_CONTEXT
-    assert "offer to check the balance" in ws.sent[0]["text"]
+    types_sent = [f["type"] for f in ws.sent]
+    assert types_sent == ["conversation.item.create"]
+    assert "offer to check the balance" in ws.sent[0]["item"]["content"][0]["text"]
 
 
 def test_loop_speaks_on_interject():
@@ -278,11 +274,9 @@ def test_loop_speaks_on_interject():
         ws,
         transcript=[("caller", "so it's free, right?"), ("agent", "yes, totally free")],
         decisions=[SupervisorDecision(action=ACTION_INTERJECT, guidance="correct: there's a $5 fee")],
-        expect_sends=1,
+        expect_sends=2,
     ))
-    # One say-mode inject replaces the old item + response.create pair.
-    assert [f["event"] for f in ws.sent] == ["inject"]
-    assert ws.sent[0]["mode"] == INJECT_MODE_SAY
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create", "response.create"]
 
 
 def test_loop_does_nothing_on_none():
@@ -313,9 +307,9 @@ def test_loop_respects_max_interjections():
         config=config,
         expect_sends=1,
     ))
-    inject_frames = [f for f in ws.sent if f["event"] == "inject"]
-    assert len(inject_frames) == 1
-    assert "first" in inject_frames[0]["text"]
+    item_frames = [f for f in ws.sent if f["type"] == "conversation.item.create"]
+    assert len(item_frames) == 1
+    assert "first" in item_frames[0]["item"]["content"][0]["text"]
 
 
 def test_loop_passes_prior_guidance_for_dedup():
@@ -350,7 +344,7 @@ def test_loop_reviews_after_agent_turns_to_catch_errors():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             # A caller turn already happened (min_caller_turns satisfied); the
             # agent just answered.
@@ -369,9 +363,8 @@ def test_loop_reviews_after_agent_turns_to_catch_errors():
 
     asyncio.run(_run())
     assert consulted["n"] >= 1
-    # An interject speaks now: a single say-mode inject frame.
-    assert [f["event"] for f in ws.sent] == ["inject"]
-    assert ws.sent[0]["mode"] == INJECT_MODE_SAY
+    # An interject speaks now: item + response.create.
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create", "response.create"]
 
 
 def test_loop_respects_min_caller_turns():
@@ -403,7 +396,7 @@ def test_loop_exits_when_closed_without_events():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: [],
             is_closed=lambda: closed["v"],
@@ -429,7 +422,7 @@ def test_loop_survives_supervise_exception():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: [("caller", "x")],
             is_closed=lambda: closed["v"],
@@ -491,7 +484,7 @@ def test_maybe_start_supervisor_disabled_returns_none():
     async def _run():
         cfg = RealtimeConfig(enabled=True, api_key="sk-test")  # supervisor default: disabled
         task = realtime_mod._maybe_start_supervisor(
-            ws=_FakeWS(),
+            openai_ws=_FakeWS(),
             state=_BridgeState(),
             config=cfg,
             meta=_meta(),
@@ -506,7 +499,7 @@ def test_maybe_start_supervisor_none_callback_returns_none():
     async def _run():
         cfg = RealtimeConfig(enabled=True, api_key="sk-test", supervisor=SupervisorConfig(enabled=True))
         task = realtime_mod._maybe_start_supervisor(
-            ws=_FakeWS(),
+            openai_ws=_FakeWS(),
             state=_BridgeState(),
             config=cfg,
             meta=_meta(),
@@ -529,7 +522,7 @@ def test_maybe_start_supervisor_enabled_spawns_and_cancels():
             return SupervisorDecision(action=ACTION_NONE)
 
         task = realtime_mod._maybe_start_supervisor(
-            ws=_FakeWS(),
+            openai_ws=_FakeWS(),
             state=state,
             config=cfg,
             meta=_meta(),
@@ -580,7 +573,7 @@ def test_loop_rate_limits_reviews_with_min_interval():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: list(transcript),
             is_closed=lambda: closed["v"],
@@ -620,7 +613,7 @@ def test_loop_debounce_coalesces_burst_into_one_review():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: list(transcript),
             is_closed=lambda: closed["v"],
@@ -658,7 +651,7 @@ def test_loop_review_timeout_skips_without_injecting():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: [("caller", "x")],
             is_closed=lambda: closed["v"],
@@ -694,7 +687,7 @@ def test_loop_skips_review_when_transcript_has_not_grown():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: list(static),
             is_closed=lambda: closed["v"],
@@ -717,9 +710,8 @@ def test_loop_skips_review_when_transcript_has_not_grown():
 
 
 def test_loop_interject_suppressed_to_silent_when_response_active():
-    # When a response is already being generated, a speak-now interject must
-    # downgrade to a silent context inject (not talk over it); the note still
-    # lands so the guidance is not lost.
+    # When a response is already being generated, a speak-now interject must NOT
+    # fire response.create (it would collide); the note is still injected.
     ws = _FakeWS()
     events: "asyncio.Queue" = asyncio.Queue()
     closed = {"v": False}
@@ -731,7 +723,7 @@ def test_loop_interject_suppressed_to_silent_when_response_active():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: [("caller", "x"), ("agent", "wrong")],
             is_closed=lambda: closed["v"],
@@ -749,9 +741,8 @@ def test_loop_interject_suppressed_to_silent_when_response_active():
         await asyncio.wait_for(task, timeout=2.0)
 
     asyncio.run(_run())
-    # Downgraded to a silent context inject while a response is active.
-    assert [f["event"] for f in ws.sent] == ["inject"]
-    assert ws.sent[0]["mode"] == INJECT_MODE_CONTEXT
+    # Item injected, but NO response.create while a response is active.
+    assert [f["type"] for f in ws.sent] == ["conversation.item.create"]
 
 
 def test_loop_cancellation_mid_review_propagates():
@@ -767,7 +758,7 @@ def test_loop_cancellation_mid_review_propagates():
 
     async def _run():
         task = asyncio.create_task(run_supervisor_loop(
-            ws=ws,
+            openai_ws=ws,
             transcript_events=events,
             transcript_snapshot=lambda: [("caller", "x")],
             is_closed=lambda: False,

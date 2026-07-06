@@ -72,47 +72,49 @@ cheaper/faster model than the caller's default (passed through to the CLI via
 
 ## How steering is injected
 
-Guidance is pushed onto the *one* per-call WebSocket — the supervisor channel
-the platform emits observe frames on — as an `inject` intervene frame. The
-platform-hosted brain applies the note; the frame's `mode` picks how. Two modes:
+Guidance is pushed into the live session over the *same* OpenAI Realtime
+WebSocket the audio pumps use. Two modes, both validated against the OpenAI
+Realtime GA API:
 
 ### Silent steer (default)
 
-An `inject` frame with `mode: "context"`. The note is hidden system context the
-brain absorbs and folds into its next natural reply — zero perceived
-interruption.
+Inject a `system`-role conversation item and send **no** `response.create`. With
+server VAD (the default), the voice model absorbs the note and folds it into its
+next natural reply — zero perceived interruption.
 
 ```json
 {
-  "event": "inject",
-  "mode": "context",
-  "text": "[SUPERVISOR] the order ships in 3 business days, not today"
+  "type": "conversation.item.create",
+  "item": {
+    "type": "message",
+    "role": "system",
+    "content": [{ "type": "input_text", "text": "[SUPERVISOR] the order ships in 3 business days, not today" }]
+  }
 }
 ```
 
 ### Speak-now interject
 
-An `inject` frame with `mode: "say"`, so the brain voices a correction
-immediately (e.g. it just told the caller something wrong).
+Inject the same note, then fire a bare `response.create` so the model speaks a
+correction immediately (e.g. it just told the caller something wrong).
 
 ```json
-{
-  "event": "inject",
-  "mode": "say",
-  "text": "[SUPERVISOR] correction: there's a $5 fee"
-}
+{ "type": "conversation.item.create", "item": { "...": "as above" } }
+{ "type": "response.create" }
 ```
 
 Notes:
 
-- The note text is prefixed with `[SUPERVISOR]` so the brain (and the call
-  transcript) can tell steering apart from caller speech.
-- One frame per nudge — the single `say` mode replaces the old two-step "inject
-  an item, then fire `response.create`" pattern; the platform owns turn-taking.
-- If the brain is already mid-response when a speak-now interject is decided, the
-  loop downgrades it to a silent `context` inject so it doesn't talk over the
-  in-flight turn; the note still lands and is picked up next turn, so the
-  guidance is never lost.
+- `system`/`developer` items are **text-only** (`input_text`) — never audio.
+- `conversation.item.create` alone never produces speech; the `response.create`
+  is what voices it. This is the #1 "nothing happened" mistake.
+- A `response.create` sent while a response is already active is rejected by
+  OpenAI (`conversation_already_has_active_response`); the injected note still
+  lands and is used on the next turn, so the guidance is never lost.
+- An alternative primitive, `response.create` with `conversation: "none"`, runs
+  a silent out-of-band analysis using session context without speaking — useful
+  if the supervisor is ever collapsed onto the realtime model itself. We keep a
+  separate reasoning model instead, to honor the "smarter backend" goal.
 
 ## Control flow
 
@@ -126,7 +128,7 @@ Caller audio ──► Inkbox WS ──► OpenAI Realtime (mouth) ──► Ink
                           run_supervisor_loop  ── on caller turn, debounced ──►  on_supervise()  (mid model)
                                      │                                                 │ decision
                                      └──────────── inject_guidance() ◄─────────────────┘
-                                        (inject frame: mode say|context)
+                                        (system note ± response.create)
 ```
 
 The loop lives in `realtime_supervisor.py` and runs as a third background task

@@ -29,18 +29,14 @@ Three-tier model split (fast → mid → smart):
      the supervisor can now trigger it *proactively* by steering the mouth to
      consult, instead of relying on the mouth to notice on its own.
 
-Injection mechanism (single call WS, the platform-hosted supervisor channel):
+Injection mechanism (OpenAI Realtime, over the same WebSocket):
 
-The steering rides the one per-call WebSocket as an ``inject`` intervene frame —
-the same connection the platform emits observe frames (transcript, tool calls)
-on. The platform-hosted brain applies the note; the frame's ``mode`` picks how:
-
-  * **Silent steer** — an ``inject`` frame with ``mode: "context"``. The note is
-    hidden system context the brain absorbs and applies on its next natural
-    turn. Used to add context or gently redirect without interrupting.
-  * **Speak-now interject** — an ``inject`` frame with ``mode: "say"`` so the
-    brain voices a correction/addition immediately (e.g. to fix a fact it just
-    stated wrong).
+  * **Silent steer** — inject a ``conversation.item.create`` message item
+    carrying a bracketed supervisor note. No ``response.create`` follows, so the
+    model absorbs the note and applies it on its next natural turn. Used to add
+    context or gently redirect without interrupting.
+  * **Speak-now interject** — inject the same note *and* a ``response.create`` so
+    the model speaks immediately (e.g. to correct a fact it just stated wrong).
 
 The supervisor is deliberately conservative: it is rate-limited, debounced, and
 defaults to doing nothing. A note is only injected when the callback returns an
@@ -63,12 +59,14 @@ logger = logging.getLogger(__name__)
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ``inject`` frame modes on the single-WS contract. ``say`` speaks the note now;
-# ``context`` folds it in as hidden system context the brain applies next turn.
-INJECT_MODE_SAY = "say"
-INJECT_MODE_CONTEXT = "context"
+# Role used for injected supervisor items. The OpenAI Realtime API accepts
+# "system" message items mid-session as out-of-band steering that is not spoken
+# by itself; the model treats it as an authoritative instruction for subsequent
+# turns. Kept as a module constant so it is trivial to switch to "user"/
+# "developer" if a future model family narrows accepted roles.
+SUPERVISOR_ITEM_ROLE = "system"
 
-# Every injected note is prefixed so the brain (and the call transcript) can tell
+# Every injected note is prefixed so the model (and the call transcript) can tell
 # supervisor guidance apart from caller speech.
 SUPERVISOR_NOTE_PREFIX = "[SUPERVISOR]"
 
@@ -254,45 +252,37 @@ def _extract_json_object(text: str) -> Optional[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_inject_frame(guidance: str, *, speak: bool) -> dict:
-    """Build the single-WS ``inject`` intervene frame for a supervisor note.
-
-    Args:
-        guidance (str): the note text; auto-prefixed with ``SUPERVISOR_NOTE_PREFIX``.
-        speak (bool): True → ``mode: "say"`` (voiced now); False →
-            ``mode: "context"`` (hidden context applied on the next turn).
-
-    Returns:
-        dict: the ``{"event": "inject", "mode", "text"}`` frame.
-    """
+def build_supervisor_item(guidance: str) -> dict:
+    """Build the ``conversation.item.create`` frame for a supervisor note."""
     note = guidance.strip()
     if not note.startswith(SUPERVISOR_NOTE_PREFIX):
         note = f"{SUPERVISOR_NOTE_PREFIX} {note}"
     return {
-        "event": "inject",
-        "mode": INJECT_MODE_SAY if speak else INJECT_MODE_CONTEXT,
-        "text": note,
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": SUPERVISOR_ITEM_ROLE,
+            "content": [{"type": "input_text", "text": note}],
+        },
     }
 
 
-async def inject_guidance(ws: Any, guidance: str, *, speak: bool) -> None:
-    """Push a supervisor note onto the call's single supervisor WS.
+async def inject_guidance(openai_ws: Any, guidance: str, *, speak: bool) -> None:
+    """Inject a supervisor note into the live OpenAI Realtime session.
 
-    Sends one ``inject`` intervene frame; ``speak`` selects say-vs-context mode.
-    The platform-hosted brain applies the note — speaking it immediately (say)
-    or folding it into its next turn (context). Best-effort: an injection failure
-    is logged and the call continues.
+    Always sends the note as an out-of-band conversation item. When ``speak`` is
+    true, follows with a bare ``response.create`` so the model voices a
+    correction/addition immediately; otherwise the model silently absorbs the
+    note and applies it on its next natural turn.
 
-    Args:
-        ws (Any): the per-call supervisor WebSocket.
-        guidance (str): the note to inject.
-        speak (bool): whether the brain should voice the note now.
-
-    Returns:
-        None
+    A ``response.create`` sent while the model already has an active response
+    will be rejected by OpenAI with an error event (logged by the pump) — the
+    note itself still lands, so the guidance is not lost.
     """
     try:
-        await ws.send_str(json.dumps(build_inject_frame(guidance, speak=speak)))
+        await openai_ws.send_str(json.dumps(build_supervisor_item(guidance)))
+        if speak:
+            await openai_ws.send_str(json.dumps({"type": "response.create"}))
     except Exception as exc:  # best-effort; the call continues regardless
         logger.debug("[Inkbox supervisor] guidance injection failed: %s", exc)
 
@@ -316,7 +306,7 @@ class _SupervisorRuntime:
 
 async def run_supervisor_loop(
     *,
-    ws: Any,
+    openai_ws: Any,
     transcript_events: "asyncio.Queue[Tuple[str, str]]",
     transcript_snapshot: Callable[[], List[Tuple[str, str]]],
     is_closed: Callable[[], bool],
@@ -335,8 +325,8 @@ async def run_supervisor_loop(
     decision, subject to rate-limit / budget guards. Reviewing after *agent*
     turns too (not only caller turns) is what lets the supervisor catch a wrong
     statement the moment the mouth makes it and interject a correction, rather
-    than waiting for the next caller turn. Actionable decisions are pushed onto
-    the single supervisor ``ws`` via :func:`inject_guidance`.
+    than waiting for the next caller turn. Actionable decisions are injected into
+    ``openai_ws`` via :func:`inject_guidance`.
 
     Designed to run as a background task next to the two audio pumps; it exits
     when ``is_closed()`` becomes true (and is cancelled on teardown regardless).
@@ -392,11 +382,12 @@ async def run_supervisor_loop(
 
         rt.guidance.append(decision.guidance)
         rt.interjections += 1
-        # Speak-now (``mode: "say"``) only when the brain is NOT already
-        # mid-response — forcing a fresh spoken turn over an active one just
-        # talks over it. When busy, downgrade to a silent ``mode: "context"``
-        # inject: the note still lands and the in-flight/next turn picks it up,
-        # so the guidance is never lost.
+        # Speak-now only when the model is NOT already mid-response. Firing
+        # response.create while a response is active collides with the bridge's
+        # own server-VAD auto-response and OpenAI rejects one
+        # (conversation_already_has_active_response). When busy, we still inject
+        # the note silently — it lands in context and the in-flight/next response
+        # picks it up — so the guidance is never lost, we just don't double-fire.
         speak = decision.action == ACTION_INTERJECT and not (
             is_response_active is not None and is_response_active()
         )
@@ -407,7 +398,7 @@ async def run_supervisor_loop(
             speak,
             getattr(meta, "call_id", "?"),
         )
-        await inject_guidance(ws, decision.guidance, speak=speak)
+        await inject_guidance(openai_ws, decision.guidance, speak=speak)
 
 
 async def _next_turn(
