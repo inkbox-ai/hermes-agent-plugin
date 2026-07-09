@@ -147,6 +147,10 @@ jobs:
         env:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          # The AUT's signing key + local webhook listener let the retry-loop
+          # test forge a signed text.delivery_failed webhook at the gateway.
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          AUT_WEBHOOK_URL: http://127.0.0.1:8765/webhook
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_intents.jsonl
           LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
         run: |
