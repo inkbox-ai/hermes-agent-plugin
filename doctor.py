@@ -7,8 +7,10 @@ from typing import Any, Dict, List
 
 try:
     from .config import inkbox_client_kwargs, object_summary, read_config
+    from .diagnostics import inkbox_api_error_message, missing_config_message
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import inkbox_client_kwargs, object_summary, read_config
+    from diagnostics import inkbox_api_error_message, missing_config_message
 
 
 def run_doctor() -> Dict[str, Any]:
@@ -19,13 +21,13 @@ def run_doctor() -> Dict[str, Any]:
         findings.append({
             "id": "inkbox/config-missing-api-key",
             "severity": "error",
-            "message": "INKBOX_API_KEY is not set.",
+            "message": missing_config_message("INKBOX_API_KEY"),
         })
     if not cfg.identity:
         findings.append({
             "id": "inkbox/config-missing-identity",
             "severity": "error",
-            "message": "INKBOX_IDENTITY is not set.",
+            "message": missing_config_message("INKBOX_IDENTITY"),
         })
     if not cfg.signing_key:
         findings.append({
@@ -66,7 +68,7 @@ def run_doctor() -> Dict[str, Any]:
             findings.append({
                 "id": "inkbox/api-check-failed",
                 "severity": "error",
-                "message": str(exc),
+                "message": inkbox_api_error_message(exc, "checking the Inkbox API"),
             })
 
     summary["ok"] = not any(f["severity"] == "error" for f in findings)

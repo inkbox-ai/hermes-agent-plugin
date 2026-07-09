@@ -134,6 +134,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.platforms.helpers import redact_phone
 try:
     from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
@@ -147,6 +148,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
@@ -1433,17 +1435,17 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return False
         if not self._api_key:
-            logger.warning("[Inkbox] INKBOX_API_KEY not set")
+            logger.warning("[Inkbox] %s", missing_config_message("INKBOX_API_KEY"))
             return False
         if not self._identity_handle:
-            logger.warning("[Inkbox] INKBOX_IDENTITY not set")
+            logger.warning("[Inkbox] %s", missing_config_message("INKBOX_IDENTITY"))
             return False
         if self._require_signature and not self._signing_key:
             logger.warning(
                 "[Inkbox] INKBOX_SIGNING_KEY not set and "
                 "INKBOX_REQUIRE_SIGNATURE is enabled; refusing to start. "
-                "Generate a signing key in https://inkbox.ai/console/signing-keys "
-                "or set INKBOX_REQUIRE_SIGNATURE=false for local-only testing.",
+                "Generate one with `hermes inkbox setup` or set "
+                "INKBOX_REQUIRE_SIGNATURE=false for local-only testing.",
             )
             return False
 
@@ -1513,8 +1515,12 @@ class InkboxAdapter(BasePlatformAdapter):
         # PATCH the identity's mailboxes + phone numbers to point at this server.
         try:
             await asyncio.to_thread(self._patch_identity_objects)
-        except Exception:
-            logger.exception("[Inkbox] Failed to register webhook receivers")
+        except Exception as exc:
+            if is_inkbox_auth_error(exc) or is_inkbox_identity_error(exc):
+                logger.error("[Inkbox] %s", inkbox_api_error_message(exc, "registering webhook receivers"))
+                logger.debug("[Inkbox] Failed to register webhook receivers", exc_info=True)
+            else:
+                logger.exception("[Inkbox] Failed to register webhook receivers")
             await self._cleanup()
             self._release_platform_lock()
             return False
@@ -1650,8 +1656,12 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             self._tunnel = None
             return False
-        except Exception:
-            logger.exception("[Inkbox] Failed to open SDK tunnel")
+        except Exception as exc:
+            if is_inkbox_auth_error(exc) or is_inkbox_identity_error(exc):
+                logger.error("[Inkbox] %s", inkbox_api_error_message(exc, "opening the SDK tunnel"))
+                logger.debug("[Inkbox] Failed to open SDK tunnel", exc_info=True)
+            else:
+                logger.exception("[Inkbox] Failed to open SDK tunnel")
             self._tunnel = None
             return False
 
