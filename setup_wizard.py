@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_MIN_VERSION = "0.4.15"
+INKBOX_MIN_VERSION = "0.4.20"
 INKBOX_REQUIREMENTS = (f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5")
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.png"
