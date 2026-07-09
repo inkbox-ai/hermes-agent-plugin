@@ -770,3 +770,52 @@ def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
     assert events[0].raw_message["event"] == "realtime_post_call_actions"
     assert events[0].raw_message["consult_results"][0]["result"] == "Email sent to Dima."
     assert getattr(events[0], "auto_skill", None) is None
+
+
+def test_inkbox_stop_frame_logs_reason_and_caller_media_count(caplog):
+    import logging
+
+    from inkbox_plugin.realtime import _inkbox_to_openai_pump
+
+    state = _BridgeState()
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeOpenAIWS([
+        {"event": "start", "stream_id": "stream-1"},
+        {"event": "media", "media": {"payload": "AAAA"}},
+        {"event": "media", "media": {"payload": "BBBB"}},
+        {"event": "stop", "reason": "carrier_hangup"},
+    ])
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_inkbox_to_openai_pump(inkbox_ws, openai_ws, state, _meta()))
+
+    assert state.caller_media_frames == 2
+    messages = " | ".join(record.getMessage() for record in caplog.records)
+    assert "signaled stop (reason=carrier_hangup) after 2 caller media frame(s)" in messages
+    # Caller audio arrived, so the zero-media warning must not fire.
+    assert "without any caller media frames" not in messages
+
+
+def test_stop_with_no_caller_media_after_greeting_warns(caplog):
+    import logging
+
+    from inkbox_plugin.realtime import _inkbox_to_openai_pump
+
+    state = _BridgeState()
+    openai_ws = _FakeWS()
+    # Greeting fires on `start`, then the server stops the stream without ever
+    # sending a single caller media frame — the failure mode of inkbox-ai/
+    # hermes-agent-plugin#44.
+    inkbox_ws = _FakeOpenAIWS([
+        {"event": "start", "stream_id": "stream-1"},
+        {"event": "stop"},
+    ])
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_inkbox_to_openai_pump(inkbox_ws, openai_ws, state, _meta()))
+
+    assert state.caller_media_frames == 0
+    messages = " | ".join(record.getMessage() for record in caplog.records)
+    assert "signaled stop (reason=unspecified) after 0 caller media frame(s)" in messages
+    warning = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("without any caller media frames" in r.getMessage() for r in warning)
