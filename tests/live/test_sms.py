@@ -39,8 +39,12 @@ RETRY_TIMEOUT_S = TIMEOUT_S + 120
 SPY_FILE = os.environ.get("INKBOX_SPY_FILE", "")
 GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
 # The AUT's org signing key — same value the gateway verifies webhooks
-# with — lets the test forge a valid delivery-failure webhook.
-SIGNING_KEY = os.environ.get("HERMES_INKBOX_SIGNING_KEY", "")
+# with — lets the test forge a valid delivery-failure webhook. Exported
+# under a dedicated name on purpose: other live suites (external events)
+# gate their skips on HERMES_INKBOX_SIGNING_KEY, and exporting THAT name
+# here would un-skip them inside a workflow that isn't configured for
+# them (no INKBOX_EXTERNAL_EVENTS_ENABLED on this gateway).
+SIGNING_KEY = os.environ.get("AUT_INKBOX_SIGNING_KEY", "")
 AUT_WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "http://127.0.0.1:8765/webhook")
 
 pytestmark = pytest.mark.skipif(
@@ -207,50 +211,17 @@ def test_sms_aware_of_inkbox_tools(sms):
 
 
 # ── Outbound delivery-failure retry loop ────────────────────────────────
-
-
-@real_only
-def test_sms_retry_after_internal_spam_block(sms):
-    """Bait the server's outbound content filter, then watch the retry loop.
-
-    Asking for three emojis makes the agent's first reply trip the server's
-    one-emoji SMS budget (a synchronous 422 block — no carrier send). The
-    plugin must wake the agent with the block reason, and the agent must
-    come back with a reply that actually delivers. NOTE: the *ask* itself
-    must contain no emojis — the remote driver's outbound rides the same
-    filter, and an emoji-laden question would be blocked before the AUT
-    ever saw it.
-    """
-    spy_before = len(_spy_text_sends())
-    log_offset = _gateway_log_size()
-
-    body = _ask_sms(
-        sms,
-        "Fun formatting test: reply with ONE short message that contains at "
-        "least three different emojis of your choice. Just send it, no questions.",
-        timeout_s=RETRY_TIMEOUT_S,
-    )
-
-    # A reply arrived at all — so whatever the agent ended up sending
-    # cleared the filter (an apology without emojis also counts).
-    assert body.strip(), "agent never got a compliant reply through"
-
-    # Spy on the loop: the gateway process must have attempted >= 2 SMS
-    # sends (the blocked emoji reply + the rewritten one).
-    if SPY_FILE:
-        attempts = len(_spy_text_sends()) - spy_before
-        assert attempts >= 2, (
-            f"expected a blocked attempt + a retry (>=2 SMS sends), saw {attempts}"
-        )
-
-    # And the retry loop itself must have fired: the plugin logs a wake-up
-    # for the synchronous send rejection.
-    if GATEWAY_LOG:
-        log = _gateway_log_since(log_offset)
-        assert "Woke agent about failed outbound sms" in log, (
-            "no delivery-failure wake-up in the gateway log — retry loop did not run"
-        )
-        assert "stage=send_rejected" in log
+#
+# Ordering matters: the carrier-failure test runs FIRST. The spam-block
+# test deliberately creates blocked_spam_filter rows on the AUT's number,
+# and listing a conversation containing such rows crashes SDK clients
+# whose SmsDeliveryStatus enum predates that status — the carrier test's
+# conversation-id lookup must run against a clean history.
+#
+# Loop evidence comes from the gateway log (the plugin's wake-up lines),
+# which is authoritative. The send-spy is reported as a note only — it is
+# known not to load reliably inside the gateway process (see the same
+# caveat in test_email_reply.py).
 
 
 def _sign_inkbox_webhook(payload: bytes, request_id: str, timestamp: str, secret: str) -> str:
@@ -282,8 +253,17 @@ def _inject_inkbox_webhook(envelope: dict) -> int:
         return resp.status
 
 
+def _assert_wake_logged(log_offset: int, stage: str) -> None:
+    """Require the retry loop's gateway-log fingerprint past ``log_offset``."""
+    log = _gateway_log_since(log_offset)
+    assert "Woke agent about failed outbound sms" in log, (
+        "no delivery-failure wake-up in the gateway log — retry loop did not run"
+    )
+    assert f"stage={stage}" in log
+
+
 @real_only
-@pytest.mark.skipif(not SIGNING_KEY, reason="needs HERMES_INKBOX_SIGNING_KEY to sign the fake webhook")
+@pytest.mark.skipif(not SIGNING_KEY, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
 def test_sms_retry_after_carrier_delivery_failure(sms):
     """Inject a fake carrier delivery-failure webhook; expect a real follow-up.
 
@@ -305,13 +285,19 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
     _ask_sms(sms, "Please reply OK to confirm you got this text.")
 
     # The AUT-side conversation id for this thread, read from its own API.
+    # Best-effort: a history row the installed SDK cannot hydrate (e.g. a
+    # delivery status newer than its enum) must not kill the test — the
+    # injected failure also routes fine by remote number alone.
     conversation_id = ""
     remote_tail = _digits(remote_phone)[-10:]
-    for m in aut.texts.list(aut_pid, limit=30):
-        if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == remote_tail:
-            conversation_id = str(getattr(m, "conversation_id", "") or "")
-            if conversation_id:
-                break
+    try:
+        for m in aut.texts.list(aut_pid, limit=30):
+            if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == remote_tail:
+                conversation_id = str(getattr(m, "conversation_id", "") or "")
+                if conversation_id:
+                    break
+    except Exception as exc:
+        print(f"note: conversation-id lookup failed ({exc!r}); injecting without one")
 
     spy_before = len(_spy_text_sends())
     log_offset = _gateway_log_size()
@@ -356,15 +342,48 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
     )
     assert body.strip(), "agent sent an empty follow-up"
 
-    # Spy on the loop: the wake-up fired for the carrier failure, and the
-    # gateway attempted at least one new SMS send after the injection.
+    # The loop itself must have fired for the carrier failure.
     if GATEWAY_LOG:
-        log = _gateway_log_since(log_offset)
-        assert "Woke agent about failed outbound sms" in log, (
-            "no delivery-failure wake-up in the gateway log — retry loop did not run"
-        )
-        assert "stage=delivery_failed" in log
-    if SPY_FILE:
-        assert len(_spy_text_sends()) - spy_before >= 1, (
-            "no SMS send recorded by the spy after the injected failure"
-        )
+        _assert_wake_logged(log_offset, "delivery_failed")
+
+    # Spy is informational only — it is known not to load in the gateway
+    # process on some installs.
+    if SPY_FILE and len(_spy_text_sends()) - spy_before < 1:
+        print("note: follow-up delivered, but the in-gateway send-spy recorded no send")
+
+
+@real_only
+def test_sms_retry_after_internal_spam_block(sms):
+    """Bait the server's outbound content filter, then watch the retry loop.
+
+    Asking for three emojis makes the agent's first reply trip the server's
+    one-emoji SMS budget (a synchronous 422 block — no carrier send). The
+    plugin must wake the agent with the block reason, and the agent must
+    come back with a reply that actually delivers. NOTE: the *ask* itself
+    must contain no emojis — the remote driver's outbound rides the same
+    filter, and an emoji-laden question would be blocked before the AUT
+    ever saw it.
+    """
+    spy_before = len(_spy_text_sends())
+    log_offset = _gateway_log_size()
+
+    body = _ask_sms(
+        sms,
+        "Fun formatting test: reply with ONE short message that contains at "
+        "least three different emojis of your choice. Just send it, no questions.",
+        timeout_s=RETRY_TIMEOUT_S,
+    )
+
+    # A reply arrived at all — so whatever the agent ended up sending
+    # cleared the filter (an apology without emojis also counts).
+    assert body.strip(), "agent never got a compliant reply through"
+
+    # The loop itself must have fired: the plugin logs a wake-up for the
+    # synchronous send rejection. This is the authoritative loop evidence.
+    if GATEWAY_LOG:
+        _assert_wake_logged(log_offset, "send_rejected")
+
+    # Spy is informational only — it is known not to load in the gateway
+    # process on some installs.
+    if SPY_FILE and len(_spy_text_sends()) - spy_before < 2:
+        print("note: reply delivered, but the in-gateway send-spy saw fewer than 2 sends")
