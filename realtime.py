@@ -471,6 +471,9 @@ class _BridgeState:
     # Inkbox-assigned stream id from the `start` event; echoed on outbound
     # media / audio_done frames.
     stream_id: Optional[str] = None
+    # Caller media frames received from Inkbox. Zero at teardown means caller
+    # audio never reached the bridge — a server-side media-path failure.
+    caller_media_frames: int = 0
     # Monotonic timestamp of the first hang_up_call ("armed"). A second call
     # within HANGUP_CONFIRM_WINDOW_S fires the real hangup. None = not yet armed.
     hangup_armed_at: Optional[float] = None
@@ -1006,15 +1009,44 @@ async def _inkbox_to_openai_pump(
                     await _maybe_send_greeting(openai_ws, state, meta)
                 payload_b64 = (frame.get("media") or {}).get("payload")
                 if payload_b64:
+                    state.caller_media_frames += 1
                     await openai_ws.send_str(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": payload_b64,
                     }))
             elif event in {"stop", "closed", "hangup"}:
-                logger.info("[Inkbox realtime] Inkbox WS signaled %s", event)
+                logger.info(
+                    "[Inkbox realtime] Inkbox WS signaled %s (reason=%s) after %d caller media frame(s)",
+                    event,
+                    frame.get("reason") or "unspecified",
+                    state.caller_media_frames,
+                )
+                _warn_if_no_caller_media(state, meta)
                 return
         elif msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+            logger.info(
+                "[Inkbox realtime] Inkbox WS transport closed (%s) after %d caller media frame(s)",
+                msg.type.name,
+                state.caller_media_frames,
+            )
+            _warn_if_no_caller_media(state, meta)
             return
+
+
+def _warn_if_no_caller_media(state: _BridgeState, meta: RealtimeCallMeta) -> None:
+    """Flag calls that ended before any caller audio reached the bridge.
+
+    The greeting can play to the callee over the outbound leg even when the
+    server never streams caller media back, so from the transcript alone this
+    failure looks like the caller "said nothing". Make it unambiguous.
+    """
+    if state.caller_media_frames or not state.greeting_triggered:
+        return
+    logger.warning(
+        "[Inkbox realtime] call_id=%s ended without any caller media frames "
+        "reaching the bridge — caller audio was never streamed to the client WS",
+        meta.call_id,
+    )
 
 
 async def _openai_to_inkbox_pump(
