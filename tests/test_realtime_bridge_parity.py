@@ -819,3 +819,73 @@ def test_stop_with_no_caller_media_after_greeting_warns(caplog):
     assert "signaled stop (reason=unspecified) after 0 caller media frame(s)" in messages
     warning = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("without any caller media frames" in r.getMessage() for r in warning)
+
+
+def test_auto_confirm_hangup_fires_after_goodbye_when_armed(monkeypatch):
+    from inkbox_plugin.realtime import _auto_confirm_hangup
+
+    state = _BridgeState()
+    state.hangup_armed_at = 123.0
+    state.stream_id = "stream-9"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(_auto_confirm_hangup(state, inkbox_ws, openai_ws, _meta()))
+
+    assert inkbox_ws.sent == [{
+        "event": "stop",
+        "reason": "goodbye complete",
+        "stream_id": "stream-9",
+    }]
+    assert state.closed is True
+    assert inkbox_ws.closed is True
+    assert openai_ws.closed is True
+
+
+def test_auto_confirm_hangup_is_a_noop_when_disarmed(monkeypatch):
+    from inkbox_plugin.realtime import _auto_confirm_hangup
+
+    state = _BridgeState()
+    state.hangup_armed_at = None  # caller barged in; speech_started disarmed it
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(_auto_confirm_hangup(state, inkbox_ws, openai_ws, _meta()))
+
+    assert inkbox_ws.sent == []
+    assert state.closed is False
+    assert inkbox_ws.closed is False
+
+
+def test_speech_started_disarms_pending_hangup():
+    from inkbox_plugin.realtime import _openai_to_inkbox_pump
+
+    state = _BridgeState()
+    state.hangup_armed_at = 123.0
+    inkbox_ws = _FakeWS()
+    openai_ws = _FakeOpenAIWS([
+        {"type": "input_audio_buffer.speech_started"},
+    ])
+
+    async def _consult(_query, _meta):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=inkbox_ws,
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="k"),
+        meta=_meta(),
+        on_agent_consult=_consult,
+    ))
+
+    assert state.hangup_armed_at is None
+    assert {"event": "clear"} in inkbox_ws.sent
