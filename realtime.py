@@ -1430,6 +1430,10 @@ async def _dispatch_tool_call(
         # have the model say goodbye instead of dropping the line mid-farewell.
         if armed is None or (now - armed) > HANGUP_CONFIRM_WINDOW_S:
             state.hangup_armed_at = now
+            logger.info(
+                "[Inkbox realtime] hang_up_call armed for call_id=%s — awaiting goodbye + confirm call",
+                meta.call_id,
+            )
             # Default create_response=True so the model speaks the goodbye.
             await _submit_tool_result(openai_ws, call_id, {
                 "status": "confirm_goodbye",
@@ -1443,6 +1447,11 @@ async def _dispatch_tool_call(
 
         # Second attempt within the window → perform the real hangup.
         reason = (args.get("reason") or "").strip()
+        logger.info(
+            "[Inkbox realtime] hang_up_call confirmed for call_id=%s (reason=%s) — sending stop frame",
+            meta.call_id,
+            reason or "unspecified",
+        )
         # Inkbox ends the call on a `stop` event; `hangup` is ignored server-side.
         stop_frame: Dict[str, Any] = {"event": "stop"}
         if reason:
