@@ -30,8 +30,9 @@ The bridge:
      turn so the main agent can execute them (send email, create note, etc.).
    - ``edit_post_call_action`` / ``delete_post_call_action`` — modify queued
      after-call work while the call is still live.
-   - ``hang_up_call`` — a two-step hangup that lets the model say goodbye
-     before closing the phone leg.
+   - ``hang_up_call`` — arms a hangup so the model can say goodbye; the call
+     ends automatically once the goodbye plays out (a second call also
+     confirms immediately).
 
 The shape mirrors Inkbox's channel-plugin ``RealtimeCallWebSocket``.
 """
@@ -93,15 +94,22 @@ CONTACT_READ_NOTES_MAX_CHARS = 200
 # runs; longer values risk dead air, shorter values cut off legitimate work.
 DEFAULT_CONSULT_TIMEOUT_S = 300.0
 
-# A hang_up_call is a two-step confirm: the first call arms the hangup and asks
-# the model to say goodbye; a second call within this window actually ends the
-# call. Past the window, a lone call re-arms (treated as a fresh first attempt).
+# hang_up_call arms the hangup and asks the model to say goodbye; the armed
+# hangup then auto-confirms once the goodbye plays out. A second tool call
+# within this window also confirms immediately. Past the window, a lone call
+# re-arms (treated as a fresh first attempt).
 HANGUP_CONFIRM_WINDOW_S = 60.0
 
 # After the confirmed hang_up_call, keep the phone leg open briefly before
 # sending Inkbox the actual hangup frame. This gives already-forwarded goodbye
 # audio time to play out instead of being clipped by immediate teardown.
 HANGUP_CLOSE_DELAY_S = 2.0
+
+# When a hangup is armed and the goodbye response finishes playing, the model
+# has no further turn to issue the confirming hang_up_call — realtime models
+# idle until the caller speaks, leaving the line open. Auto-confirm after this
+# grace window unless the caller barges in (which disarms the hangup).
+HANGUP_AUTO_CONFIRM_DELAY_S = 2.5
 
 # OpenAI Realtime must be reachable before the Inkbox websocket is accepted in
 # raw-media mode. If this preflight fails, the adapter can still accept the
@@ -308,11 +316,11 @@ def _hang_up_call_tool_schema() -> Dict[str, Any]:
         "type": "function",
         "name": HANG_UP_CALL_TOOL_NAME,
         "description": (
-            "End the live phone call. This is a TWO-STEP tool: the first call "
-            "does NOT hang up — it prompts you to say a short goodbye. After "
-            "you have said goodbye, call hang_up_call a second time to actually "
-            "end the call. Use it only when the caller asks to hang up, says "
-            "goodbye, or the conversation is clearly complete."
+            "End the live phone call. Calling this arms the hangup and prompts "
+            "you to say a short goodbye; once your goodbye finishes playing, "
+            "the call ends automatically — you do not need to call this tool "
+            "again. Use it only when the caller asks to hang up, says goodbye, "
+            "or the conversation is clearly complete."
         ),
         "parameters": {
             "type": "object",
@@ -471,9 +479,15 @@ class _BridgeState:
     # Inkbox-assigned stream id from the `start` event; echoed on outbound
     # media / audio_done frames.
     stream_id: Optional[str] = None
+    # Caller media frames received from Inkbox. Zero at teardown means no
+    # caller audio ever reached the bridge.
+    caller_media_frames: int = 0
     # Monotonic timestamp of the first hang_up_call ("armed"). A second call
     # within HANGUP_CONFIRM_WINDOW_S fires the real hangup. None = not yet armed.
     hangup_armed_at: Optional[float] = None
+    # Auto-confirm task spawned when the goodbye response finishes while a
+    # hangup is armed; kept here so it isn't garbage-collected mid-sleep.
+    hangup_auto_task: Optional["asyncio.Task[None]"] = None
     # In-flight consult_agent dispatches. The consult tool runs the full
     # main agent loop (seconds), so it is dispatched as a background task to keep
     # the OpenAI→Inkbox audio pump flowing; we track the tasks here so they can
@@ -580,9 +594,9 @@ def build_realtime_instructions(
         f"previously registered after-call action, call {DELETE_POST_CALL_ACTION_TOOL_NAME} "
         f"for that action so it is not executed twice after hangup.",
         f"If the caller asks to hang up, says goodbye, or the conversation is "
-        f"clearly complete, call {HANG_UP_CALL_TOOL_NAME}. The first call arms "
-        f"hangup and asks you to say goodbye; after the goodbye, call it once "
-        f"more to end the phone call.",
+        f"clearly complete, call {HANG_UP_CALL_TOOL_NAME} and then say a brief "
+        f"goodbye. The call ends automatically once your goodbye finishes "
+        f"playing; you do not need to call the tool again.",
         f"Do not call {AGENT_CONSULT_TOOL_NAME} for greetings, caller identity at "
         f"call start, or generic chat.",
     ])
@@ -1006,15 +1020,93 @@ async def _inkbox_to_openai_pump(
                     await _maybe_send_greeting(openai_ws, state, meta)
                 payload_b64 = (frame.get("media") or {}).get("payload")
                 if payload_b64:
+                    state.caller_media_frames += 1
                     await openai_ws.send_str(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": payload_b64,
                     }))
             elif event in {"stop", "closed", "hangup"}:
-                logger.info("[Inkbox realtime] Inkbox WS signaled %s", event)
+                logger.info(
+                    "[Inkbox realtime] Inkbox WS signaled %s (reason=%s) after %d caller media frame(s)",
+                    event,
+                    frame.get("reason") or "unspecified",
+                    state.caller_media_frames,
+                )
+                _warn_if_no_caller_media(state, meta)
                 return
         elif msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+            logger.info(
+                "[Inkbox realtime] Inkbox WS transport closed (%s) after %d caller media frame(s)",
+                msg.type.name,
+                state.caller_media_frames,
+            )
+            _warn_if_no_caller_media(state, meta)
             return
+
+
+def _warn_if_no_caller_media(state: _BridgeState, meta: RealtimeCallMeta) -> None:
+    """Flag calls that ended before any caller audio reached the bridge.
+
+    The greeting can play to the callee over the outbound leg even when no
+    caller media arrives, so from the transcript alone this failure looks
+    like the caller "said nothing". Make it unambiguous.
+    """
+    if state.caller_media_frames or not state.greeting_triggered:
+        return
+    logger.warning(
+        "[Inkbox realtime] call_id=%s ended with zero caller media frames "
+        "received on the client WS",
+        meta.call_id,
+    )
+
+
+def _cancel_hangup_auto_confirm(state: _BridgeState) -> None:
+    if state.hangup_auto_task is not None and not state.hangup_auto_task.done():
+        state.hangup_auto_task.cancel()
+    state.hangup_auto_task = None
+
+
+async def _send_stop_and_close(
+    state: _BridgeState,
+    inkbox_ws: Any,
+    openai_ws: Any,
+    stop_frame: Dict[str, Any],
+    *,
+    delay: float,
+) -> None:
+    try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await inkbox_ws.send_str(json.dumps(stop_frame))
+    except Exception as exc:
+        logger.debug("[Inkbox realtime] hangup frame send failed: %s", exc)
+    state.closed = True
+    await _maybe_close_ws(inkbox_ws)
+    await _maybe_close_ws(openai_ws)
+
+
+async def _auto_confirm_hangup(
+    state: _BridgeState, inkbox_ws: Any, openai_ws: Any, meta: RealtimeCallMeta,
+) -> None:
+    """Confirm an armed hangup once the goodbye has played out.
+
+    After the arm step the model speaks its goodbye and then has no turn in
+    which to issue the confirming hang_up_call — realtime models idle until
+    the caller speaks next, leaving the line open indefinitely. Once the
+    goodbye response finishes playing, wait a short grace window (a caller
+    barge-in disarms via the speech_started handler) and end the call.
+    """
+    await asyncio.sleep(HANGUP_AUTO_CONFIRM_DELAY_S)
+    if state.closed or state.hangup_armed_at is None:
+        return
+    logger.info(
+        "[Inkbox realtime] auto-confirming armed hangup for call_id=%s — goodbye played, no caller barge-in",
+        meta.call_id,
+    )
+    stop_frame: Dict[str, Any] = {"event": "stop", "reason": "goodbye complete"}
+    if state.stream_id:
+        stop_frame["stream_id"] = state.stream_id
+    await _send_stop_and_close(state, inkbox_ws, openai_ws, stop_frame, delay=0)
 
 
 async def _openai_to_inkbox_pump(
@@ -1106,6 +1198,9 @@ async def _openai_to_inkbox_pump(
             # protocol.
             delta_b64 = frame.get("delta") or ""
             if delta_b64:
+                # Goodbye audio is still streaming — hold any pending
+                # auto-confirm so the farewell isn't clipped mid-word.
+                _cancel_hangup_auto_confirm(state)
                 out = {
                     "event": "media",
                     "media": {"payload": delta_b64, "track": "outbound"},
@@ -1127,9 +1222,25 @@ async def _openai_to_inkbox_pump(
                 await inkbox_ws.send_str(json.dumps(done))
             except Exception:
                 pass
+            # A hangup is armed and the (goodbye) response just finished
+            # playing. The model has no further turn in which to issue the
+            # confirming hang_up_call, so confirm it ourselves after a grace
+            # window; a caller barge-in disarms it.
+            if state.hangup_armed_at is not None:
+                _cancel_hangup_auto_confirm(state)
+                state.hangup_auto_task = asyncio.create_task(
+                    _auto_confirm_hangup(state, inkbox_ws, openai_ws, meta),
+                )
 
         # Caller started speaking (barge-in) — drop any queued outbound audio.
         elif ftype == "input_audio_buffer.speech_started":
+            if state.hangup_armed_at is not None:
+                state.hangup_armed_at = None
+                _cancel_hangup_auto_confirm(state)
+                logger.info(
+                    "[Inkbox realtime] hangup disarmed for call_id=%s — caller spoke during the goodbye window",
+                    meta.call_id,
+                )
             try:
                 await inkbox_ws.send_str(json.dumps({"event": "clear"}))
             except Exception:
@@ -1398,19 +1509,31 @@ async def _dispatch_tool_call(
         # have the model say goodbye instead of dropping the line mid-farewell.
         if armed is None or (now - armed) > HANGUP_CONFIRM_WINDOW_S:
             state.hangup_armed_at = now
+            logger.info(
+                "[Inkbox realtime] hang_up_call armed for call_id=%s — awaiting goodbye + confirm call",
+                meta.call_id,
+            )
             # Default create_response=True so the model speaks the goodbye.
             await _submit_tool_result(openai_ws, call_id, {
                 "status": "confirm_goodbye",
                 "message": (
                     "Don't hang up yet. Say a brief, natural goodbye to the "
-                    "caller now, then call hang_up_call once more to actually "
-                    "end the call."
+                    "caller now; the call will end automatically once your "
+                    "goodbye finishes playing."
                 ),
             })
             return
 
-        # Second attempt within the window → perform the real hangup.
+        # Second attempt within the window → perform the real hangup. Cancel
+        # any pending auto-confirm so the manual path racing it can't send a
+        # second stop frame.
+        _cancel_hangup_auto_confirm(state)
         reason = (args.get("reason") or "").strip()
+        logger.info(
+            "[Inkbox realtime] hang_up_call confirmed for call_id=%s (reason=%s) — sending stop frame",
+            meta.call_id,
+            reason or "unspecified",
+        )
         # Inkbox ends the call on a `stop` event; `hangup` is ignored server-side.
         stop_frame: Dict[str, Any] = {"event": "stop"}
         if reason:
@@ -1428,14 +1551,9 @@ async def _dispatch_tool_call(
             },
             create_response=False,
         )
-        try:
-            await asyncio.sleep(HANGUP_CLOSE_DELAY_S)
-            await inkbox_ws.send_str(json.dumps(stop_frame))
-        except Exception as exc:
-            logger.debug("[Inkbox realtime] hangup frame send failed: %s", exc)
-        state.closed = True
-        await _maybe_close_ws(inkbox_ws)
-        await _maybe_close_ws(openai_ws)
+        await _send_stop_and_close(
+            state, inkbox_ws, openai_ws, stop_frame, delay=HANGUP_CLOSE_DELAY_S,
+        )
         return
 
     if name == AGENT_CONSULT_TOOL_NAME:

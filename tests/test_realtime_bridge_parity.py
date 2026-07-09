@@ -770,3 +770,169 @@ def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
     assert events[0].raw_message["event"] == "realtime_post_call_actions"
     assert events[0].raw_message["consult_results"][0]["result"] == "Email sent to Dima."
     assert getattr(events[0], "auto_skill", None) is None
+
+
+def test_inkbox_stop_frame_logs_reason_and_caller_media_count(caplog):
+    import logging
+
+    from inkbox_plugin.realtime import _inkbox_to_openai_pump
+
+    state = _BridgeState()
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeOpenAIWS([
+        {"event": "start", "stream_id": "stream-1"},
+        {"event": "media", "media": {"payload": "AAAA"}},
+        {"event": "media", "media": {"payload": "BBBB"}},
+        {"event": "stop", "reason": "carrier_hangup"},
+    ])
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_inkbox_to_openai_pump(inkbox_ws, openai_ws, state, _meta()))
+
+    assert state.caller_media_frames == 2
+    messages = " | ".join(record.getMessage() for record in caplog.records)
+    assert "signaled stop (reason=carrier_hangup) after 2 caller media frame(s)" in messages
+    # Caller audio arrived, so the zero-media warning must not fire.
+    assert "zero caller media frames" not in messages
+
+
+def test_stop_with_no_caller_media_after_greeting_warns(caplog):
+    import logging
+
+    from inkbox_plugin.realtime import _inkbox_to_openai_pump
+
+    state = _BridgeState()
+    openai_ws = _FakeWS()
+    # Greeting fires on `start`, then the server stops the stream without ever
+    # sending a single caller media frame — the failure mode of inkbox-ai/
+    # hermes-agent-plugin#44.
+    inkbox_ws = _FakeOpenAIWS([
+        {"event": "start", "stream_id": "stream-1"},
+        {"event": "stop"},
+    ])
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_inkbox_to_openai_pump(inkbox_ws, openai_ws, state, _meta()))
+
+    assert state.caller_media_frames == 0
+    messages = " | ".join(record.getMessage() for record in caplog.records)
+    assert "signaled stop (reason=unspecified) after 0 caller media frame(s)" in messages
+    warning = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("zero caller media frames" in r.getMessage() for r in warning)
+
+
+def test_auto_confirm_hangup_fires_after_goodbye_when_armed(monkeypatch):
+    from inkbox_plugin.realtime import _auto_confirm_hangup
+
+    state = _BridgeState()
+    state.hangup_armed_at = 123.0
+    state.stream_id = "stream-9"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(_auto_confirm_hangup(state, inkbox_ws, openai_ws, _meta()))
+
+    assert inkbox_ws.sent == [{
+        "event": "stop",
+        "reason": "goodbye complete",
+        "stream_id": "stream-9",
+    }]
+    assert state.closed is True
+    assert inkbox_ws.closed is True
+    assert openai_ws.closed is True
+
+
+def test_auto_confirm_hangup_is_a_noop_when_disarmed(monkeypatch):
+    from inkbox_plugin.realtime import _auto_confirm_hangup
+
+    state = _BridgeState()
+    state.hangup_armed_at = None  # caller barged in; speech_started disarmed it
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(_auto_confirm_hangup(state, inkbox_ws, openai_ws, _meta()))
+
+    assert inkbox_ws.sent == []
+    assert state.closed is False
+    assert inkbox_ws.closed is False
+
+
+def test_speech_started_disarms_pending_hangup():
+    from inkbox_plugin.realtime import _openai_to_inkbox_pump
+
+    state = _BridgeState()
+    state.hangup_armed_at = 123.0
+    inkbox_ws = _FakeWS()
+    openai_ws = _FakeOpenAIWS([
+        {"type": "input_audio_buffer.speech_started"},
+    ])
+
+    async def _consult(_query, _meta):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=inkbox_ws,
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="k"),
+        meta=_meta(),
+        on_agent_consult=_consult,
+    ))
+
+    assert state.hangup_armed_at is None
+    assert {"event": "clear"} in inkbox_ws.sent
+
+
+def test_manual_confirm_cancels_pending_auto_confirm(monkeypatch):
+    # A model that does manually confirm while the auto-confirm grace timer
+    # is pending must cancel it — otherwise the racing task can emit a second
+    # stop frame after the manual path already ended the call.
+    state = _BridgeState()
+    state.stream_id = "stream-42"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+
+    async def _dispatch():
+        await _dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id="hangup-call",
+            name=HANG_UP_CALL_TOOL_NAME,
+            arguments_json=json.dumps({"reason": "caller said goodbye"}),
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+            inkbox_ws=inkbox_ws,
+        )
+
+    async def _run():
+        await _dispatch()  # arm
+        # Simulate the goodbye's audio.done having spawned the grace timer.
+        state.hangup_auto_task = asyncio.ensure_future(asyncio.Event().wait())
+        pending = state.hangup_auto_task
+        await _dispatch()  # manual confirm
+        try:
+            await pending  # yield so the cancellation propagates
+        except asyncio.CancelledError:
+            pass
+        return pending
+
+    pending = asyncio.run(_run())
+
+    assert pending.cancelled()
+    assert state.hangup_auto_task is None
+    stop_frames = [f for f in inkbox_ws.sent if f.get("event") == "stop"]
+    assert len(stop_frames) == 1
