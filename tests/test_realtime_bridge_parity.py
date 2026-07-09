@@ -793,7 +793,7 @@ def test_inkbox_stop_frame_logs_reason_and_caller_media_count(caplog):
     messages = " | ".join(record.getMessage() for record in caplog.records)
     assert "signaled stop (reason=carrier_hangup) after 2 caller media frame(s)" in messages
     # Caller audio arrived, so the zero-media warning must not fire.
-    assert "without any caller media frames" not in messages
+    assert "zero caller media frames" not in messages
 
 
 def test_stop_with_no_caller_media_after_greeting_warns(caplog):
@@ -818,7 +818,7 @@ def test_stop_with_no_caller_media_after_greeting_warns(caplog):
     messages = " | ".join(record.getMessage() for record in caplog.records)
     assert "signaled stop (reason=unspecified) after 0 caller media frame(s)" in messages
     warning = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert any("without any caller media frames" in r.getMessage() for r in warning)
+    assert any("zero caller media frames" in r.getMessage() for r in warning)
 
 
 def test_auto_confirm_hangup_fires_after_goodbye_when_armed(monkeypatch):
@@ -889,3 +889,50 @@ def test_speech_started_disarms_pending_hangup():
 
     assert state.hangup_armed_at is None
     assert {"event": "clear"} in inkbox_ws.sent
+
+
+def test_manual_confirm_cancels_pending_auto_confirm(monkeypatch):
+    # A model that does manually confirm while the auto-confirm grace timer
+    # is pending must cancel it — otherwise the racing task can emit a second
+    # stop frame after the manual path already ended the call.
+    state = _BridgeState()
+    state.stream_id = "stream-42"
+    openai_ws = _FakeWS()
+    inkbox_ws = _FakeWS()
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(realtime_mod.asyncio, "sleep", _no_sleep)
+
+    async def _dispatch():
+        await _dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id="hangup-call",
+            name=HANG_UP_CALL_TOOL_NAME,
+            arguments_json=json.dumps({"reason": "caller said goodbye"}),
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+            inkbox_ws=inkbox_ws,
+        )
+
+    async def _run():
+        await _dispatch()  # arm
+        # Simulate the goodbye's audio.done having spawned the grace timer.
+        state.hangup_auto_task = asyncio.ensure_future(asyncio.Event().wait())
+        pending = state.hangup_auto_task
+        await _dispatch()  # manual confirm
+        try:
+            await pending  # yield so the cancellation propagates
+        except asyncio.CancelledError:
+            pass
+        return pending
+
+    pending = asyncio.run(_run())
+
+    assert pending.cancelled()
+    assert state.hangup_auto_task is None
+    stop_frames = [f for f in inkbox_ws.sent if f.get("event") == "stop"]
+    assert len(stop_frames) == 1
