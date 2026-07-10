@@ -45,25 +45,48 @@ def test_merge_all_empty_is_none():
     assert InkboxAdapter._merge_auto_skills(None, None) is None
 
 
-# ── resolve: no config ──────────────────────────────────────────────────────
+# ── resolve: built-in reply-is-auto-sent directive ──────────────────────────
 
 
-def test_no_overrides_returns_defaults_only():
+def test_builtin_directive_present_for_each_text_channel():
+    """Even with no operator config, each text channel carries the tiny
+    reply-is-auto-sent directive naming its own send tool."""
+    adapter = _adapter({})
+    for modality, tool in (
+        ("sms", "inkbox_send_sms"),
+        ("imessage", "inkbox_send_imessage"),
+        ("email", "inkbox_send_email"),
+    ):
+        prompt, _ = adapter._resolve_channel_overrides(modality, "contact_1", None)
+        assert prompt is not None
+        assert "sent automatically" in prompt and tool in prompt
+
+
+def test_no_builtin_directive_for_voice_or_external():
+    """Voice and external events have their own handling — no text directive."""
+    adapter = _adapter({})
+    for modality in ("voice", "external"):
+        prompt, _ = adapter._resolve_channel_overrides(modality, "contact_1", None)
+        assert prompt is None
+
+
+def test_no_overrides_returns_builtin_directive_and_defaults():
     adapter = _adapter({})
     prompt, skills = adapter._resolve_channel_overrides(
         "imessage", "contact_1", "inkbox:inkbox-troubleshooting"
     )
-    assert prompt is None
+    assert prompt is not None and "inkbox_send_imessage" in prompt
     assert skills == ["inkbox:inkbox-troubleshooting"]
 
 
-# ── resolve: channel_prompts ────────────────────────────────────────────────
+# ── resolve: channel_prompts (operator prompt appends AFTER the directive) ────
 
 
-def test_modality_prompt_applies_to_channel():
+def test_modality_prompt_appends_after_builtin_directive():
     adapter = _adapter({"channel_prompts": {"imessage": "Inkbox iMessage concierge."}})
     prompt, _ = adapter._resolve_channel_overrides("imessage", "contact_1", None)
-    assert prompt == "Inkbox iMessage concierge."
+    assert prompt.endswith("Inkbox iMessage concierge.")
+    assert "sent automatically" in prompt  # built-in directive still prepended
 
 
 def test_contact_prompt_wins_over_modality_prompt():
@@ -76,13 +99,14 @@ def test_contact_prompt_wins_over_modality_prompt():
         }
     )
     prompt, _ = adapter._resolve_channel_overrides("imessage", "contact_1", None)
-    assert prompt == "VIP Inkbox contact handling."
+    assert prompt.endswith("VIP Inkbox contact handling.")
 
 
-def test_blank_prompt_is_ignored():
+def test_blank_prompt_leaves_only_builtin_directive():
     adapter = _adapter({"channel_prompts": {"sms": "   "}})
     prompt, _ = adapter._resolve_channel_overrides("sms", "contact_1", None)
-    assert prompt is None
+    # Blank operator prompt ignored; the built-in sms directive still stands.
+    assert prompt is not None and "inkbox_send_sms" in prompt
 
 
 # ── resolve: channel_skill_bindings ─────────────────────────────────────────
