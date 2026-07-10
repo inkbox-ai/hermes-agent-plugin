@@ -61,6 +61,9 @@ LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
 # If the agent stalls (no reply heard), re-ask this often to keep the call alive and
 # nudge it — realtime occasionally drops the first turn. 0 disables re-asking.
 REASK_EVERY_S = float(os.environ.get("VOICE_DRIVER_REASK", "0"))
+# Hard cap on nudges. Transcripts reach us ~10-20s late, so silence detection is
+# fuzzy and we can over-nudge while the agent is actually mid-work; this bounds it.
+MAX_NUDGES = int(os.environ.get("VOICE_DRIVER_MAX_NUDGES", "2"))
 
 app = FastAPI()
 
@@ -110,6 +113,7 @@ async def phone_media_ws(ws: WebSocket) -> None:
         # can die before the recite. Re-nudge, but ONLY when the agent has itself
         # gone quiet for REASK_EVERY_S, so we never talk over an in-progress recite.
         started = loop.time()
+        nudges = 0
         while loop.time() - started < LISTEN_S and not answered.is_set():
             try:
                 await asyncio.wait_for(answered.wait(), timeout=1.0)
@@ -118,8 +122,9 @@ async def phone_media_ws(ws: WebSocket) -> None:
             if answered.is_set() or loop.time() - started >= LISTEN_S:
                 break
             quiet_for = loop.time() - state["last_heard"]
-            if REASK_EVERY_S > 0 and quiet_for >= REASK_EVERY_S:
+            if REASK_EVERY_S > 0 and nudges < MAX_NUDGES and quiet_for >= REASK_EVERY_S:
                 await _speak(NUDGE)  # short filler to hold the call, not the whole question
+                nudges += 1
                 state["last_heard"] = loop.time()  # give it room before nudging again
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
