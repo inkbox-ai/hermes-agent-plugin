@@ -41,30 +41,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
-
-
-def _skip_if_aut_sms_rate_limited() -> None:
-    """Skip (not fail) when the AUT hit its 24h SMS send cap (429).
-
-    The shared live-test number's outbound SMS quota can be exhausted by a
-    busy suite or repeated CI runs, after which the agent physically cannot
-    send SMS replies. That's live-infra capacity, not a plugin fault.
-    """
-    if not GATEWAY_LOG:
-        return
-    try:
-        with open(GATEWAY_LOG, encoding="utf-8", errors="replace") as fh:
-            if "sender_rate_limited" in fh.read():
-                pytest.skip(
-                    "AUT outbound SMS is rate-limited (429 sender_rate_limited) — "
-                    "shared live-test number hit its 24h send cap; live-infra "
-                    "capacity, not a transport/plugin failure."
-                )
-    except OSError:
-        return
-
-
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
@@ -144,9 +120,7 @@ def test_email_request_gets_sms_response(xc):
         for m in _sms_from_aut():
             if m.id not in before and token in (getattr(m, "text", "") or "").lower():
                 return  # cross-channel confirmed: email request -> SMS response with the token
-        _skip_if_aut_sms_rate_limited()
         time.sleep(POLL_EVERY_S)
-    _skip_if_aut_sms_rate_limited()
     pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
 
 
