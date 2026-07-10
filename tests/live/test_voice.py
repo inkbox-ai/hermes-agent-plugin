@@ -216,78 +216,107 @@ def test_outbound_call_realtime_direct_contact_lookup():
         emails=[ContactEmail(label="work", value=LOOKUP_CONTACT_EMAIL)],
     )
     try:
-        def _inbound_from_aut():
+        driver_tail = _digits(st["number"])[-10:]
+
+        def _inbound_to_driver():
+            # The driver's INBOUND leg (remote/penetrator identity). Used only to
+            # confirm a call was placed — its transcript comes from the driver's
+            # own relay, not the agent's, so it is NOT where the recite lands.
             return [c for c in remote.calls.list(limit=30)
                     if (getattr(c, "direction", "") or "").lower() == "inbound"
                     and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
-        # Outbound realtime calls occasionally collapse seconds in with no
-        # agent audio ever transcribed (media-path flake, also seen on the
-        # plain outbound leg) — so allow one fresh call before failing.
+        def _outbound_from_agent():
+            # The agent's OWN outbound call to the driver — the record the Inkbox
+            # console shows, and where the realtime relay persists the recite
+            # (client_ws_agent → CLIENT_TRANSCRIPT_FINAL). Read THIS for the recite.
+            return [c for c in aut.calls.list(limit=30)
+                    if (getattr(c, "direction", "") or "").lower() == "outbound"
+                    and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
+
+        def _recite_from(reads):
+            # reads: (client, call_id) pairs. Return the transcript that carries
+            # the seeded card's spoken details ("…parker…example…"), or "".
+            for client, cid in reads:
+                try:
+                    segs = client.calls.transcripts(cid)
+                except Exception:  # transcripts 404 until the call is set up
+                    continue
+                transcript = " ".join(
+                    (s.text or "").strip() for s in segs if (s.text or "").strip()
+                )
+                squashed = transcript.lower().replace(" ", "")
+                if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
+                    return transcript
+            return ""
+
+        # place_call can succeed API-side yet the PSTN leg never materialize (bad
+        # carrier window); a fresh "call me" retries. Allow one fresh call before
+        # failing.
         attempt_timeout = max(TIMEOUT_S / 2, 110.0)
-        # Wake the agent into a realtime call, then prove it did a DIRECT
-        # contact read on that call. The proof is the gateway log line the
-        # realtime path writes the instant the agent calls the contact tool —
-        # NOT the spoken recite in the transcript. The recite is the call's
-        # final turn (contact read → say the email → goodbye → hang up), and
-        # realtime relays each turn's transcript live over the call WS; that
-        # last relay races the teardown (see realtime.py `_relay_transcript`,
-        # wrapped in `suppress`), so the recite can silently drop from the
-        # stored transcript even though the agent said it. We still capture the
-        # recite when it survives, as a bonus — but the log line is the gate.
-        recite_seen = False
-        agent_said = ""
+        recite = ""
         placed_call = False
+        end_ids = []  # (client, call_id) legs to hang up so nothing lingers
         for attempt in (1, 2):
-            before = {c.id for c in _inbound_from_aut()}
+            before_out = {c.id for c in _outbound_from_agent()}
+            before_in = {c.id for c in _inbound_to_driver()}
             remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
             deadline = time.monotonic() + attempt_timeout
             while time.monotonic() < deadline:
-                # Log-first: once the realtime path logs the direct read, the
-                # call did what we're testing — stop waiting on the transcript.
-                if "direct contact read inkbox_" in _gateway_log_text():
+                fresh_out = [c for c in _outbound_from_agent() if c.id not in before_out]
+                fresh_in = [c for c in _inbound_to_driver() if c.id not in before_in]
+                placed_call = placed_call or bool(fresh_out or fresh_in)
+                end_ids = [(aut, c.id) for c in fresh_out] + [(remote, c.id) for c in fresh_in]
+                # The recite persists on the AGENT's own call record; the driver
+                # leg is a fallback only.
+                recite = recite or _recite_from(end_ids)
+                # The direct-read log line proves the agent used the direct
+                # contact tool (not a consult loop) — deterministic anchor.
+                got_log = "direct contact read inkbox_" in _gateway_log_text()
+                if recite and got_log:
                     break
-                fresh = [c for c in _inbound_from_aut() if c.id not in before]
-                placed_call = placed_call or bool(fresh)
-                for c in fresh:  # best-effort recite capture across every call
-                    try:
-                        segs, _rem, _loc = _segments(remote, st["number_id"], c.id)
-                    except Exception:  # transcripts may 404 until a call is set up
-                        continue
-                    transcript = " ".join(
-                        (s.text or "").strip() for s in segs if (s.text or "").strip()
-                    )
-                    squashed = transcript.lower().replace(" ", "")
-                    if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
-                        recite_seen, agent_said = True, transcript
-                        break
                 time.sleep(POLL_EVERY_S)
-            if "direct contact read inkbox_" in _gateway_log_text():
+            if recite and "direct contact read inkbox_" in _gateway_log_text():
                 break
 
-        # place_call can succeed API-side yet the PSTN leg never materialize
-        # (bad carrier window); a fresh "call me" retries. If neither attempt
-        # produced a call at all, that's the real failure.
+        # Ensure every call actually ends. Realtime sends a `stop` frame, but the
+        # PSTN leg can linger at "answered" — force it closed via the SDK hangup so
+        # it finalizes (and doesn't burn a call slot). Best-effort; already-ended
+        # legs just error out harmlessly.
+        for client, cid in end_ids:
+            try:
+                client.calls.hangup(cid)
+            except Exception:
+                pass
+
+        # After teardown the transcript is final — give the recite a last chance
+        # to land (in case it persisted on the very last turn).
+        if not recite and end_ids:
+            end_deadline = time.monotonic() + 30.0
+            while time.monotonic() < end_deadline and not recite:
+                recite = _recite_from(end_ids)
+                if recite:
+                    break
+                time.sleep(POLL_EVERY_S)
+
         assert placed_call, (
             f"agent never placed a call back within {attempt_timeout:.0f}s "
             "in two attempts"
         )
-
-        # Authoritative: the realtime agent did a DIRECT contact read on the
-        # call (vs a consult loop or no lookup). Deterministic — written when
-        # the contact tool is invoked, immune to the transcript-relay race.
+        # Deterministic anchor: the realtime agent did a DIRECT contact read on
+        # the call (vs a consult loop or no lookup) — written when the contact
+        # tool is invoked.
         log_text = _gateway_log_text()
         assert log_text, "gateway log unavailable to prove the direct contact read"
         assert "direct contact read inkbox_" in log_text, \
             "gateway logs show no direct contact read during the call"
-        if not recite_seen:
-            print(
-                "note: direct contact read confirmed in the gateway log, but the "
-                "spoken recite wasn't captured in the transcript — the final turn's "
-                "live relay races call teardown. last transcript heard: "
-                f"{agent_said[:200]!r}"
-            )
+        # And the agent actually recited the seeded card's email out loud — read
+        # from the agent's own call record, where the relay persists it.
+        assert recite, (
+            "agent never recited the seeded contact's email on the call — no "
+            "transcript segment on the agent's own call carried the card details"
+        )
 
         tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
         assert tts is False and stt is False, \
