@@ -207,64 +207,14 @@ SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
 SMS_TEXT_BATCH_MAX_MESSAGES = 8
 SMS_TEXT_BATCH_MAX_CHARS = 4000
 
-# ── Outbound delivery-failure feedback loop ────────────────────────────
-#
-# An outbound message can die two ways: rejected synchronously at send
-# time (server content policy, opt-out, bad address), or accepted and
-# then failed downstream (carrier rejection, mail bounce) reported by a
-# lifecycle webhook. Either way the human never saw the reply, so the
-# agent is woken with the exact error and the undelivered body to fix
-# and resend. Total sends per logical reply are hard-capped — after
-# OUTBOUND_FAILURE_MAX_ATTEMPTS failed sends the loop stops waking the
-# agent and the thread goes quiet. The counter resets on a new inbound
-# from the same party, on a delivered receipt, or after the TTL.
-OUTBOUND_FAILURE_MAX_ATTEMPTS = 3
-# A retry loop is a burst affair; a stale counter must not silence an
-# unrelated failure hours later.
-OUTBOUND_FAILURE_STATE_TTL_SECONDS = 30 * 60.0
-# How much of the undelivered body to echo back into the wake-up turn.
-OUTBOUND_FAILURE_BODY_SNIPPET_CHARS = 400
-
-# Per-channel fix-it guidance embedded in the delivery-failure wake-up
-# turn. Text channels are usually fixable by rewriting; a mail bounce
-# usually means the address is the problem, not the prose.
-_DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
-    "sms": (
-        "Rewrite the message so it no longer trips the stated rule and it "
-        "reads like a human text: plain conversational prose, no markdown "
-        "(**bold**, # headers, ``` fences), at most one emoji, no profanity, "
-        "no test/probe phrasing. Then send the corrected reply now."
-    ),
-    "imessage": (
-        "Rewrite the message so it no longer trips the stated rule and it "
-        "reads like a human text: plain conversational prose, no markdown. "
-        "If the recipient has opted out of messages, respect that and stop. "
-        "Then send the corrected reply now if one is still appropriate."
-    ),
-    "email": (
-        "The receiving mail server did not accept this message — the address "
-        "may be wrong or the mailbox unreachable. A plain reply here retries "
-        "the SAME address, so first check the contact card for a corrected "
-        "address or reach the person on another channel with your tools; "
-        "only resend here if you have reason to think it will now deliver."
-    ),
-}
-
 
 def _inkbox_platform() -> Platform:
     """Resolve the dynamic Inkbox platform after plugin registration."""
     return Platform("inkbox")
 
-# Mail: inbound plus the two delivery-failure transitions, which feed the
-# outbound delivery-failure loop (_on_mail_delivery_failure). The success
-# transitions (sent/delivered/forwarded) stay unsubscribed — they would pay
-# signature cost on every outbound email for no behaviour; the failure
-# counter falls back to inbound-reset + TTL instead of delivered-reset.
-_DESIRED_MAIL_EVENTS: tuple[str, ...] = (
-    "message.received",
-    "message.bounced",
-    "message.failed",
-)
+# Mail: agent only acts on inbound; lifecycle events fire-and-forget at the
+# wire layer, so subscribing to them would pay signature cost for no behaviour.
+_DESIRED_MAIL_EVENTS: tuple[str, ...] = ("message.received",)
 
 # Text: inbound plus the four outbound lifecycle transitions are all consumed
 # by _on_text_received / _on_text_lifecycle.
@@ -371,51 +321,6 @@ def _sms_state_key(chat_id: Any, thread_id: Any = None) -> str:
 def _channel_thread_key(prefix: str, value: Any) -> Optional[str]:
     raw = str(value or "").strip()
     return f"{prefix}:{raw}" if raw else None
-
-
-def _outbound_failure_keys(
-    mode: str,
-    conversation_id: Any,
-    target: Any,
-    chat_id: Any = None,
-) -> list[str]:
-    """Normalize a failed send's routing facts into failure-counter keys.
-
-    The sync path may only know a conversation id while the async webhook
-    knows both the conversation and the remote number (or vice versa), so
-    the counter is kept under every key we can derive and read back as the
-    max across them — one logical reply, one budget, however it is named.
-
-    Args:
-        mode: Channel the send went out on (``sms``/``imessage``/``email``).
-        conversation_id: Server conversation UUID, when known.
-        target: Remote phone number or email address, when known.
-        chat_id: Session routing id, when known. Used as a FALLBACK key
-            only (e.g. the local too-long guard, which fires before the
-            conversation/number are resolved) — never alongside conv/to
-            keys, because the delivered-receipt path clears without a
-            contact lookup and must be able to clear every recorded key.
-
-    Returns:
-        list[str]: Zero or more stable keys for ``_outbound_failure_state``.
-    """
-    keys: list[str] = []
-    conv = str(conversation_id or "").strip().lower()
-    if conv:
-        keys.append(f"{mode}:conv:{conv}")
-    raw = str(target or "").strip().lower()
-    if raw:
-        if mode == "email":
-            keys.append(f"{mode}:to:{raw}")
-        else:
-            # Phones compare by digits so +1 (603) 494-5490 and
-            # +16034945490 land on the same counter.
-            digits = re.sub(r"\D", "", raw)
-            keys.append(f"{mode}:to:{digits or raw}")
-    chat = str(chat_id or "").strip()
-    if not keys and chat:
-        keys.append(f"{mode}:chat:{chat}")
-    return keys
 
 
 def _chat_id_for_route(
@@ -1510,12 +1415,6 @@ class InkboxAdapter(BasePlatformAdapter):
         # `+` or `@` to disambiguate) — without this, send() defaults the
         # mode by chat_id shape and would email an SMS reply.
         self._last_inbound_modality: Dict[str, str] = {}
-        # failure-counter key → {"attempts": int, "at": unix ts}. Tracks how
-        # many sends of the current logical reply have already failed, per
-        # conversation/recipient (see _outbound_failure_keys), so the
-        # delivery-failure feedback loop can stop waking the agent after
-        # OUTBOUND_FAILURE_MAX_ATTEMPTS. Reset on inbound / delivered / TTL.
-        self._outbound_failure_state: Dict[str, Dict[str, float]] = {}
         # chat_id → unix timestamp at which the contact's call WS most-recently
         # closed.  send() consults this to drop replies generated during the
         # short window after a call ends — when the agent's last in-call turn
@@ -2044,29 +1943,9 @@ class InkboxAdapter(BasePlatformAdapter):
             mode = "sms" if str(chat_id).startswith("+") else "email"
 
         if mode == "sms" and len(content or "") > SMS_MAX_LENGTH:
-            failure = _sms_too_long_failure(content)
-            await self._maybe_wake_on_send_rejection(
-                mode="sms",
-                chat_id=chat_id,
-                thread_id=str(meta.get("thread_id") or "").strip() or None,
-                conversation_id=None,
-                target=str(chat_id) if str(chat_id).startswith("+") else None,
-                content=content,
-                failure=failure,
-            )
-            return failure
+            return _sms_too_long_failure(content)
         if mode == "imessage" and len(content or "") > IMESSAGE_MAX_LENGTH:
-            failure = _imessage_too_long_failure(content)
-            await self._maybe_wake_on_send_rejection(
-                mode="imessage",
-                chat_id=chat_id,
-                thread_id=str(meta.get("thread_id") or "").strip() or None,
-                conversation_id=None,
-                target=str(chat_id) if str(chat_id).startswith("+") else None,
-                content=content,
-                failure=failure,
-            )
-            return failure
+            return _imessage_too_long_failure(content)
 
         # Voice replies ride the per-call WebSocket the WS handler keeps
         # open for the duration of the call.  No SDK round-trip.
@@ -2169,19 +2048,9 @@ class InkboxAdapter(BasePlatformAdapter):
                     raw_response=raw_response,
                 )
             except Exception as exc:
-                failure = _imessage_send_failure(
+                return _imessage_send_failure(
                     exc, target=conversation_id or to_number,
                 )
-                await self._maybe_wake_on_send_rejection(
-                    mode="imessage",
-                    chat_id=chat_id,
-                    thread_id=thread_id or None,
-                    conversation_id=conversation_id or None,
-                    target=to_number or None,
-                    content=content,
-                    failure=failure,
-                )
-                return failure
 
         if mode == "sms":
             thread_id = str(meta.get("thread_id") or "").strip()
@@ -2241,17 +2110,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     raw_response=raw_response,
                 )
             except Exception as exc:
-                failure = _sms_send_failure(exc, to_number=conversation_id or to_number)
-                await self._maybe_wake_on_send_rejection(
-                    mode="sms",
-                    chat_id=chat_id,
-                    thread_id=thread_id or None,
-                    conversation_id=conversation_id or None,
-                    target=to_number or None,
-                    content=content,
-                    failure=failure,
-                )
-                return failure
+                return _sms_send_failure(exc, to_number=conversation_id or to_number)
 
         if mode == "email":
             stash = self._last_inbound_email.get(str(chat_id), {})
@@ -2306,17 +2165,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 return SendResult(success=True, message_id=str(getattr(msg, "id", "")))
             except Exception as exc:
-                failure = SendResult(success=False, error=f"send_email failed: {exc}")
-                await self._maybe_wake_on_send_rejection(
-                    mode="email",
-                    chat_id=chat_id,
-                    thread_id=str(meta.get("thread_id") or "").strip() or None,
-                    conversation_id=None,
-                    target=to_addr or None,
-                    content=content,
-                    failure=failure,
-                )
-                return failure
+                return SendResult(success=False, error=f"send_email failed: {exc}")
 
         return SendResult(success=False, error=f"Unknown Inkbox send mode: {mode!r}")
 
@@ -2519,12 +2368,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 # getting swallowed here.
                 if event_type == "message.received":
                     response = await self._on_mail_received(envelope)
-                elif event_type in ("message.bounced", "message.failed"):
-                    # Outbound mail died downstream — feed the
-                    # delivery-failure loop so the agent can react.
-                    response = await self._on_mail_delivery_failure(envelope)
                 elif event_type and event_type.startswith("message."):
-                    # Other outbound mail lifecycle (sent/delivered/forwarded) — log only.
+                    # Outbound mail lifecycle (sent/delivered/bounced/failed) — log only.
                     response = web.Response(status=200, text="ok")
                 elif event_type == "text.received":
                     response = await self._on_text_received(envelope)
@@ -2705,9 +2550,6 @@ class InkboxAdapter(BasePlatformAdapter):
             "from_address": from_address,
         }
         self._last_inbound_modality[str(chat_id)] = "email"
-        # A fresh inbound starts a fresh logical reply — reset its
-        # failed-send budget.
-        self._clear_outbound_failures("email", None, from_address, chat_id=chat_id)
 
         source = self.build_source(
             chat_id=str(chat_id),
@@ -2750,87 +2592,6 @@ class InkboxAdapter(BasePlatformAdapter):
             auto_skill=auto_skill,
         )
         await self._enqueue(event)
-        return web.Response(status=200, text="ok")
-
-    async def _on_mail_delivery_failure(self, envelope: Dict[str, Any]) -> "web.Response":
-        """Wake the agent about an outbound email that bounced or failed.
-
-        Fired for ``message.bounced`` / ``message.failed`` webhooks. A mail
-        failure is rarely fixable by rewriting — the wake-up tells the
-        agent the address may be dead so it can correct it, switch
-        channels via tools, or stop. Budget and cap are shared with the
-        other channels through ``_note_outbound_delivery_failure``.
-        """
-        event_type = str(envelope.get("event_type") or "")
-        message = (envelope.get("data") or {}).get("message") or {}
-        message_id = str(message.get("id") or "").strip()
-        direction = str(message.get("direction") or "").strip().lower()
-        if direction and direction != "outbound":
-            return web.Response(status=200, text="ok")
-        to_addresses = [
-            _normalize_email_address(addr)
-            for addr in (message.get("to_addresses") or [])
-            if addr
-        ]
-        to_address = next((addr for addr in to_addresses if addr), "")
-        if not to_address:
-            logger.warning(
-                "[Inkbox] Mail %s webhook had no recipient; not waking agent",
-                event_type,
-            )
-            return web.Response(status=200, text="ok")
-        subject = str(message.get("subject") or "")
-        status = _plain_value(message.get("status")) or event_type.split(".")[-1]
-        logger.info(
-            "[Inkbox] Mail lifecycle event=%s id=%s status=%s to=%s",
-            event_type,
-            message_id,
-            status,
-            to_address,
-        )
-
-        # ``bounced`` then ``failed`` can both fire for one message — one
-        # wake per failed email, keyed by the message id alone.
-        event_key = f"mailfail:{message_id}" if message_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
-        try:
-            thread_id = message.get("thread_id")
-            contact = await self._resolve_contact_full(kind="email", value=to_address)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("email", thread_id),
-                to_address,
-            )
-            # Give send() the threading context for a resend even if the
-            # inbound stash predates a restart; the failed message's own
-            # RFC 5322 Message-ID keeps a retry on the original thread.
-            self._last_inbound_modality.setdefault(str(chat_id), "email")
-            self._last_inbound_email.setdefault(str(chat_id), {
-                "subject": subject,
-                "rfc_message_id": str(message.get("message_id") or ""),
-                "from_address": to_address,
-            })
-            await self._note_outbound_delivery_failure(
-                mode="email",
-                chat_id=chat_id,
-                thread_id=_channel_thread_key("email", thread_id),
-                conversation_id=None,
-                target=to_address,
-                failed_body=str(message.get("snippet") or subject or ""),
-                error_code=str(status) if status else None,
-                error_detail=(
-                    f"The email to {to_address}"
-                    f"{f' (subject {subject!r})' if subject else ''} "
-                    f"was returned as {status or 'undeliverable'} by the receiving server."
-                ),
-                stage="bounced" if event_type == "message.bounced" else "delivery_failed",
-                contact=contact,
-            )
-        except Exception:
-            self._dedup_rollback(event_key)
-            raise
-        self._dedup_commit(event_key)
         return web.Response(status=200, text="ok")
 
     async def _on_external_event(
@@ -3433,9 +3194,6 @@ class InkboxAdapter(BasePlatformAdapter):
         self._last_inbound_sms[str(chat_id)] = sms_state
         if conversation_id:
             self._last_inbound_sms[_sms_state_key(chat_id, f"sms:{conversation_id}")] = sms_state
-        # A fresh inbound starts a fresh logical reply — reset its
-        # failed-send budget.
-        self._clear_outbound_failures("sms", conversation_id, remote, chat_id=chat_id)
 
         if raw_body.lstrip().startswith("/"):
             event = self._build_sms_text_event(
@@ -3478,327 +3236,19 @@ class InkboxAdapter(BasePlatformAdapter):
         await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
 
-    # ── Outbound delivery-failure feedback loop ────────────────────────
-    #
-    def _outbound_failure_store(self) -> Dict[str, Dict[str, float]]:
-        """Return the failure-counter store, creating it if missing.
-
-        Mirrors ``_prune_dedup_ids``'s self-initialization so partially
-        constructed adapters (tests, hot-reload edge cases) can't crash
-        the send path on a missing attribute.
-
-        Returns:
-            Dict[str, Dict[str, float]]: ``self._outbound_failure_state``.
-        """
-        if not hasattr(self, "_outbound_failure_state"):
-            self._outbound_failure_state = {}
-        return self._outbound_failure_state
-
-    def _record_outbound_failure(self, keys: list[str]) -> int:
-        """Bump the failed-send counter for one logical reply.
-
-        Args:
-            keys: Failure-counter keys from ``_outbound_failure_keys``.
-
-        Returns:
-            int: Total failed sends now recorded for this reply — the max
-                across all keys plus one, written back under every key so
-                sync- and webhook-reported failures share one budget.
-        """
-        store = self._outbound_failure_store()
-        now = time.time()
-        attempts = 0
-        for key in keys:
-            entry = store.get(key)
-            if entry and now - float(entry.get("at", 0.0)) <= OUTBOUND_FAILURE_STATE_TTL_SECONDS:
-                attempts = max(attempts, int(entry.get("attempts", 0)))
-        attempts += 1
-        for key in keys:
-            store[key] = {"attempts": attempts, "at": now}
-        # Opportunistic prune so the dict can't grow unbounded.
-        if len(store) > 512:
-            cutoff = now - OUTBOUND_FAILURE_STATE_TTL_SECONDS
-            self._outbound_failure_state = {
-                k: v for k, v in store.items() if float(v.get("at", 0.0)) > cutoff
-            }
-        return attempts
-
-    def _clear_outbound_failures(
-        self,
-        mode: str,
-        conversation_id: Any = None,
-        target: Any = None,
-        chat_id: Any = None,
-    ) -> None:
-        """Forget the failure counter — a fresh reply gets a fresh budget.
-
-        Clears the superset of derivable keys: unlike recording (where the
-        chat key is a fallback), a known chat id is always cleared too, so
-        an inbound reset also wipes a budget recorded chat-only (e.g. by
-        the local too-long guard).
-
-        Args:
-            mode: Channel of the budget (``sms``/``imessage``/``email``).
-            conversation_id: Server conversation UUID, when known.
-            target: Remote phone number or email address, when known.
-            chat_id: Session routing id, when known.
-        """
-        keys = _outbound_failure_keys(mode, conversation_id, target)
-        chat = str(chat_id or "").strip()
-        if chat:
-            keys.append(f"{mode}:chat:{chat}")
-        store = self._outbound_failure_store()
-        for key in keys:
-            store.pop(key, None)
-
-    async def _note_outbound_delivery_failure(
-        self,
-        *,
-        mode: str,
-        chat_id: Any,
-        thread_id: Optional[str],
-        conversation_id: Optional[str],
-        target: Optional[str],
-        failed_body: str,
-        error_code: Optional[str],
-        error_detail: Optional[str],
-        stage: str,
-        contact: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """Wake the agent about an undelivered outbound message.
-
-        Both failure surfaces funnel here: synchronous send rejections
-        (server content policy, opt-out, bad address) and asynchronous
-        delivery-failure webhooks (carrier rejection, mail bounce). The
-        wake-up turn carries the exact error plus the undelivered body so
-        the agent can fix and resend — capped at
-        ``OUTBOUND_FAILURE_MAX_ATTEMPTS`` total sends per logical reply.
-
-        Args:
-            mode: Channel the send went out on (``sms``/``imessage``/``email``).
-            chat_id: Session routing id — same value the conversation's
-                inbound events use, so the wake-up lands in that session.
-            thread_id: Session thread key (e.g. ``sms:<conversation_id>``),
-                or None when the conversation has no thread scope.
-            conversation_id: Server conversation UUID, when known.
-            target: Remote phone number or email address, when known.
-            failed_body: The message text that did not deliver.
-            error_code: Stable error code / rule slug, when known.
-            error_detail: Human-readable failure reason, when known.
-            stage: Where it died — ``send_rejected`` (sync) or
-                ``delivery_failed`` / ``bounced`` (async webhook).
-            contact: Resolved contact record for the marker, if available.
-
-        Returns:
-            None: The wake-up is enqueued fire-and-forget; failures to
-                enqueue are logged, never raised into the caller's send path.
-        """
-        keys = _outbound_failure_keys(mode, conversation_id, target, chat_id=chat_id)
-        if not keys:
-            # Nothing stable to count against — wake once, uncapped budget
-            # would risk a loop, so treat unkeyable failures as capped.
-            logger.warning(
-                "[Inkbox] Outbound %s failure had no conversation/target key; not waking agent",
-                mode,
-            )
-            return
-        attempts = self._record_outbound_failure(keys)
-        if attempts >= OUTBOUND_FAILURE_MAX_ATTEMPTS:
-            logger.error(
-                "[Inkbox] Outbound %s to %s failed %d/%d times (%s %s) — retry budget exhausted, thread goes quiet",
-                mode,
-                redact_phone(str(target or conversation_id or chat_id)),
-                attempts,
-                OUTBOUND_FAILURE_MAX_ATTEMPTS,
-                error_code or "",
-                (error_detail or "")[:120],
-            )
-            return
-
-        remaining = OUTBOUND_FAILURE_MAX_ATTEMPTS - attempts
-        snippet = (failed_body or "").strip()
-        if len(snippet) > OUTBOUND_FAILURE_BODY_SNIPPET_CHARS:
-            snippet = snippet[:OUTBOUND_FAILURE_BODY_SNIPPET_CHARS] + "…"
-        failure_line = " ".join(
-            part
-            for part in (
-                f"[{error_code}]" if error_code else "",
-                (error_detail or "").strip() or "the message was not delivered",
-            )
-            if part
-        )
-        guidance = _DELIVERY_FAILURE_CHANNEL_GUIDANCE.get(
-            mode, _DELIVERY_FAILURE_CHANNEL_GUIDANCE["sms"],
-        )
-        target_part = f" to={target}" if target else ""
-        conversation_part = (
-            f" conversation_id={conversation_id}" if conversation_id else ""
-        )
-        contact_block = self._contact_marker(contact)
-        text = (
-            f"[inkbox:delivery_failure channel={mode} stage={stage} "
-            f"attempt={attempts}/{OUTBOUND_FAILURE_MAX_ATTEMPTS}"
-            f"{target_part}{conversation_part} | {contact_block}]\n"
-            f"Your outbound {mode} message was NOT delivered — the recipient never saw it.\n"
-            f"Failure: {failure_line}\n"
-            f"Undelivered message:\n"
-            f"«{snippet}»\n"
-            f"{guidance}\n"
-            f"This reply has now failed {attempts} of {OUTBOUND_FAILURE_MAX_ATTEMPTS} allowed sends; "
-            f"{remaining} left before the thread goes quiet. Send the corrected message as a normal "
-            f"reply in this conversation. Do not mention this delivery problem to the recipient. "
-            f"If there is nothing sensible to send, reply exactly [SILENT]."
-        )
-
-        default_skills = (
-            ["inkbox:inkbox-troubleshooting", "inkbox:inkbox-imessage-responder"]
-            if mode == "imessage"
-            else "inkbox:inkbox-troubleshooting"
-        )
-        channel_prompt, auto_skill = self._resolve_channel_overrides(
-            mode, chat_id, default_skills,
-        )
-        source = self.build_source(
-            chat_id=str(chat_id),
-            chat_name=str(target or chat_id),
-            chat_type="dm",
-            user_id=str(chat_id),
-            user_name=str(target or chat_id),
-            user_id_alt=str(target or "") or None,
-            thread_id=thread_id or None,
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
-        )
-        event = MessageEvent(
-            text=text,
-            message_type=MessageType.TEXT,
-            source=source,
-            raw_message={
-                "synthetic": "delivery_failure",
-                "channel": mode,
-                "stage": stage,
-                "error_code": error_code or "",
-                "attempt": attempts,
-            },
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
-            channel_prompt=channel_prompt,
-            auto_skill=auto_skill,
-        )
-        try:
-            await self._enqueue(event)
-            logger.warning(
-                "[Inkbox] Woke agent about failed outbound %s (attempt %d/%d, stage=%s, error=%s)",
-                mode,
-                attempts,
-                OUTBOUND_FAILURE_MAX_ATTEMPTS,
-                stage,
-                error_code or "",
-            )
-        except Exception as exc:
-            logger.error(
-                "[Inkbox] Failed to enqueue delivery-failure wake-up for %s: %s",
-                mode,
-                exc,
-            )
-
-    async def _maybe_wake_on_send_rejection(
-        self,
-        *,
-        mode: str,
-        chat_id: Any,
-        thread_id: Optional[str],
-        conversation_id: Optional[str],
-        target: Optional[str],
-        content: str,
-        failure: SendResult,
-    ) -> None:
-        """Feed a synchronous send rejection into the delivery-failure loop.
-
-        Args:
-            mode: Channel the send went out on (``sms``/``imessage``/``email``).
-            chat_id: Session routing id the reply was addressed to.
-            thread_id: Session thread key from the send metadata, if any.
-            conversation_id: Server conversation UUID, when known.
-            target: Remote phone number or email address, when known.
-            content: The message body that was rejected.
-            failure: The failed SendResult built for the host gateway.
-
-        Returns:
-            None: Transient/network failures are skipped outright — the
-                host gateway retries those itself, and waking the agent
-                about them too would produce double sends.
-        """
-        if failure.retryable:
-            return
-        fields = failure.raw_response if isinstance(failure.raw_response, dict) else {}
-        error_code = str(fields.get("error_code") or "").strip() or None
-        detail = fields.get("detail")
-        rule = str(detail.get("rule") or "").strip() if isinstance(detail, dict) else ""
-        if error_code and rule:
-            # Surface the policy rule slug (e.g. markdown_artifacts,
-            # emoji_overload) — it names exactly what to fix.
-            error_code = f"{error_code} rule={rule}"
-        error_detail = (
-            str(fields.get("message") or "").strip()
-            or (failure.error or "").strip()
-            or "the send was rejected"
-        )
-        await self._note_outbound_delivery_failure(
-            mode=mode,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            conversation_id=conversation_id,
-            target=target,
-            failed_body=content,
-            error_code=error_code,
-            error_detail=error_detail,
-            stage="send_rejected",
-        )
-
     async def _on_text_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
-        """Handle SMS delivery/status callbacks for outbound messages.
-
-        ``text.delivered`` clears the failed-send counter for the
-        conversation; ``text.delivery_failed`` feeds the outbound
-        delivery-failure loop — the agent is woken with the carrier error
-        and the undelivered body so it can rewrite and resend (capped at
-        ``OUTBOUND_FAILURE_MAX_ATTEMPTS`` sends per reply). Everything
-        else (sent/unconfirmed) is logged and acknowledged.
-        """
+        """Log SMS delivery/status callbacks without enqueueing an agent turn."""
         event_type = str(envelope.get("event_type") or "")
-        data = envelope.get("data") or {}
-        text_msg = data.get("text_message") or {}
+        text_msg = (envelope.get("data") or {}).get("text_message") or {}
         text_id = str(text_msg.get("id") or "").strip()
         direction = str(text_msg.get("direction") or "").strip()
-        # Group lifecycle events name the recipient at the data level; 1:1
-        # events carry it on the legacy per-message field.
-        remote = str(
-            text_msg.get("remote_phone_number")
-            or data.get("recipient_phone_number")
-            or ""
-        ).strip()
-        conversation_id = str(text_msg.get("conversation_id") or "").strip()
+        remote = str(text_msg.get("remote_phone_number") or "").strip()
         status = (
             _plain_value(text_msg.get("delivery_status"))
             or _plain_value(text_msg.get("status"))
             or ""
         )
         error_code = _plain_value(text_msg.get("error") or text_msg.get("error_code"))
-        error_detail = _plain_value(text_msg.get("error_detail"))
-        if not error_code:
-            # Group outbound rows carry per-recipient delivery state in
-            # recipients[]; the legacy 1:1 fields are NULL there.
-            remote_digits = re.sub(r"\D", "", remote)
-            for recipient in text_msg.get("recipients") or []:
-                if not isinstance(recipient, dict) or not recipient.get("error_code"):
-                    continue
-                rec_number = str(recipient.get("recipient_phone_number") or "")
-                if remote_digits and re.sub(r"\D", "", rec_number) != remote_digits:
-                    continue
-                error_code = _plain_value(recipient.get("error_code"))
-                error_detail = _plain_value(recipient.get("error_detail"))
-                if not remote:
-                    remote = rec_number.strip()
-                break
         logger.info(
             "[Inkbox] Text lifecycle event=%s id=%s direction=%s status=%s remote=%s error=%s",
             event_type,
@@ -3808,61 +3258,6 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
-        if direction.lower() != "outbound":
-            return web.Response(status=200, text="ok")
-
-        if event_type == "text.delivered":
-            self._clear_outbound_failures("sms", conversation_id, remote)
-            return web.Response(status=200, text="ok")
-
-        if event_type != "text.delivery_failed":
-            return web.Response(status=200, text="ok")
-
-        # An outbound message fails at most once; replays of the same event
-        # (redelivery, subscription overlap) must not double-bill the retry
-        # budget or wake the agent twice.
-        event_key = f"textfail:{text_id}" if text_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
-        try:
-            contact = await self._resolve_contact_full(kind="phone", value=remote)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("sms", conversation_id),
-                remote,
-            )
-            # Make sure the agent's resend can route even if the inbound
-            # stash predates a restart: mirror what _on_text_received_once
-            # records, without clobbering fresher state.
-            if remote or conversation_id:
-                self._last_inbound_modality.setdefault(str(chat_id), "sms")
-                sms_state = {
-                    "conversation_id": conversation_id,
-                    "remote_phone_number": remote,
-                    "text_id": "",
-                    "conversation_kind": "direct",
-                }
-                self._last_inbound_sms.setdefault(str(chat_id), sms_state)
-                if conversation_id:
-                    self._last_inbound_sms.setdefault(
-                        _sms_state_key(chat_id, f"sms:{conversation_id}"), sms_state,
-                    )
-            await self._note_outbound_delivery_failure(
-                mode="sms",
-                chat_id=chat_id,
-                thread_id=_channel_thread_key("sms", conversation_id),
-                conversation_id=conversation_id or None,
-                target=remote or None,
-                failed_body=str(text_msg.get("text") or ""),
-                error_code=str(error_code) if error_code else None,
-                error_detail=str(error_detail) if error_detail else None,
-                stage="delivery_failed",
-                contact=contact,
-            )
-        except Exception:
-            self._dedup_rollback(event_key)
-            raise
-        self._dedup_commit(event_key)
         return web.Response(status=200, text="ok")
 
     def _build_imessage_event(
@@ -3984,11 +3379,6 @@ class InkboxAdapter(BasePlatformAdapter):
             self._last_inbound_imessage[
                 _sms_state_key(chat_id, f"imessage:{conversation_id}")
             ] = imessage_state
-        # A fresh inbound starts a fresh logical reply — reset its
-        # failed-send budget.
-        self._clear_outbound_failures(
-            "imessage", conversation_id, remote, chat_id=chat_id,
-        )
 
         if raw_body.lstrip().startswith("/"):
             event = self._build_imessage_event(
@@ -4032,28 +3422,18 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def _on_imessage_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
-        """Handle iMessage delivery/status callbacks for outbound messages.
+        """Log iMessage delivery/status callbacks without enqueueing an agent turn.
 
-        ``imessage.delivered`` clears the failed-send counter for the
-        conversation; ``imessage.delivery_failed`` feeds the outbound
-        delivery-failure loop (wake the agent with the error, capped
-        sends). Any other ``imessage.*`` fan-out we don't subscribe to
-        (e.g. reactions, if a subscription drifts) is logged and
+        Also the landing spot for any other ``imessage.*`` fan-out we don't
+        subscribe to (e.g. reactions, if a subscription drifts) — logged and
         acknowledged, never a turn.
         """
         event_type = str(envelope.get("event_type") or "")
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
-        direction = str(message.get("direction") or "").strip().lower()
         remote = str(message.get("remote_number") or "").strip()
-        conversation_id = str(
-            message.get("conversation_id") or message.get("conversationId") or ""
-        ).strip()
         status = _plain_value(message.get("status")) or ""
         error_code = _plain_value(message.get("error_code"))
-        error_detail = _plain_value(
-            message.get("error_detail") or message.get("error_message")
-        )
         logger.info(
             "[Inkbox] iMessage lifecycle event=%s id=%s status=%s remote=%s error=%s",
             event_type,
@@ -4062,58 +3442,6 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
-        if direction == "inbound":
-            return web.Response(status=200, text="ok")
-
-        if event_type == "imessage.delivered":
-            self._clear_outbound_failures("imessage", conversation_id, remote)
-            return web.Response(status=200, text="ok")
-
-        if event_type != "imessage.delivery_failed":
-            return web.Response(status=200, text="ok")
-
-        # One wake per failed message — replays must not double-bill the
-        # retry budget.
-        event_key = f"imessagefail:{message_id}" if message_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
-        try:
-            contact = await self._resolve_contact_full(kind="phone", value=remote)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("imessage", conversation_id),
-                remote,
-            )
-            # iMessage replies MUST target the conversation id (shared
-            # line) — make sure the stash survives a gateway restart.
-            if conversation_id:
-                self._last_inbound_modality.setdefault(str(chat_id), "imessage")
-                imessage_state = {
-                    "conversation_id": conversation_id,
-                    "remote_number": remote,
-                    "message_id": "",
-                }
-                self._last_inbound_imessage.setdefault(str(chat_id), imessage_state)
-                self._last_inbound_imessage.setdefault(
-                    _sms_state_key(chat_id, f"imessage:{conversation_id}"),
-                    imessage_state,
-                )
-            await self._note_outbound_delivery_failure(
-                mode="imessage",
-                chat_id=chat_id,
-                thread_id=_channel_thread_key("imessage", conversation_id),
-                conversation_id=conversation_id or None,
-                target=remote or None,
-                failed_body=str(message.get("content") or message.get("text") or ""),
-                error_code=str(error_code) if error_code else None,
-                error_detail=str(error_detail) if error_detail else None,
-                stage="delivery_failed",
-                contact=contact,
-            )
-        except Exception:
-            self._dedup_rollback(event_key)
-            raise
-        self._dedup_commit(event_key)
         return web.Response(status=200, text="ok")
 
     # ── iMessage typing indicator ──────────────────────────────────────────

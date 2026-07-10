@@ -19,27 +19,8 @@ import json
 import os
 import re
 import time
-import uuid
 
 import pytest
-
-
-# The agent answers a call request by dialing back, not by texting, so these
-# driver→AUT SMS never get an SMS reply to reset the server's conversation
-# cadence. Two identical no-reply sends to the same number trip the
-# duplicate_body rule (422), so every call request must carry a fresh body.
-_CALL_ME_PHRASINGS = (
-    "Please call me right now by phone — give me a ring.",
-    "Can you ring me on the phone right now?",
-    "Give me a call on my number now, please.",
-    "Please phone me right away — I'd rather talk than text.",
-)
-
-
-def _call_me_text() -> str:
-    """A fresh call-request body each send (rotating phrasing + unique ref)."""
-    phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
-    return f"{phrasing} (ref {uuid.uuid4().hex[:6]})"
 
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")
 AUT_KEY = os.environ.get("HERMES_INKBOX_API_KEY")
@@ -229,7 +210,8 @@ def test_outbound_call_realtime_direct_contact_lookup():
         agent_said = ""
         for attempt in (1, 2):
             before = {c.id for c in _inbound_from_aut()}
-            remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
+            remote.texts.send(st["number_id"], to=aut_phone,
+                              text="Please call me right now by phone — give me a ring.")
 
             deadline = time.monotonic() + attempt_timeout
             call_id = None
@@ -304,7 +286,7 @@ def test_outbound_call_realtime():
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
     before = {c.id for c in _inbound_from_aut()}
-    remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
+    remote.texts.send(st["number_id"], to=aut_phone, text="Please call me right now by phone — give me a ring.")
 
     # Wait for the agent to dial back, then verify the call transcript.
     deadline = time.monotonic() + TIMEOUT_S

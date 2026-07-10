@@ -14,14 +14,9 @@ from the AUT's number (robust to clock skew).
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import os
 import re
 import time
-import urllib.request
-import uuid
 from pathlib import Path
 
 import pytest
@@ -33,19 +28,6 @@ REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 TIMEOUT_S = float(os.environ.get("LIVE_SMS_TIMEOUT", "180"))
 POLL_EVERY_S = 6.0
 ERROR_MARKERS = ("non-retryable error", "missing authentication", "http 401", "http 403", "traceback")
-# Delivery-failure retry tests: the loop adds a full extra agent turn
-# (wake → rewrite → resend), so they get a longer budget than one Q/A.
-RETRY_TIMEOUT_S = TIMEOUT_S + 120
-SPY_FILE = os.environ.get("INKBOX_SPY_FILE", "")
-GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
-# The AUT's org signing key — same value the gateway verifies webhooks
-# with — lets the test forge a valid delivery-failure webhook. Exported
-# under a dedicated name on purpose: other live suites (external events)
-# gate their skips on HERMES_INKBOX_SIGNING_KEY, and exporting THAT name
-# here would un-skip them inside a workflow that isn't configured for
-# them (no INKBOX_EXTERNAL_EVENTS_ENABLED on this gateway).
-SIGNING_KEY = os.environ.get("AUT_INKBOX_SIGNING_KEY", "")
-AUT_WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "http://127.0.0.1:8765/webhook")
 
 pytestmark = pytest.mark.skipif(
     not (REMOTE_KEY and AUT_KEY),
@@ -83,145 +65,50 @@ def sms():
     return {"remote": remote, "aut": aut, "aut_phone": aut_phone, "remote_pid": remote_pid}
 
 
-def _inbound_from_aut(sms):
-    """List the remote's inbound messages that came from the AUT's number."""
-    remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
-    tail = _digits(aut_phone)[-10:]
-    out = []
-    for m in remote.texts.list(pid, limit=30):
-        if (getattr(m, "direction", "") or "").lower() == "inbound" \
-                and _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail:
-            out.append(m)
-    return out
-
-
-def _settle_inbound(sms) -> set:
-    """Drain to a quiet state; return the settled inbound id-set.
+def _ask_sms(sms, text: str) -> str:
+    """Text the agent; return the reply body (lowercased), matched by new message id.
 
     The agent sometimes emits a trailing *second* SMS for the PREVIOUS question
     (a duplicate "OK", or a masked + unmasked identity pair) that lands a few
     seconds late. Matching on "any new inbound id after I sent" would let that
-    leftover leak into the next question's match, so we poll until the id-set
-    stops growing — folding any in-flight trailing reply into the baseline.
+    leftover leak into the next question's match. So before sending we first
+    drain the inbound conversation to a quiet state — polling until the id-set
+    stops growing — which folds any in-flight trailing reply into ``before``.
     """
-    before = {m.id for m in _inbound_from_aut(sms)}
+    remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
+    tail = _digits(aut_phone)[-10:]
+
+    def _inbound_from_aut():
+        out = []
+        for m in remote.texts.list(pid, limit=30):
+            if (getattr(m, "direction", "") or "").lower() == "inbound" \
+                    and _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail:
+                out.append(m)
+        return out
+
+    # Settle: wait until no new inbound arrives for one quiet poll, so a trailing
+    # reply to the prior question is captured in `before` instead of mis-matched.
+    before = {m.id for m in _inbound_from_aut()}
     quiet_deadline = time.monotonic() + 2 * POLL_EVERY_S
     while time.monotonic() < quiet_deadline:
         time.sleep(POLL_EVERY_S)
-        now_ids = {m.id for m in _inbound_from_aut(sms)}
+        now_ids = {m.id for m in _inbound_from_aut()}
         if now_ids == before:
             break
         before = now_ids
-    return before
 
+    remote.texts.send(pid, to=aut_phone, text=text)
 
-def _aut_sms_rate_limited() -> bool:
-    """True if the gateway log shows the AUT hit its outbound SMS cap (429).
-
-    The shared live-test number has a 24-hour recipient cap; a busy suite
-    (or repeated CI runs) can exhaust it, after which the AUT physically
-    cannot send replies. That's live-infra capacity, not a plugin fault —
-    callers skip rather than fail so it doesn't masquerade as a regression.
-    """
-    if not GATEWAY_LOG:
-        return False
-    return "sender_rate_limited" in _gateway_log_since(0)
-
-
-def _skip_if_rate_limited() -> None:
-    if _aut_sms_rate_limited():
-        pytest.skip(
-            "AUT outbound SMS is rate-limited (429 sender_rate_limited) — the "
-            "shared live-test number hit its 24h send cap. Live-infra capacity, "
-            "not a transport/plugin failure; raise the test identity's SMS cap "
-            "or let the 24h window age out."
-        )
-
-
-def _wait_new_inbound(sms, before: set, timeout_s: float, context: str) -> str:
-    """Poll for the first inbound not in ``before``; return its body lowercased."""
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + TIMEOUT_S
     while time.monotonic() < deadline:
-        for m in _inbound_from_aut(sms):
+        for m in _inbound_from_aut():
             if m.id not in before:
                 body = getattr(m, "text", "") or ""
                 bad = [x for x in ERROR_MARKERS if x in body.lower()]
                 assert not bad, f"SMS reply is an error, not a real answer: {bad}\n{body[:200]}"
                 return body.lower()
-        # Fail fast (skip, don't burn the full timeout) if the AUT can't send.
-        _skip_if_rate_limited()
         time.sleep(POLL_EVERY_S)
-    _skip_if_rate_limited()
-    pytest.fail(f"no SMS reply within {timeout_s:.0f}s to: {context}")
-
-
-def _diversify(text: str) -> str:
-    """Append a unique ref so no two driver sends share a body.
-
-    Questions the agent answers reset the conversation cadence, but prompts
-    that get no SMS reply (call requests, a spam-blocked reply that never
-    lands) accumulate — two identical no-reply sends to the same number trip
-    the server's duplicate_body rule (422) and 500-block the harness. The ref
-    is inert to every reply-content assertion (they check the agent's answer,
-    not the echoed question).
-    """
-    return f"{text} (ref {uuid.uuid4().hex[:6]})"
-
-
-def _ask_sms(sms, text: str, timeout_s: float = TIMEOUT_S) -> str:
-    """Text the agent; return the reply body (lowercased), matched by new message id."""
-    remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
-    before = _settle_inbound(sms)
-    remote.texts.send(pid, to=aut_phone, text=_diversify(text))
-    return _wait_new_inbound(sms, before, timeout_s, repr(text))
-
-
-def _ask_sms_besteffort(sms, text: str, timeout_s: float) -> str | None:
-    """Text the agent; return the reply body lowercased, or None on timeout.
-
-    Unlike ``_ask_sms`` this never fails the test on no-reply — used where a
-    reply is a best-effort signal, not the assertion.
-    """
-    remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
-    before = _settle_inbound(sms)
-    remote.texts.send(pid, to=aut_phone, text=_diversify(text))
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        for m in _inbound_from_aut(sms):
-            if m.id not in before:
-                return (getattr(m, "text", "") or "").lower()
-        time.sleep(POLL_EVERY_S)
-    return None
-
-
-def _spy_text_sends() -> list:
-    """Parse the gateway send-spy file down to the SMS send records."""
-    if not SPY_FILE or not os.path.exists(SPY_FILE):
-        return []
-    out = []
-    for line in open(SPY_FILE, encoding="utf-8"):
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if "Texts" in rec.get("method", ""):
-            out.append(rec)
-    return out
-
-
-def _gateway_log_since(offset: int) -> str:
-    """Return gateway log text past ``offset`` ('' when the log isn't wired)."""
-    if not GATEWAY_LOG or not os.path.exists(GATEWAY_LOG):
-        return ""
-    with open(GATEWAY_LOG, encoding="utf-8", errors="replace") as fh:
-        fh.seek(offset)
-        return fh.read()
-
-
-def _gateway_log_size() -> int:
-    if not GATEWAY_LOG or not os.path.exists(GATEWAY_LOG):
-        return 0
-    return os.path.getsize(GATEWAY_LOG)
+    pytest.fail(f"no SMS reply within {TIMEOUT_S:.0f}s to: {text!r}")
 
 
 @mock_only
@@ -265,222 +152,3 @@ def test_sms_aware_of_inkbox_tools(sms):
     body = _ask_sms(sms, "Name three of your Inkbox tools (exact names).")
     hits = [t for t in tool_names if t.lower() in body]
     assert len(hits) >= 2, f"agent named only {hits} of its tools\n{body[:300]}"
-
-
-# ── Outbound delivery-failure retry loop ────────────────────────────────
-#
-# Ordering matters: the carrier-failure test runs FIRST. The spam-block
-# test deliberately creates blocked_spam_filter rows on the AUT's number,
-# and listing a conversation containing such rows crashes SDK clients
-# whose SmsDeliveryStatus enum predates that status — the carrier test's
-# conversation-id lookup must run against a clean history.
-#
-# Loop evidence comes from the gateway log (the plugin's wake-up lines),
-# which is authoritative. The send-spy is reported as a note only — it is
-# known not to load reliably inside the gateway process (see the same
-# caveat in test_email_reply.py).
-
-
-def _sign_inkbox_webhook(payload: bytes, request_id: str, timestamp: str, secret: str) -> str:
-    """Forge the Inkbox webhook signature: HMAC-SHA256 over id.ts.body."""
-    key = secret.removeprefix("whsec_")
-    message = f"{request_id}.{timestamp}.".encode() + payload
-    return "sha256=" + hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
-
-
-def _inject_inkbox_webhook(envelope: dict) -> int:
-    """POST a signed Inkbox-style webhook to the gateway's local listener."""
-    payload = json.dumps(envelope).encode()
-    request_id = str(uuid.uuid4())
-    timestamp = str(int(time.time()))
-    req = urllib.request.Request(
-        AUT_WEBHOOK_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "X-Inkbox-Request-Id": request_id,
-            "X-Inkbox-Timestamp": timestamp,
-            "X-Inkbox-Signature": _sign_inkbox_webhook(
-                payload, request_id, timestamp, SIGNING_KEY,
-            ),
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return resp.status
-
-
-def _assert_wake_logged(log_offset: int, stage: str) -> None:
-    """Require the retry loop's gateway-log fingerprint past ``log_offset``."""
-    log = _gateway_log_since(log_offset)
-    assert "Woke agent about failed outbound sms" in log, (
-        "no delivery-failure wake-up in the gateway log — retry loop did not run"
-    )
-    assert f"stage={stage}" in log
-
-
-def _assert_internal_block_surfaced(log_offset: int) -> None:
-    """Require evidence the agent was told about a synchronous spam block.
-
-    A synchronous 422 reaches the agent by one of two legitimate paths,
-    and which one a real model takes is nondeterministic:
-
-    * The agent emits a normal reply → the gateway routes it through
-      ``adapter.send()`` → the plugin's delivery-failure loop wakes the
-      agent ("Woke agent about failed outbound sms", stage=send_rejected).
-    * The agent calls the ``inkbox_send_sms`` tool directly → the 422 is
-      returned inline as the tool result (the tool executor logs it), so
-      the agent already sees the ``message_blocked_spam_filter`` rule
-      without a separate wake-up.
-
-    Both feed the block rule back to the agent; assert either, so the test
-    doesn't hinge on the model's send-path choice. (The carrier test keeps
-    the strict wake assertion — an async delivery failure has no tool path
-    and always flows through the lifecycle handler.)
-    """
-    log = _gateway_log_since(log_offset)
-    woke = "Woke agent about failed outbound sms" in log and "stage=send_rejected" in log
-    tool_saw = "message_blocked_spam_filter" in log
-    assert woke or tool_saw, (
-        "no evidence the internal spam block reached the agent — neither a "
-        "delivery-failure wake-up nor an inline tool rejection in the gateway log"
-    )
-
-
-@real_only
-@pytest.mark.skipif(not SIGNING_KEY, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
-def test_sms_retry_after_carrier_delivery_failure(sms):
-    """Inject a fake carrier delivery-failure webhook; expect a real follow-up.
-
-    Simulates the async failure surface: the send was accepted, then the
-    carrier flagged it (error 40002) and the server reported it via a
-    ``text.delivery_failed`` webhook. The webhook is forged with the AUT's
-    own signing key and posted to the gateway's local webhook listener —
-    exactly how a real delivery would arrive through the tunnel. The
-    plugin must wake the agent, and the agent must send a real follow-up
-    SMS that reaches the remote.
-    """
-    aut, remote = sms["aut"], sms["remote"]
-    aut_phone = sms["aut_phone"]
-    remote_phone, _remote_pid = _phone(remote)
-    _aut_number, aut_pid = _phone(aut)
-
-    # Prime the conversation so the agent has live routing state and the
-    # wake-up lands in an existing session.
-    _ask_sms(sms, "Please reply OK to confirm you got this text.")
-
-    # The AUT-side conversation id for this thread, read from its own API.
-    # Best-effort: a history row the installed SDK cannot hydrate (e.g. a
-    # delivery status newer than its enum) must not kill the test — the
-    # injected failure also routes fine by remote number alone.
-    conversation_id = ""
-    remote_tail = _digits(remote_phone)[-10:]
-    try:
-        for m in aut.texts.list(aut_pid, limit=30):
-            if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == remote_tail:
-                conversation_id = str(getattr(m, "conversation_id", "") or "")
-                if conversation_id:
-                    break
-    except Exception as exc:
-        print(f"note: conversation-id lookup failed ({exc!r}); injecting without one")
-
-    spy_before = len(_spy_text_sends())
-    log_offset = _gateway_log_size()
-    before = _settle_inbound(sms)
-
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    envelope = {
-        "id": f"evt_{uuid.uuid4()}",
-        "event_type": "text.delivery_failed",
-        "timestamp": now,
-        "data": {
-            "text_message": {
-                "id": str(uuid.uuid4()),
-                "direction": "outbound",
-                "local_phone_number": aut_phone,
-                "remote_phone_number": remote_phone,
-                "conversation_id": conversation_id or None,
-                "text": "Quick update: everything is on track for tomorrow.",
-                "type": "sms",
-                "media": None,
-                "is_read": True,
-                "delivery_status": "delivery_failed",
-                "error_code": "40002",
-                "error_detail": (
-                    "The message was flagged by a SPAM filter and was not "
-                    "delivered. This is a temporary condition."
-                ),
-                "created_at": now,
-                "updated_at": now,
-            },
-            "contacts": [],
-            "agent_identities": [],
-            "recipient_phone_number": None,
-        },
-    }
-    status = _inject_inkbox_webhook(envelope)
-    assert status == 200, f"gateway rejected the forged delivery-failure webhook: {status}"
-
-    # The agent must react with a real, delivered follow-up SMS.
-    body = _wait_new_inbound(
-        sms, before, RETRY_TIMEOUT_S, "follow-up after injected delivery failure",
-    )
-    assert body.strip(), "agent sent an empty follow-up"
-
-    # The loop itself must have fired for the carrier failure.
-    if GATEWAY_LOG:
-        _assert_wake_logged(log_offset, "delivery_failed")
-
-    # Spy is informational only — it is known not to load in the gateway
-    # process on some installs.
-    if SPY_FILE and len(_spy_text_sends()) - spy_before < 1:
-        print("note: follow-up delivered, but the in-gateway send-spy recorded no send")
-
-
-@real_only
-def test_sms_retry_after_internal_spam_block(sms):
-    """Bait the server's outbound content filter; assert the block reaches the agent.
-
-    Asking for three emojis makes the agent's reply trip the server's
-    one-emoji SMS budget (a synchronous 422 block — no carrier send). The
-    plugin must surface that block to the agent, which is the loop
-    engaging: either a delivery-failure wake-up (the agent emitted a
-    normal reply routed through adapter.send()) or an inline tool
-    rejection (the agent called inkbox_send_sms directly and got the 422
-    back as its tool result). Both feed the ``emoji_overload`` rule to the
-    agent to act on.
-
-    Deliberately does NOT require a compliant follow-up SMS: the ask is
-    inherently unsatisfiable (three emojis vs a one-emoji budget), so
-    whether a real model abandons the emojis and sends plain text, or
-    stops after exhausting its send budget, is model behaviour — not a
-    property of the retry loop. Loop mechanics (cap, budget, recovery) are
-    covered deterministically by tests/test_delivery_failure_retry.py, and
-    end-to-end recovery by test_sms_retry_after_carrier_delivery_failure.
-
-    NOTE: the *ask* itself must contain no emojis — the remote driver's
-    outbound rides the same filter, and an emoji-laden question would be
-    blocked before the AUT ever saw it.
-    """
-    log_offset = _gateway_log_size()
-
-    # Best-effort: a reply may or may not come (the request can't be
-    # satisfied as literally asked). Its arrival is a bonus signal, not the
-    # assertion — the loop-engaged check below is authoritative.
-    body = _ask_sms_besteffort(
-        sms,
-        "Fun formatting test: reply with ONE short message that contains at "
-        "least three different emojis of your choice. Just send it, no questions.",
-        timeout_s=RETRY_TIMEOUT_S,
-    )
-    print(f"note: compliant follow-up {'delivered' if body and body.strip() else 'not received (acceptable)'}")
-
-    # If the AUT's number is out of SMS quota, the block would be a rate-limit
-    # (429), not the emoji filter — the test premise is invalid, so skip.
-    _skip_if_rate_limited()
-
-    # Authoritative: the block reached the agent — the retry loop engaged.
-    # The gateway log is the source of truth (the emoji ask reliably trips
-    # the filter regardless of which send path the model chooses).
-    assert GATEWAY_LOG, "GATEWAY_LOG must be wired for this test to observe the loop"
-    _assert_internal_block_surfaced(log_offset)
