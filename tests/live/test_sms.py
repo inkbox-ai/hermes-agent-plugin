@@ -115,6 +115,29 @@ def _settle_inbound(sms) -> set:
     return before
 
 
+def _aut_sms_rate_limited() -> bool:
+    """True if the gateway log shows the AUT hit its outbound SMS cap (429).
+
+    The shared live-test number has a 24-hour recipient cap; a busy suite
+    (or repeated CI runs) can exhaust it, after which the AUT physically
+    cannot send replies. That's live-infra capacity, not a plugin fault —
+    callers skip rather than fail so it doesn't masquerade as a regression.
+    """
+    if not GATEWAY_LOG:
+        return False
+    return "sender_rate_limited" in _gateway_log_since(0)
+
+
+def _skip_if_rate_limited() -> None:
+    if _aut_sms_rate_limited():
+        pytest.skip(
+            "AUT outbound SMS is rate-limited (429 sender_rate_limited) — the "
+            "shared live-test number hit its 24h send cap. Live-infra capacity, "
+            "not a transport/plugin failure; raise the test identity's SMS cap "
+            "or let the 24h window age out."
+        )
+
+
 def _wait_new_inbound(sms, before: set, timeout_s: float, context: str) -> str:
     """Poll for the first inbound not in ``before``; return its body lowercased."""
     deadline = time.monotonic() + timeout_s
@@ -125,7 +148,10 @@ def _wait_new_inbound(sms, before: set, timeout_s: float, context: str) -> str:
                 bad = [x for x in ERROR_MARKERS if x in body.lower()]
                 assert not bad, f"SMS reply is an error, not a real answer: {bad}\n{body[:200]}"
                 return body.lower()
+        # Fail fast (skip, don't burn the full timeout) if the AUT can't send.
+        _skip_if_rate_limited()
         time.sleep(POLL_EVERY_S)
+    _skip_if_rate_limited()
     pytest.fail(f"no SMS reply within {timeout_s:.0f}s to: {context}")
 
 
@@ -448,6 +474,10 @@ def test_sms_retry_after_internal_spam_block(sms):
         timeout_s=RETRY_TIMEOUT_S,
     )
     print(f"note: compliant follow-up {'delivered' if body and body.strip() else 'not received (acceptable)'}")
+
+    # If the AUT's number is out of SMS quota, the block would be a rate-limit
+    # (429), not the emoji filter — the test premise is invalid, so skip.
+    _skip_if_rate_limited()
 
     # Authoritative: the block reached the agent — the retry loop engaged.
     # The gateway log is the source of truth (the emoji ask reliably trips
