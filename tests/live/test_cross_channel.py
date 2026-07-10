@@ -192,5 +192,8 @@ def test_sms_request_gets_call(xc):
     """SMS asks the agent to CALL; a new inbound call must land on the driver."""
     remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
     before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
-    remote.texts.send(remote_pid, to=aut_phone, text="Call me please — give me a ring now.")
+    # Fresh body each send: the agent replies by calling, not texting, so this
+    # SMS never gets an SMS reply to reset the conversation cadence — two
+    # identical no-reply sends would trip the duplicate_body rule (422).
+    remote.texts.send(remote_pid, to=aut_phone, text=f"Call me please — give me a ring now. (ref {_token()})")
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
