@@ -1,38 +1,38 @@
 # tests/live/conftest.py
 """Shared guardrails for the live suite.
 
-The live tests drive real SMS through the shared Inkbox 10DLC pool, which
-the server protects with conversation-health rules (see servers
-``conversation_health.py``): the same body sent twice with no reply
+The live tests drive real SMS through the shared Inkbox 10DLC pool, whose
+conversation-health rules (see servers ``conversation_health.py``) block a
+sender once its window fills: the same body twice with no reply
 (``duplicate_body``), 10 unanswered outbound (``unanswered_limit``), or 5
-carrier spam-fails in a row (``carrier_spam_backoff``) all block the next
-send. Every one of those rules keys off the window *"since the recipient's
-last inbound reply"* and **resets the moment an inbound lands** in that
-direction.
+carrier spam-fails in a row (``carrier_spam_backoff``). Each rule keys off
+the window *"since the recipient's last inbound reply"* and empties the
+moment an inbound lands in that direction.
 
-Which window has to be clean depends on who sends FIRST in the test — the
-rule blocks the sender based on *their* window, so the party that opens the
-conversation is the one that must start clean. To empty a party's window we
-land an inbound to them (the rule counts "outbound since their last
-inbound"), so the reset must *end* on a send to whoever the test opens with.
+``duplicate_body`` is already handled everywhere by per-send body
+diversification (each driver send carries a unique ref), and the tests
+never provoke real carrier fails, so the only window that creeps up is
+``unanswered_limit`` — and only in tests where the agent answers
+out-of-band (voice "call me" → the agent *calls* back, never texts), so
+nothing resets the opener's window.
 
-Most tests open with the penetrator (driver → AUT), so the reset ends on an
-AUT → penetrator poke. Tests that open the other way mark themselves
-``@pytest.mark.first_sender("aut")`` and the reset flips to end on a
-penetrator → AUT poke.
+Rather than poke an SMS before every test (which spams the real driver
+phone), this autouse guardrail only resets when needed: it reads the
+opener's current window and, if there's plenty of head-room, does nothing.
+Only when the window is close to the cap does it land an inbound on the
+opener to empty it — a cheap read per test, an actual SMS rarely.
 
-Reset strategy (per test): try the closing poke alone. If it lands, the
-opener's window is already clean — done, no agent woken (the closing poke
-is a direct SDK send, not an inbound the gateway routes to the model). If
-it's blocked, the *other* window is full and is blocking the send; run the
-full exchange — try-close, try-open (this clears the other window), try-close
-again — which drains both. The open poke is the only step that can wake the
-agent, and it only fires in that fallback case.
+"Opener" = whoever sends first in the test; the rule blocks the opener on
+*their* window, and a window empties only on an inbound to that party, so
+the reset lands on the opener. Penetrator opens by default (all current
+tests); a test that opens the other way marks itself
+``@pytest.mark.first_sender("aut")``.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import uuid
 
 import pytest
@@ -40,6 +40,12 @@ import pytest
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")
 AUT_KEY = os.environ.get("HERMES_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
+
+# Server's unanswered-outbound cap (conversation_health.UNANSWERED_OUTBOUND_LIMIT).
+UNANSWERED_LIMIT = 10
+# Reset once the opener's window leaves fewer than this many free sends —
+# comfortably more than any single test's opener-send count.
+MIN_FREE_SLOTS = 4
 
 
 def pytest_configure(config):
@@ -56,13 +62,17 @@ def _client(key: str):
     return Inkbox(api_key=key, base_url=BASE_URL)
 
 
+def _digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
 @pytest.fixture(scope="session")
 def _reset_channel():
     """Session-cached reset endpoints, or None when the suite can't run.
 
     Returns ``(aut, aut_pid, aut_phone, remote, remote_pid, driver_phone)``:
     both SDK clients plus each side's phone-number id and E.164 number, so
-    the reset can send in either direction. None off-CI (keys/numbers
+    the reset can read/send in either direction. None off-CI (keys/numbers
     absent) makes the guardrail a no-op.
     """
     if not (REMOTE_KEY and AUT_KEY):
@@ -82,6 +92,34 @@ def _reset_channel():
         return None
 
 
+def _window_count(client, pid: str, counterparty_number: str) -> int | None:
+    """The opener's unanswered-outbound count in this conversation.
+
+    Counts the opener's outbound to the counterparty since the opener's most
+    recent inbound from them — the same "since last reply" window the server
+    scores. Returns None if the history can't be read (treat as "unknown →
+    reset to be safe").
+    """
+    tail = _digits(counterparty_number)[-10:]
+    try:
+        msgs = [
+            m for m in client.texts.list(pid, limit=30)
+            if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail
+        ]
+    except Exception:
+        return None
+    # Newest first, walk back until the last inbound; count outbound before it.
+    msgs.sort(key=lambda m: str(getattr(m, "created_at", "")), reverse=True)
+    count = 0
+    for m in msgs:
+        direction = (getattr(m, "direction", "") or "").lower()
+        if direction == "inbound":
+            break
+        if direction == "outbound":
+            count += 1
+    return count
+
+
 def _try_send(send_fn) -> bool:
     """Attempt one reset send; True if it landed, False on any block/error."""
     try:
@@ -93,9 +131,9 @@ def _try_send(send_fn) -> bool:
 
 @pytest.fixture(autouse=True)
 def _reset_conversation_health(request, _reset_channel):
-    """Give each test a clean conversation-health slate for its opener.
+    """Reset the opener's conversation window only when it's running low.
 
-    See the module docstring for the who-sends-first / which-window logic.
+    See the module docstring for the who-opens / which-window logic.
     """
     if _reset_channel is None:
         yield
@@ -103,31 +141,40 @@ def _reset_conversation_health(request, _reset_channel):
 
     aut, aut_pid, aut_phone, remote, remote_pid, driver_phone = _reset_channel
 
-    def _sync_body() -> str:
-        # Unique + benign: never trips duplicate_body or the content filter.
-        return f"[test-sync] conversation reset {uuid.uuid4().hex[:8]}"
-
-    def smoke_to_pen():  # AUT -> penetrator; empties the PENETRATOR's window
+    def smoke_to_pen():  # AUT → penetrator; empties the PENETRATOR's window
         aut.texts.send(aut_pid, to=driver_phone, text=_sync_body())
 
-    def pen_to_smoke():  # penetrator -> AUT; empties the AUT's window (wakes agent)
+    def pen_to_smoke():  # penetrator → AUT; empties the AUT's window (wakes agent)
         remote.texts.send(remote_pid, to=aut_phone, text=_sync_body())
 
     marker = request.node.get_closest_marker("first_sender")
     opener = (marker.args[0] if marker and marker.args else "penetrator").lower()
 
-    # Land the LAST reset send on the opener so THEIR window is empty when the
-    # test's first real send goes out.
     if opener == "aut":
+        # AUT opens: guard the AUT's window; empty it with a penetrator→AUT poke.
+        opener_client, opener_pid, counterparty = aut, aut_pid, driver_phone
         close, open_ = pen_to_smoke, smoke_to_pen
     else:
+        # Penetrator opens: guard the driver's window; empty it with an AUT→driver poke.
+        opener_client, opener_pid, counterparty = remote, remote_pid, aut_phone
         close, open_ = smoke_to_pen, pen_to_smoke
 
+    window = _window_count(opener_client, opener_pid, counterparty)
+    # Enough head-room → don't send anything (the common, spam-free path).
+    if window is not None and UNANSWERED_LIMIT - window >= MIN_FREE_SLOTS:
+        yield
+        return
+
+    # Window is low (or unknown) → land an inbound on the opener to empty it.
     if not _try_send(close):
-        # Closing poke was blocked → the other window is full. Drain both:
-        # try-close, try-open (clears the other window), try-close again.
+        # Blocked → the counterparty's window is also full; drain both.
         _try_send(close)
         _try_send(open_)
         _try_send(close)
 
     yield
+
+
+def _sync_body() -> str:
+    # Unique + benign: never trips duplicate_body or the content filter.
+    return f"[test-sync] conversation reset {uuid.uuid4().hex[:8]}"
