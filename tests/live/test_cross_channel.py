@@ -41,6 +41,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
+
+
+def _skip_if_aut_sms_rate_limited() -> None:
+    """Skip (not fail) when the AUT hit its 24h SMS send cap (429).
+
+    The shared live-test number's outbound SMS quota can be exhausted by a
+    busy suite or repeated CI runs, after which the agent physically cannot
+    send SMS replies. That's live-infra capacity, not a plugin fault.
+    """
+    if not GATEWAY_LOG:
+        return
+    try:
+        with open(GATEWAY_LOG, encoding="utf-8", errors="replace") as fh:
+            if "sender_rate_limited" in fh.read():
+                pytest.skip(
+                    "AUT outbound SMS is rate-limited (429 sender_rate_limited) — "
+                    "shared live-test number hit its 24h send cap; live-infra "
+                    "capacity, not a transport/plugin failure."
+                )
+    except OSError:
+        return
+
+
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
@@ -120,7 +144,9 @@ def test_email_request_gets_sms_response(xc):
         for m in _sms_from_aut():
             if m.id not in before and token in (getattr(m, "text", "") or "").lower():
                 return  # cross-channel confirmed: email request -> SMS response with the token
+        _skip_if_aut_sms_rate_limited()
         time.sleep(POLL_EVERY_S)
+    _skip_if_aut_sms_rate_limited()
     pytest.fail(f"agent did not send an SMS containing {token!r} within {TIMEOUT_S:.0f}s")
 
 
@@ -192,5 +218,8 @@ def test_sms_request_gets_call(xc):
     """SMS asks the agent to CALL; a new inbound call must land on the driver."""
     remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
     before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
-    remote.texts.send(remote_pid, to=aut_phone, text="Call me please — give me a ring now.")
+    # Fresh body each send: the agent replies by calling, not texting, so this
+    # SMS never gets an SMS reply to reset the conversation cadence — two
+    # identical no-reply sends would trip the duplicate_body rule (422).
+    remote.texts.send(remote_pid, to=aut_phone, text=f"Call me please — give me a ring now. (ref {_token()})")
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
