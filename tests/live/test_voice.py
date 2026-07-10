@@ -231,44 +231,46 @@ def test_outbound_call_realtime_direct_contact_lookup():
             before = {c.id for c in _inbound_from_aut()}
             remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
+            # Poll the transcripts of EVERY call the agent places back this
+            # attempt, not just the first. A realtime call can collapse right
+            # after the greeting and the real (recite-bearing) call lands as a
+            # separate record — betting on fresh[0] misses it. The recite is
+            # the agent's own voice; realtime stores it as a transcript segment,
+            # so the stored transcript is the proof (no STT of a spoken email).
             deadline = time.monotonic() + attempt_timeout
-            call_id = None
+            saw_call = False
             while time.monotonic() < deadline:
                 fresh = [c for c in _inbound_from_aut() if c.id not in before]
-                if fresh:
-                    call_id = fresh[0].id
-                    break
-                time.sleep(POLL_EVERY_S)
-            if call_id is None:
-                # place_call can succeed API-side yet the PSTN leg never
-                # materializes (bad carrier window) — same class of flake as a
-                # collapsed call, so let the second attempt run too.
-                if attempt == 2:
-                    pytest.fail(
-                        f"agent never placed a call back within "
-                        f"{attempt_timeout:.0f}s in two attempts"
+                saw_call = saw_call or bool(fresh)
+                for c in fresh:
+                    try:
+                        segs, _rem, _loc = _segments(remote, st["number_id"], c.id)
+                    except Exception:  # transcripts may 404 until a call is set up
+                        continue
+                    # Match the WHOLE transcript (either party): only the
+                    # agent's recite carries both the surname and "example" —
+                    # the driver's question names the contact but never says
+                    # the email address.
+                    transcript = " ".join(
+                        (s.text or "").strip() for s in segs if (s.text or "").strip()
                     )
-                continue
-
-            # Poll until the ANSWER lands, not just any two-way exchange — the
-            # greeting alone already satisfies "both parties spoke". Transcript
-            # segments persist past hangup, so polling may finish after the
-            # call. The driver-leg transcript is STT of the agent's real voice;
-            # strip spaces so "zebra wood" still matches the surname.
-            deadline = time.monotonic() + attempt_timeout
-            while time.monotonic() < deadline:
-                try:
-                    _all, rem, _loc = _segments(remote, st["number_id"], call_id)
-                except Exception:  # transcripts may 404 until the call is set up
-                    rem = []
-                agent_said = " | ".join(s.text.strip() for s in rem)
-                squashed = agent_said.lower().replace(" ", "")
-                if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
-                    found = True
+                    squashed = transcript.lower().replace(" ", "")
+                    if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
+                        found, agent_said = True, transcript
+                        break
+                if found:
                     break
                 time.sleep(POLL_EVERY_S)
             if found:
                 break
+            # place_call can succeed API-side yet the PSTN leg never
+            # materialize (bad carrier window) — same class of flake as a
+            # collapsed call, so the second attempt gets a fresh call.
+            if not saw_call and attempt == 2:
+                pytest.fail(
+                    f"agent never placed a call back within "
+                    f"{attempt_timeout:.0f}s in two attempts"
+                )
         if not found:
             pytest.fail(
                 "agent speech never carried the seeded contact's details in "
