@@ -262,6 +262,34 @@ def _assert_wake_logged(log_offset: int, stage: str) -> None:
     assert f"stage={stage}" in log
 
 
+def _assert_internal_block_surfaced(log_offset: int) -> None:
+    """Require evidence the agent was told about a synchronous spam block.
+
+    A synchronous 422 reaches the agent by one of two legitimate paths,
+    and which one a real model takes is nondeterministic:
+
+    * The agent emits a normal reply → the gateway routes it through
+      ``adapter.send()`` → the plugin's delivery-failure loop wakes the
+      agent ("Woke agent about failed outbound sms", stage=send_rejected).
+    * The agent calls the ``inkbox_send_sms`` tool directly → the 422 is
+      returned inline as the tool result (the tool executor logs it), so
+      the agent already sees the ``message_blocked_spam_filter`` rule
+      without a separate wake-up.
+
+    Both feed the block rule back to the agent; assert either, so the test
+    doesn't hinge on the model's send-path choice. (The carrier test keeps
+    the strict wake assertion — an async delivery failure has no tool path
+    and always flows through the lifecycle handler.)
+    """
+    log = _gateway_log_since(log_offset)
+    woke = "Woke agent about failed outbound sms" in log and "stage=send_rejected" in log
+    tool_saw = "message_blocked_spam_filter" in log
+    assert woke or tool_saw, (
+        "no evidence the internal spam block reached the agent — neither a "
+        "delivery-failure wake-up nor an inline tool rejection in the gateway log"
+    )
+
+
 @real_only
 @pytest.mark.skipif(not SIGNING_KEY, reason="needs AUT_INKBOX_SIGNING_KEY to sign the fake webhook")
 def test_sms_retry_after_carrier_delivery_failure(sms):
@@ -375,13 +403,14 @@ def test_sms_retry_after_internal_spam_block(sms):
     )
 
     # A reply arrived at all — so whatever the agent ended up sending
-    # cleared the filter (an apology without emojis also counts).
+    # cleared the filter (an apology without emojis also counts). This is
+    # the primary proof the agent recovered from the block.
     assert body.strip(), "agent never got a compliant reply through"
 
-    # The loop itself must have fired: the plugin logs a wake-up for the
-    # synchronous send rejection. This is the authoritative loop evidence.
+    # The block must have reached the agent — via the delivery-failure
+    # wake-up (reply path) or an inline tool rejection (tool path).
     if GATEWAY_LOG:
-        _assert_wake_logged(log_offset, "send_rejected")
+        _assert_internal_block_surfaced(log_offset)
 
     # Spy is informational only — it is known not to load in the gateway
     # process on some installs.
