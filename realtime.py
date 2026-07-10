@@ -1371,6 +1371,26 @@ def _run_contact_read_sync(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     return _voice_trim_contact_result(payload)
 
 
+# Spoken while a tool runs in the background so the call keeps audio flowing.
+# Inkbox ends a call shortly after the caller's audio stops, and a silent tool
+# round-trip (contact read, consult) leaves the agent quiet — so without a filler
+# the call can idle-end mid-lookup, before the model recites the result.
+_INTERIM_FILLER_INSTRUCTIONS = (
+    "Say only 'One moment.' Do not mention waiting for "
+    "context or checking a lookup."
+)
+
+
+async def _say_interim_filler(openai_ws: Any) -> None:
+    """Make the model speak a short filler while a tool runs. Best-effort — the
+    tool result is authoritative; this only keeps the line alive during the gap."""
+    with suppress(Exception):
+        await openai_ws.send_str(json.dumps({
+            "type": "response.create",
+            "response": {"instructions": _INTERIM_FILLER_INSTRUCTIONS},
+        }))
+
+
 async def _dispatch_tool_call(
     *,
     openai_ws: Any,
@@ -1391,7 +1411,10 @@ async def _dispatch_tool_call(
 
     if name in REALTIME_CONTACT_READ_TOOLS:
         # Runs as a background task (see _finalize_fn_call); the sync SDK call
-        # moves to a thread so the audio pump keeps streaming meanwhile.
+        # moves to a thread so the audio pump keeps streaming meanwhile. Say a
+        # short filler first so the call keeps audio flowing during the otherwise
+        # silent read (else the caller's line can idle-end before the recite).
+        await _say_interim_filler(openai_ws)
         output = await asyncio.to_thread(_run_contact_read_sync, name, args)
         # Tool name only — args/results carry contact PII and live-suite logs
         # can end up in CI output.
@@ -1599,27 +1622,11 @@ async def _dispatch_tool_call(
                 return
 
         # OpenAI Realtime doesn't have a native "I'll continue later" mechanism
-        # for one tool call, but we can ALSO inject an interim instruction so
-        # the model says "one moment" while the agent thinks. The final tool
-        # result is what the model uses to compose the actual spoken answer.
-        try:
-            # Override instructions for just this turn so the model says a
-            # short filler line while the agent runs. No modalities field —
-            # it inherits the session's output_modalities (GA rejects
-            # output_modalities inside response.create).
-            await openai_ws.send_str(json.dumps({
-                "type": "response.create",
-                "response": {
-                    "instructions": (
-                        "Say only 'One moment.' Do not mention waiting for "
-                        "context or checking a lookup."
-                    ),
-                },
-            }))
-        except Exception:
-            # The interim cue is best-effort; the final tool result is
-            # authoritative.
-            pass
+        # for one tool call, but we can ALSO inject an interim instruction so the
+        # model says "one moment" while the agent thinks. No modalities field — it
+        # inherits the session's output_modalities (GA rejects output_modalities
+        # inside response.create). The final tool result is authoritative.
+        await _say_interim_filler(openai_ws)
 
         if consult_key:
             state.pending_consult_keys[consult_key] = call_id

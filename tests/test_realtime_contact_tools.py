@@ -68,8 +68,10 @@ def _dispatch(name: str, arguments: dict) -> _FakeWS:
 
 
 def _submitted_output(ws: _FakeWS) -> dict:
-    frame = ws.sent[0]
-    assert frame["type"] == "conversation.item.create"
+    # A contact read first injects a short "one moment" filler (response.create)
+    # to keep the call alive during the read, then submits the tool result — so
+    # find the function_call_output frame rather than assuming it is first.
+    frame = next(f for f in ws.sent if f["type"] == "conversation.item.create")
     assert frame["item"]["type"] == "function_call_output"
     return json.loads(frame["item"]["output"])
 
@@ -133,8 +135,12 @@ def test_contact_list_dispatch_caps_results_and_trims_for_voice(monkeypatch):
     assert first["phones"] == ["+15550000000"]
     assert len(first["notes"]) == CONTACT_READ_NOTES_MAX_CHARS
     assert "created_at" not in first
-    # The result frame is followed by response.create so the model speaks it.
-    assert ws.sent[1]["type"] == "response.create"
+    # A "one moment" filler (response.create) precedes the read; the result frame
+    # is then followed by another response.create so the model speaks it.
+    types = [f["type"] for f in ws.sent]
+    result_idx = types.index("conversation.item.create")
+    assert types[result_idx + 1] == "response.create"
+    assert types[0] == "response.create"  # the interim filler, sent before the read
 
 
 def test_contact_lookup_dispatch_passes_errors_through(monkeypatch):
