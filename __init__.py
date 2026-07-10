@@ -11,6 +11,7 @@ try:
     from .adapter import InkboxAdapter, check_inkbox_requirements, send_inkbox_direct
     from .cli import setup_argparse, handle_cli, slash_handler
     from .config import read_config
+    from .diagnostics import SETUP_HINT
     from .setup_wizard import interactive_setup
     from .tools import register_tools
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     _adapter = importlib.import_module(f"{_LOCAL_PACKAGE}.adapter")
     _cli = importlib.import_module(f"{_LOCAL_PACKAGE}.cli")
     _config = importlib.import_module(f"{_LOCAL_PACKAGE}.config")
+    _diagnostics = importlib.import_module(f"{_LOCAL_PACKAGE}.diagnostics")
     _setup_wizard = importlib.import_module(f"{_LOCAL_PACKAGE}.setup_wizard")
     _tools = importlib.import_module(f"{_LOCAL_PACKAGE}.tools")
 
@@ -37,10 +39,12 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     handle_cli = _cli.handle_cli
     slash_handler = _cli.slash_handler
     read_config = _config.read_config
+    SETUP_HINT = _diagnostics.SETUP_HINT
     interactive_setup = _setup_wizard.interactive_setup
     register_tools = _tools.register_tools
 
 logger = logging.getLogger(__name__)
+_unconfigured_warning_emitted = False
 
 
 def _validate_config(config: Any) -> bool:
@@ -54,8 +58,25 @@ def _is_connected(config: Any) -> bool:
 
 
 def _env_enablement() -> dict | None:
+    global _unconfigured_warning_emitted
+
     cfg = read_config()
     if not (cfg.api_key and cfg.identity):
+        if not _unconfigured_warning_emitted:
+            missing = [
+                name
+                for name, value in (
+                    ("INKBOX_API_KEY", cfg.api_key),
+                    ("INKBOX_IDENTITY", cfg.identity),
+                )
+                if not value
+            ]
+            logger.warning(
+                "[Inkbox] Plugin is enabled but not configured: missing %s. %s",
+                " and ".join(missing),
+                SETUP_HINT,
+            )
+            _unconfigured_warning_emitted = True
         return None
     seed: dict[str, Any] = {
         "api_key": cfg.api_key,

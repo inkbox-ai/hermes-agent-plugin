@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import re
 import sys
 from pathlib import Path
@@ -107,6 +108,35 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
+
+
+def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):
+    entry = _load_entry_module()
+    monkeypatch.delenv("INKBOX_API_KEY", raising=False)
+    monkeypatch.delenv("INKBOX_IDENTITY", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        assert entry._env_enablement() is None
+        assert entry._env_enablement() is None
+
+    warnings = [record.message for record in caplog.records if "[Inkbox]" in record.message]
+    assert len(warnings) == 1
+    assert "missing INKBOX_API_KEY and INKBOX_IDENTITY" in warnings[0]
+    assert "hermes inkbox setup" in warnings[0]
+
+
+def test_env_enablement_does_not_warn_when_configured(monkeypatch, caplog):
+    entry = _load_entry_module()
+    monkeypatch.setenv("INKBOX_API_KEY", "ApiKey_test")
+    monkeypatch.setenv("INKBOX_IDENTITY", "test-agent")
+
+    with caplog.at_level(logging.WARNING):
+        seed = entry._env_enablement()
+
+    assert seed is not None
+    assert seed["api_key"] == "ApiKey_test"
+    assert seed["identity"] == "test-agent"
+    assert not [record for record in caplog.records if "[Inkbox]" in record.message]
 
 
 def test_skill_required_tools_match_runtime_tools():
