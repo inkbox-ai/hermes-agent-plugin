@@ -47,6 +47,9 @@ LINE = os.environ.get(
     "VOICE_DRIVER_LINE",
     "Hi, this is a quick test call. Please reply out loud with one short sentence, then say goodbye.",
 )
+# Short filler used to hold the call open while the agent works — NOT the whole
+# question again (re-asking the full line spams the transcript three times over).
+NUDGE = os.environ.get("VOICE_DRIVER_NUDGE", "Take your time.")
 # Fallback delay before asking if we never hear the agent's greeting transcript.
 # We normally wait for the greeting to LAND first (see _run_turn) — asking over the
 # greeting gives the realtime agent no clean caller turn, so it answers nothing and
@@ -116,7 +119,7 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 break
             quiet_for = loop.time() - state["last_heard"]
             if REASK_EVERY_S > 0 and quiet_for >= REASK_EVERY_S:
-                await _speak(LINE)  # nudge — realtime sometimes drops the first turn
+                await _speak(NUDGE)  # short filler to hold the call, not the whole question
                 state["last_heard"] = loop.time()  # give it room before nudging again
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
