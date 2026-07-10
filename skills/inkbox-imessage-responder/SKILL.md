@@ -38,7 +38,11 @@ If a person you're connected to over iMessage asks you to call them (or you deci
 
 2. **Pick a conversation to handle.** If you need history, call `inkbox_get_imessage_conversation` with `conversationId: row.id`. Inbound messages may carry `reactions` — live tapbacks the person put on a message.
 
-3. **Compose and send.** Reply with `inkbox_send_imessage` using `conversationId`. Keep the tone conversational — iMessage is a chat thread, not email. A `sendStyle` (confetti, balloons, …) is available for celebratory moments; use sparingly.
+3. **Compose and send — reply vs. reach out.** These are different, and mixing them double-sends:
+   - **Replying to the iMessage that just woke you** (this turn carries an `[inkbox:imessage …]` marker): **just write your reply.** It is delivered automatically as an iMessage into that same thread. Do **NOT** also call `inkbox_send_imessage` for that reply — the tool would send the same message a second time.
+   - **Reaching a different conversation or recipient:** use `inkbox_send_imessage` with `conversationId` (preferred) or `to`. (Remember iMessage is recipient-first — no cold outreach.)
+
+   Keep the tone conversational — iMessage is a chat thread, not email. A `sendStyle` (confetti, balloons, …) is available for celebratory moments; use sparingly.
 
 4. **React when a reply would be noise.** A tapback via `inkbox_send_imessage_reaction` (e.g. `like` on an acknowledgment) often beats a filler message.
 

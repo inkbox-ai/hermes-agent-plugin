@@ -25,7 +25,11 @@ The Inkbox plugin gives you a working phone number under an agent identity. Use 
 
 2. **Pick a conversation to handle.** Read the latest text in the row. If you need history, call `inkbox_get_text_conversation` with `conversationId: row.id` and a reasonable `limit` (50 is fine). Use `remotePhoneNumber` only for old 1:1 rows that do not have an ID.
 
-3. **Compose and send.** Prefer `inkbox_send_sms` with `conversationId` when replying to an existing conversation, especially a group. For a new text, pass `to` as one E.164 number or a list of 2-8 E.164 numbers. Keep the tone conversational — SMS isn't email.
+3. **Compose and send — reply vs. reach out.** These are different, and mixing them double-sends:
+   - **Replying to the SMS that just woke you** (this turn carries an `[inkbox:sms …]` or `[inkbox:group_sms …]` marker): **just write your reply.** It is delivered automatically as an SMS into that same thread. Do **NOT** also call `inkbox_send_sms` for that reply — the tool would send the same text a second time.
+   - **Reaching a different conversation or recipient** (or acting on a request that came from another channel): use `inkbox_send_sms` — `conversationId` for an existing thread (preferred, especially groups), or `to` as one E.164 number / a list of 2-8 E.164 numbers for a new or group text.
+
+   Keep the tone conversational — SMS isn't email.
 
 4. **Mark as handled** if you have the optional tool allowlisted: `inkbox_mark_text_conversation_read` with `conversationId`.
 
