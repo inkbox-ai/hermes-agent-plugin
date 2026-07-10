@@ -129,11 +129,24 @@ def _wait_new_inbound(sms, before: set, timeout_s: float, context: str) -> str:
     pytest.fail(f"no SMS reply within {timeout_s:.0f}s to: {context}")
 
 
+def _diversify(text: str) -> str:
+    """Append a unique ref so no two driver sends share a body.
+
+    Questions the agent answers reset the conversation cadence, but prompts
+    that get no SMS reply (call requests, a spam-blocked reply that never
+    lands) accumulate — two identical no-reply sends to the same number trip
+    the server's duplicate_body rule (422) and 500-block the harness. The ref
+    is inert to every reply-content assertion (they check the agent's answer,
+    not the echoed question).
+    """
+    return f"{text} (ref {uuid.uuid4().hex[:6]})"
+
+
 def _ask_sms(sms, text: str, timeout_s: float = TIMEOUT_S) -> str:
     """Text the agent; return the reply body (lowercased), matched by new message id."""
     remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
     before = _settle_inbound(sms)
-    remote.texts.send(pid, to=aut_phone, text=text)
+    remote.texts.send(pid, to=aut_phone, text=_diversify(text))
     return _wait_new_inbound(sms, before, timeout_s, repr(text))
 
 
@@ -145,7 +158,7 @@ def _ask_sms_besteffort(sms, text: str, timeout_s: float) -> str | None:
     """
     remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
     before = _settle_inbound(sms)
-    remote.texts.send(pid, to=aut_phone, text=text)
+    remote.texts.send(pid, to=aut_phone, text=_diversify(text))
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         for m in _inbound_from_aut(sms):
