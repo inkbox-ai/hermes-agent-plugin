@@ -161,6 +161,25 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
 
 logger = logging.getLogger(__name__)
 
+
+class _ExpectedTunnelIdleFilter(logging.Filter):
+    """Drop the SDK's per-slot warning for a normal idle intake timeout."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            record.name == "inkbox.tunnels"
+            and "/_system/intake slot=" in message
+            and "status=408" in message
+            and "reason='intake-idle-cap'" in message
+        )
+
+
+def _install_tunnel_log_filter() -> None:
+    tunnel_logger = logging.getLogger("inkbox.tunnels")
+    if not any(isinstance(item, _ExpectedTunnelIdleFilter) for item in tunnel_logger.filters):
+        tunnel_logger.addFilter(_ExpectedTunnelIdleFilter())
+
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 DEFAULT_WEBHOOK_PATH = "/webhook"
@@ -1616,6 +1635,8 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         import threading
         from inkbox.tunnels.exceptions import TunnelNotProvisioned
+
+        _install_tunnel_log_filter()
 
         tunnel_name = self._tunnel_name_override or _slugify_for_tunnel(
             self._identity_handle,
