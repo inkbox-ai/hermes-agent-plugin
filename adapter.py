@@ -214,6 +214,13 @@ def _inkbox_platform() -> Platform:
 # wire layer, so subscribing to them would pay signature cost for no behaviour.
 _DESIRED_MAIL_EVENTS: tuple[str, ...] = ("message.received",)
 
+EMAIL_REPLY_DIRECTIVE = (
+    "Your final text response is automatically sent as the reply to this inbound email. "
+    "Do not call inkbox_send_email or another messaging tool to reply to this same message; "
+    "doing so sends a duplicate email and turns the tool receipt into a second reply. "
+    "Use messaging tools only for a separate outbound message to a different recipient or thread."
+)
+
 # Text: inbound plus the four outbound lifecycle transitions are all consumed
 # by _on_text_received / _on_text_lifecycle.
 _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
@@ -2571,6 +2578,11 @@ class InkboxAdapter(BasePlatformAdapter):
         # (system prompt and/or extra skills) for this contact.
         channel_prompt, auto_skill = self._resolve_channel_overrides(
             "email", chat_id, "inkbox:inkbox-troubleshooting"
+        )
+        channel_prompt = (
+            f"{EMAIL_REPLY_DIRECTIVE}\n\n{channel_prompt}"
+            if channel_prompt
+            else EMAIL_REPLY_DIRECTIVE
         )
         event = MessageEvent(
             text=tagged,

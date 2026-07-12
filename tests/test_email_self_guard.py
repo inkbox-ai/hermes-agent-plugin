@@ -172,6 +172,36 @@ def test_unknown_inbound_email_uses_thread_session_key(monkeypatch):
     assert events[0].source.thread_id == "email:thread-1"
     assert adapter._last_inbound_modality["email:thread-1"] == "email"
     assert adapter._last_inbound_email["email:thread-1"]["from_address"] == "person@example.com"
+    assert events[0].channel_prompt == adapter_mod.EMAIL_REPLY_DIRECTIVE
+
+
+def test_inbound_email_reply_directive_precedes_operator_prompt(monkeypatch):
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    events = []
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    async def _enqueue(event):
+        events.append(event)
+
+    adapter = _adapter_for_self_mail_check()
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+    adapter._last_inbound_email = {}
+    adapter._last_inbound_modality = {}
+    adapter._resolve_channel_overrides = lambda *_args, **_kwargs: ("CUSTOM EMAIL POLICY", None)
+
+    asyncio.run(adapter._on_mail_received(_mail_envelope("person@example.com")))
+
+    prompt = events[0].channel_prompt
+    assert prompt.startswith(adapter_mod.EMAIL_REPLY_DIRECTIVE)
+    assert prompt.endswith("CUSTOM EMAIL POLICY")
+    assert "Do not call inkbox_send_email" in prompt
 
 
 def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
