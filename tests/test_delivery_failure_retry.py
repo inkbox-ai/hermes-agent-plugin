@@ -342,6 +342,31 @@ def test_carrier_delivery_failed_replay_is_deduped():
     assert len(adapter._enqueued) == 1
 
 
+def test_carrier_delivery_unconfirmed_does_not_wake():
+    # text.delivery_unconfirmed is carrier *uncertainty*, not a failure —
+    # the message usually landed. Waking the agent here would resend a
+    # message the recipient likely already has. Ack + log only, and the
+    # retry budget stays untouched.
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
+    envelope = _delivery_failed_envelope(text_id="txt-unconfirmed")
+    envelope["event_type"] = "text.delivery_unconfirmed"
+    envelope["data"]["text_message"]["delivery_status"] = "delivery_unconfirmed"
+    envelope["data"]["text_message"]["error_code"] = None
+    envelope["data"]["text_message"]["error_detail"] = None
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+
+    assert response.status == 200
+    assert adapter._enqueued == []
+    assert adapter._outbound_failure_state == {}
+
+
+def test_delivery_unconfirmed_stays_subscribed():
+    # Still subscribed — the uncertainty lands in the gateway log even
+    # though it never wakes the agent.
+    assert "text.delivery_unconfirmed" in adapter_mod._DESIRED_TEXT_EVENTS
+
+
 def test_non_failure_lifecycle_events_do_not_wake():
     adapter = _adapter(FakeIdentity(), contact={"id": "contact-123"})
     sent = _delivery_failed_envelope()
