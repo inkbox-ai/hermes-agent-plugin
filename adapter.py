@@ -1048,6 +1048,50 @@ def _mail_agent_identity_matches(
     return False
 
 
+def _single_agent_identity(identities: list[Any]) -> Optional[Dict[str, str]]:
+    """The lone backend-resolved agent identity, or ``None``.
+
+    Exactly one resolved entry unambiguously names a 1:1 peer agent; zero
+    or several (a group, or ambiguity) yields ``None`` — never guess.
+    """
+    resolved = []
+    for entry in identities:
+        entry_id = str(_field(entry, "id") or "").strip()
+        if not entry_id:
+            # No id — the backend did not actually resolve this entry.
+            continue
+        resolved.append({
+            "id": entry_id,
+            "handle": str(_field(entry, "agent_handle", "agentHandle") or "").strip(),
+            "name": str(_field(entry, "display_name", "displayName") or "").strip(),
+        })
+    return resolved[0] if len(resolved) == 1 else None
+
+
+def _mail_sender_agent_identity(
+    envelope: Dict[str, Any],
+    from_address: str,
+) -> Optional[Dict[str, str]]:
+    """The mail *sender's* resolved agent identity, or ``None``.
+
+    Mail webhooks resolve identities per recipient bucket, so only a
+    ``from``-bucket entry whose address matches the normalized sender
+    counts — and only when exactly one does.
+    """
+    identities = _webhook_list(
+        envelope.get("data") or {},
+        "agent_identities",
+        "agentIdentities",
+    )
+    matches = [
+        entry
+        for entry in identities
+        if _field(entry, "bucket") == "from"
+        and _normalize_email_address(_field(entry, "address")) == from_address
+    ]
+    return _single_agent_identity(matches)
+
+
 def _json_safe_detail(value: Any) -> Any:
     """Keep structured provider error details if they are JSON-safe."""
     if isinstance(value, (dict, list, str, int, float, bool)) or value is None:
@@ -2731,6 +2775,13 @@ class InkboxAdapter(BasePlatformAdapter):
             from_address,
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
+        # Sender labelling fallback: the lone from-bucket agent identity
+        # matching the sender, when there is no address-book contact.
+        sender_identity = (
+            None if contact else _mail_sender_agent_identity(envelope, from_address)
+        )
+        if contact_name is None and sender_identity:
+            contact_name = sender_identity["name"] or sender_identity["handle"] or None
         rfc_message_id = message.get("message_id")  # RFC 5322 Message-ID for threading
         subject = message.get("subject") or ""
 
@@ -2768,7 +2819,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # tells the agent which modality + which Inkbox Contact (if any)
         # this message belongs to.  PLATFORM_HINTS["inkbox"] explains how
         # the agent should use this and tells it never to echo the line.
-        contact_block = self._contact_marker(contact)
+        contact_block = self._contact_marker(contact, sender_identity)
         tagged = (
             f"[inkbox:email from={from_address}"
             f"{f' subject={subject!r}' if subject else ''}"
@@ -3188,6 +3239,7 @@ class InkboxAdapter(BasePlatformAdapter):
         is_group: bool = False,
         local_phone: Optional[str] = None,
         participants: Optional[list[str]] = None,
+        agent_identity: Optional[Dict[str, str]] = None,
     ) -> MessageEvent:
         thread_id = f"sms:{conversation_id}" if conversation_id else None
         chat_name = (
@@ -3206,7 +3258,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=text_id,
         )
         if text is None:
-            contact_block = self._contact_marker(contact)
+            contact_block = self._contact_marker(contact, agent_identity)
             if is_group:
                 marker_parts = [
                     f"[inkbox:group_sms conversation_id={conversation_id or 'unknown'}",
@@ -3451,6 +3503,16 @@ class InkboxAdapter(BasePlatformAdapter):
             remote,
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
+        # Sender labelling: the address-book contact always wins; failing
+        # that, the lone resolved agent identity names the 1:1 peer. Groups
+        # keep the plain marker — several identities is not one sender.
+        sender_identity = (
+            None
+            if contact or is_group
+            else _single_agent_identity(webhook_agent_identities)
+        )
+        if contact_name is None and sender_identity:
+            contact_name = sender_identity["name"] or sender_identity["handle"] or None
         raw_body = text_msg.get("text") or ""
         body = raw_body
         media_urls, media_types, media_markers = _extract_text_media(text_msg)
@@ -3499,6 +3561,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 is_group=is_group,
                 local_phone=local_phone,
                 participants=participants,
+                agent_identity=sender_identity,
             )
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
@@ -3518,6 +3581,7 @@ class InkboxAdapter(BasePlatformAdapter):
             is_group=is_group,
             local_phone=local_phone,
             participants=participants,
+            agent_identity=sender_identity,
         )
         await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
@@ -3925,6 +3989,7 @@ class InkboxAdapter(BasePlatformAdapter):
         media_urls: Optional[list[str]] = None,
         media_types: Optional[list[str]] = None,
         conversation_id: Optional[str] = None,
+        agent_identity: Optional[Dict[str, str]] = None,
     ) -> MessageEvent:
         thread_id = f"imessage:{conversation_id}" if conversation_id else None
         source = self.build_source(
@@ -3938,7 +4003,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=message_id,
         )
         if text is None:
-            contact_block = self._contact_marker(contact)
+            contact_block = self._contact_marker(contact, agent_identity)
             conversation_part = (
                 f" conversation_id={conversation_id}" if conversation_id else ""
             )
@@ -4008,6 +4073,17 @@ class InkboxAdapter(BasePlatformAdapter):
             remote,
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
+        # Sender labelling fallback; no group iMessage, so the exactly-one
+        # rule alone guards against ambiguity.
+        sender_identity = (
+            None
+            if contact
+            else _single_agent_identity(_webhook_list(
+                envelope.get("data") or {}, "agent_identities", "agentIdentities",
+            ))
+        )
+        if contact_name is None and sender_identity:
+            contact_name = sender_identity["name"] or sender_identity["handle"] or None
         raw_body = message.get("content") or ""
         body = raw_body
         media_urls, media_types, media_markers = _extract_text_media(
@@ -4049,6 +4125,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 media_urls=media_urls,
                 media_types=media_types,
                 conversation_id=conversation_id,
+                agent_identity=sender_identity,
             )
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
@@ -4065,6 +4142,7 @@ class InkboxAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             conversation_id=conversation_id,
+            agent_identity=sender_identity,
         )
         # Show the recipient a typing indicator while the agent works on the
         # reply. The pulse is cancelled in send() once the response goes out.
@@ -4297,7 +4375,17 @@ class InkboxAdapter(BasePlatformAdapter):
             remote,
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
-        contact_block = self._contact_marker(contact)
+        # Same sender-labelling fallback as an inbound iMessage body.
+        sender_identity = (
+            None
+            if contact
+            else _single_agent_identity(_webhook_list(
+                envelope.get("data") or {}, "agent_identities", "agentIdentities",
+            ))
+        )
+        if contact_name is None and sender_identity:
+            contact_name = sender_identity["name"] or sender_identity["handle"] or None
+        contact_block = self._contact_marker(contact, sender_identity)
 
         # Keep the reply target fresh so a follow-up send() lands in the right
         # iMessage conversation, exactly like an inbound message would.
@@ -5258,9 +5346,26 @@ class InkboxAdapter(BasePlatformAdapter):
         return details
 
     @staticmethod
-    def _contact_marker(details: Optional[Dict[str, Any]]) -> str:
-        """Render a one-line contact summary for embedding in MessageEvent text."""
+    def _contact_marker(
+        details: Optional[Dict[str, Any]],
+        agent_identity: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Render a one-line contact summary for embedding in MessageEvent text.
+
+        An address-book contact always wins. *agent_identity* is the
+        fallback label for a sender Inkbox resolved as a peer agent, so
+        the agent sees who wrote instead of ``unknown_in_inkbox``.
+        """
         if not details:
+            if agent_identity:
+                # Handle and display name are remote-controlled strings —
+                # repr-quote both, like every other name in the marker.
+                parts = [f"contact_agent_identity_id={agent_identity['id']}"]
+                if agent_identity.get("handle"):
+                    parts.append(f"contact_agent_handle={agent_identity['handle']!r}")
+                if agent_identity.get("name"):
+                    parts.append(f"contact_name={agent_identity['name']!r}")
+                return " ".join(parts)
             return "contact=unknown_in_inkbox"
         parts = [f"contact_id={details['id']}"]
         if details.get("name"):
