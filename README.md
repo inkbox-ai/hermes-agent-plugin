@@ -247,6 +247,21 @@ After the gateway starts:
 | `INKBOX_REALTIME_CONSULT_TIMEOUT_S` | no | plugin default | Seconds the Realtime voice agent waits for a Hermes consult before continuing. |
 | `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
 
+## Companion Plugin Extensions
+
+Standalone Hermes plugins can reuse the Inkbox agent tunnel for authenticated
+third-party webhooks and OAuth callbacks without modifying the installed
+Inkbox plugin. Import these functions from the loaded `hermes_plugins.inkbox`
+module during the companion plugin's `register(ctx)` call:
+
+- `register_webhook_provider(ProviderClass)` registers a `WebhookProvider`
+  implementation. Verified events wake Hermes as `external:<provider-name>`.
+- `register_http_route(method, path, handler)` mounts an aiohttp handler on the
+  existing Inkbox tunnel when the gateway starts.
+
+Providers may override `event_key(envelope=..., headers=...)` for retry
+deduplication and set `skill` to auto-load a companion skill for verified events.
+
 ## Channel Overrides
 
 Two optional blocks under the `inkbox:` platform config tailor the agent per

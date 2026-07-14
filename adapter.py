@@ -136,6 +136,7 @@ try:
     from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
+    from .http_routes import registered_http_routes
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -150,6 +151,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
+    from http_routes import registered_http_routes
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
         DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -1665,6 +1667,8 @@ class InkboxAdapter(BasePlatformAdapter):
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_post(self._webhook_path, self._handle_webhook)
             self._app.router.add_get(self._ws_path, self._handle_call_ws)
+            for route in registered_http_routes():
+                self._app.router.add_route(route.method, route.path, route.handler)
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
             self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -2585,6 +2589,13 @@ class InkboxAdapter(BasePlatformAdapter):
 
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
+        if not request_id and provider is not None:
+            event_key_fn = getattr(provider, "event_key", None)
+            if callable(event_key_fn):
+                request_id = event_key_fn(
+                    envelope=envelope,
+                    headers=dict(request.headers),
+                )
         if request_id and self._dedup_begin(request_id):
             return web.Response(status=200, text="duplicate")
 
@@ -2626,7 +2637,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 # That registration is the opt-in, so deliver regardless of the
                 # external-events flag.
                 response = await self._on_external_event(
-                    envelope, request_id, verified=True
+                    envelope,
+                    request_id,
+                    verified=True,
+                    provider_name=source,
+                    provider_skill=getattr(provider, "skill", None),
                 )
             elif self._external_events_enabled:
                 # Everything else the operator opted into with the flag: an
@@ -2635,7 +2650,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 # event family). ``verified`` is True only for the Inkbox-signed
                 # case; unknown sources get the cautious directive.
                 response = await self._on_external_event(
-                    envelope, request_id, verified=(source is not None)
+                    envelope,
+                    request_id,
+                    verified=(source is not None),
+                    provider_name=source,
+                    provider_skill=getattr(provider, "skill", None) if provider else None,
                 )
             else:
                 # Not opted in (flag off) and no handler — drop without waking
@@ -2928,6 +2947,8 @@ class InkboxAdapter(BasePlatformAdapter):
         envelope: Dict[str, Any],
         request_id: str = "",
         verified: bool = False,
+        provider_name: Optional[str] = None,
+        provider_skill: "str | list[str] | None" = None,
     ) -> "web.Response":
         """Wake the agent on a fresh thread for an externally-injected event.
 
@@ -2973,10 +2994,11 @@ class InkboxAdapter(BasePlatformAdapter):
             return ""
 
         # Event name + where it came from (repo for GitHub, else any "source").
-        event_name = _field("event_type", "event") or "external"
+        event_name = _field("event_type", "event", "type") or "external"
         source_name = (
             _field("source")
             or str(github.get("repository") or repo.get("full_name") or "").strip()
+            or str(provider_name or "").strip()
             or "external"
         )
         title = _field("title")
@@ -3006,7 +3028,8 @@ class InkboxAdapter(BasePlatformAdapter):
         # explicit id (payload id or GitHub run id), fall back to the webhook
         # request id, and finally hash the payload so events never collide.
         event_key = (
-            _field("id")
+            _field("trace_id")
+            or _field("id")
             or str(github.get("run_id") or workflow_run.get("id") or "").strip()
             or request_id
         )
@@ -3058,7 +3081,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # Per-source operator overrides (system prompt and/or skills) — this is
         # the seam where the "what to do on this event" playbook is attached.
         channel_prompt, auto_skill = self._resolve_channel_overrides(
-            "external", chat_id, None
+            "external", chat_id, provider_skill
         )
         # Prepend a directive: no human reads this thread and the agent's reply
         # is not delivered, so it must reason and act via tools. A VERIFIED

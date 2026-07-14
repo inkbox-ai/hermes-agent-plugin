@@ -239,6 +239,38 @@ def test_third_party_valid_signature_proceeds(monkeypatch):
     assert captured["url"] == "https://agent.example/webhook"
 
 
+def test_provider_event_key_deduplicates_labels_source_and_loads_skill(monkeypatch):
+    fake = types.SimpleNamespace(
+        name="whoop",
+        skill="whoop:whoop-coach",
+        verify=lambda **kwargs: True,
+        event_key=lambda **kwargs: kwargs["envelope"]["trace_id"],
+    )
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda headers: fake)
+    monkeypatch.setenv("INKBOX_WEBHOOK_SECRET_WHOOP", "whoop-secret")
+    adapter = _adapter(require_signature=True, external_events_enabled=False)
+    adapter._resolve_channel_overrides = lambda _modality, _chat_id, default: (None, default)
+
+    def request():
+        return _FakeRequest(
+            b'{"id":"sleep-1","type":"recovery.updated","trace_id":"trace-1"}',
+            headers={"X-WHOOP-Signature": "good"},
+            request_id="",
+        )
+
+    first = asyncio.run(adapter._handle_webhook(request()))
+    second = asyncio.run(adapter._handle_webhook(request()))
+
+    assert first.status == 200 and first.text == "ok"
+    assert second.status == 200 and second.text == "duplicate"
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "external:whoop"
+    assert event.source.thread_id == "external:whoop:trace-1"
+    assert event.auto_skill == "whoop:whoop-coach"
+    assert "event=recovery.updated" in event.text
+
+
 def test_inkbox_signed_external_shaped_event_routes_external(monkeypatch):
     # An Inkbox *signature* only means Inkbox vouched for delivery — a forwarded
     # external event (e.g. a CI escalation) is Inkbox-signed but is NOT a known

@@ -14,6 +14,8 @@ try:
     from .diagnostics import SETUP_HINT
     from .setup_wizard import interactive_setup
     from .tools import register_tools
+    from .http_routes import register_http_route
+    from .webhook_providers import WebhookProvider, register_provider as register_webhook_provider
 except ImportError:  # pragma: no cover - direct local import/test fallback
     import importlib
     import sys
@@ -31,6 +33,8 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     _diagnostics = importlib.import_module(f"{_LOCAL_PACKAGE}.diagnostics")
     _setup_wizard = importlib.import_module(f"{_LOCAL_PACKAGE}.setup_wizard")
     _tools = importlib.import_module(f"{_LOCAL_PACKAGE}.tools")
+    _http_routes = importlib.import_module(f"{_LOCAL_PACKAGE}.http_routes")
+    _webhook_providers = importlib.import_module(f"{_LOCAL_PACKAGE}.webhook_providers")
 
     InkboxAdapter = _adapter.InkboxAdapter
     check_inkbox_requirements = _adapter.check_inkbox_requirements
@@ -42,6 +46,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     SETUP_HINT = _diagnostics.SETUP_HINT
     interactive_setup = _setup_wizard.interactive_setup
     register_tools = _tools.register_tools
+    register_http_route = _http_routes.register_http_route
+    WebhookProvider = _webhook_providers.WebhookProvider
+    register_webhook_provider = _webhook_providers.register_provider
 
 logger = logging.getLogger(__name__)
 _unconfigured_warning_emitted = False

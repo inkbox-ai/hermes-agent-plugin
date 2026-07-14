@@ -51,7 +51,14 @@ def test_request_id_commits_after_success(monkeypatch):
     adapter = _adapter()
     # Unknown event types now fall through to the external-event path; stub it
     # so this test stays focused on the dedup commit/duplicate behavior.
-    async def _ok(_envelope, _request_id="", verified=False):
+    async def _ok(
+        _envelope,
+        _request_id="",
+        verified=False,
+        provider_name=None,
+        provider_skill=None,
+    ):
+        del verified, provider_name, provider_skill
         return types.SimpleNamespace(text="ok")
 
     monkeypatch.setattr(adapter, "_on_external_event", _ok)
