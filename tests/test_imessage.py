@@ -35,6 +35,14 @@ class FakeIdentity:
         self.sent_imessages.append(kwargs)
         return FakeIMessage()
 
+    def upload_imessage_media(self, **kwargs):
+        self.calls.append(("upload_imessage_media", kwargs))
+        return types.SimpleNamespace(
+            media_url="https://media.inkbox.test/uploaded/chart.png",
+            content_type=kwargs.get("content_type"),
+            size=len(kwargs.get("content") or b""),
+        )
+
     def list_imessage_conversations(self, **kwargs):
         self.calls.append(("list_imessage_conversations", kwargs))
         return [{
@@ -96,6 +104,71 @@ def test_send_imessage_tool_prefers_conversation_id(monkeypatch):
 
     assert out["ok"] is True
     assert identity.sent_imessages == [{"text": "hello", "conversation_id": "imconv-123"}]
+
+
+def test_send_imessage_tool_uploads_local_media_path(monkeypatch, tmp_path):
+    identity = FakeIdentity()
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"fake-png")
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "conversationId": "imconv-123",
+        "text": "Here is the chart.",
+        "mediaPaths": [str(image)],
+    }))
+
+    assert out["ok"] is True
+    assert identity.calls == [
+        ("upload_imessage_media", {
+            "content": b"fake-png",
+            "filename": "chart.png",
+            "content_type": "image/png",
+        }),
+    ]
+    assert identity.sent_imessages == [{
+        "text": "Here is the chart.",
+        "conversation_id": "imconv-123",
+        "media_urls": ["https://media.inkbox.test/uploaded/chart.png"],
+    }]
+
+
+def test_send_imessage_tool_rejects_local_path_in_media_urls(monkeypatch):
+    identity = FakeIdentity()
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "conversationId": "imconv-123",
+        "mediaUrls": ["/tmp/chart.png"],
+    }))
+
+    assert "hosted HTTP(S) URLs" in out["error"]
+    assert "mediaPaths" in out["error"]
+    assert identity.sent_imessages == []
+
+
+def test_send_imessage_tool_rejects_multiple_combined_attachments(monkeypatch, tmp_path):
+    identity = FakeIdentity()
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"fake-png")
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "conversationId": "imconv-123",
+        "mediaPaths": [str(image)],
+        "mediaUrls": ["https://example.com/other.png"],
+    }))
+
+    assert "at most one media attachment" in out["error"]
+    assert identity.calls == []
+    assert identity.sent_imessages == []
+
+
+def test_send_imessage_schema_distinguishes_urls_and_paths():
+    properties = tools.SEND_IMESSAGE_SCHEMA["parameters"]["properties"]
+
+    assert properties["mediaUrls"]["items"]["format"] == "uri"
+    assert "mediaPaths" in properties
 
 
 def test_send_imessage_tool_rejects_text_over_limit(monkeypatch):
@@ -178,6 +251,104 @@ def test_adapter_imessage_reply_uses_last_inbound_conversation_id(monkeypatch):
 
     assert result.success is True
     assert identity.sent_imessages == [{"conversation_id": "imconv-123", "text": "reply"}]
+
+
+def test_adapter_imessage_channel_uploads_media_file(monkeypatch, tmp_path):
+    identity = FakeIdentity()
+    image = tmp_path / "chart.png"
+    image.write_bytes(b"fake-png")
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    adapter = object.__new__(InkboxAdapter)
+    adapter._active_call_ws = {}
+    adapter._last_inbound_modality = {"contact-123": "imessage"}
+    adapter._last_inbound_imessage = {
+        "contact-123": {
+            "conversation_id": "imconv-123",
+            "remote_number": "+15555550101",
+        },
+    }
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    result = asyncio.run(adapter.send_image_file(
+        "contact-123",
+        str(image),
+        caption="Here is the chart.",
+        metadata={"mode": "imessage"},
+    ))
+
+    assert result.success is True
+    assert identity.calls == [
+        ("upload_imessage_media", {
+            "content": b"fake-png",
+            "filename": "chart.png",
+            "content_type": "image/png",
+        }),
+    ]
+    assert identity.sent_imessages == [{
+        "text": "Here is the chart.",
+        "media_urls": ["https://media.inkbox.test/uploaded/chart.png"],
+        "conversation_id": "imconv-123",
+    }]
+
+
+def test_adapter_imessage_channel_sends_hosted_media_url(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    adapter = object.__new__(InkboxAdapter)
+    adapter._active_call_ws = {}
+    adapter._last_inbound_modality = {"contact-123": "imessage"}
+    adapter._last_inbound_imessage = {
+        "contact-123": {
+            "conversation_id": "imconv-123",
+            "remote_number": "+15555550101",
+        },
+    }
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    result = asyncio.run(adapter.send_image(
+        "contact-123",
+        "https://example.com/chart.png",
+        metadata={"mode": "imessage"},
+    ))
+
+    assert result.success is True
+    assert identity.calls == []
+    assert identity.sent_imessages == [{
+        "text": None,
+        "media_urls": ["https://example.com/chart.png"],
+        "conversation_id": "imconv-123",
+    }]
+
+
+def test_adapter_imessage_channel_rejects_unsafe_media_path(monkeypatch):
+    identity = FakeIdentity()
+    adapter = object.__new__(InkboxAdapter)
+    adapter._active_call_ws = {}
+    adapter._last_inbound_modality = {"contact-123": "imessage"}
+    adapter._last_inbound_imessage = {}
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    result = asyncio.run(adapter.send_image_file(
+        "contact-123",
+        "/tmp/does-not-exist.png",
+        metadata={"mode": "imessage"},
+    ))
+
+    assert result.success is False
+    assert result.raw_response["error_code"] == "invalid_imessage_media_path"
+    assert identity.calls == []
+    assert identity.sent_imessages == []
 
 
 def test_adapter_imessage_reply_rejects_text_over_limit():

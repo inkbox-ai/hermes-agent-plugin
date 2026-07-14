@@ -182,6 +182,8 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`) arrive as webhooks and are logged by the gateway without waking the agent; `imessage.delivery_failed` wakes the agent to fix and resend, matching the SMS lifecycle handling — where `text.delivery_unconfirmed` (carrier uncertainty, not a failure) is likewise logged without a wake.
 
+Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. For explicit `inkbox_send_imessage` calls, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
+
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
 ## CLI

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import mimetypes
 import os
 import secrets
 import time
@@ -18,6 +19,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
 
 SMS_MAX_LENGTH = 1600
 IMESSAGE_MAX_LENGTH = 18995
+IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
 
 
 def _json(data: Dict[str, Any]) -> str:
@@ -91,6 +93,68 @@ def _call_with_key_and_options(method, key: str, options: Dict[str, Any], camel_
             return method(key, camel_options or options)
         except TypeError:
             return method(key)
+
+
+def _public_http_media_url(value: str) -> bool:
+    """Return whether *value* is a remotely fetchable HTTP(S) URL."""
+    parsed = urlparse(str(value).strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _safe_local_media_path(value: str) -> Path:
+    """Resolve a local attachment through Hermes' media-delivery guard."""
+    candidate = Path(str(value).strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+
+    try:
+        from gateway.platforms.base import validate_media_delivery_path
+    except ImportError as exc:  # pragma: no cover - supported Hermes provides it
+        raise RuntimeError(
+            "This Hermes version cannot securely validate local media paths; upgrade Hermes Agent."
+        ) from exc
+
+    safe_path = validate_media_delivery_path(str(candidate))
+    if not safe_path:
+        raise ValueError(
+            f"Local media path is missing, unsafe, or not an allowed file: {value}"
+        )
+
+    resolved = Path(safe_path)
+    size = resolved.stat().st_size
+    if size > IMESSAGE_MEDIA_MAX_BYTES:
+        raise ValueError(
+            f"iMessage media is {size} bytes; maximum is {IMESSAGE_MEDIA_MAX_BYTES} bytes (10 MiB)."
+        )
+    return resolved
+
+
+def _upload_imessage_media_path(identity: Any, value: str) -> str:
+    """Upload one local file and return the SDK's hosted media URL."""
+    path = _safe_local_media_path(value)
+    upload = _identity_method(identity, "upload_imessage_media", "uploadIMessageMedia")
+    content = path.read_bytes()
+    content_type = mimetypes.guess_type(path.name)[0]
+    result = _call_with_kwargs_or_payload(
+        upload,
+        {
+            "content": content,
+            "filename": path.name,
+            "content_type": content_type,
+        },
+        {
+            "content": content,
+            "filename": path.name,
+            "contentType": content_type,
+        },
+    )
+    if isinstance(result, dict):
+        media_url = result.get("media_url") or result.get("mediaUrl")
+    else:
+        media_url = getattr(result, "media_url", None) or getattr(result, "mediaUrl", None)
+    if not media_url or not _public_http_media_url(str(media_url)):
+        raise RuntimeError("Inkbox media upload returned no valid hosted HTTP(S) URL")
+    return str(media_url)
 
 
 def _json_safe(value: Any) -> Any:
@@ -585,13 +649,22 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
     try:
         _cfg, _client, identity = _client_and_identity()
         text = str(args.get("text") or "")
-        media_urls = _normalize_recipients(args.get("mediaUrls") or args.get("media_urls"))
-        if not text and not media_urls:
-            return _json({"error": "Provide `text`, `mediaUrls`, or both."})
+        media_urls = list(_normalize_recipients(args.get("mediaUrls") or args.get("media_urls")) or [])
+        media_paths = list(_normalize_recipients(args.get("mediaPaths") or args.get("media_paths")) or [])
+        if not text and not media_urls and not media_paths:
+            return _json({"error": "Provide `text`, `mediaUrls`, `mediaPaths`, or a combination."})
         if len(text) > IMESSAGE_MAX_LENGTH:
             return _json(_message_too_long_payload("iMessage", text, IMESSAGE_MAX_LENGTH))
-        if media_urls and len(media_urls) > 1:
-            return _json({"error": "Inkbox iMessage supports at most one media URL per message."})
+        if len(media_urls) + len(media_paths) > 1:
+            return _json({"error": "Inkbox iMessage supports at most one media attachment per message."})
+        invalid_urls = [url for url in media_urls if not _public_http_media_url(url)]
+        if invalid_urls:
+            return _json({
+                "error": (
+                    "`mediaUrls` must contain hosted HTTP(S) URLs. "
+                    "Use `mediaPaths` for local files such as /tmp/chart.png."
+                ),
+            })
 
         conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
         to = str(args.get("to") or "").strip()
@@ -606,6 +679,8 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
         else:
             payload["to"] = to
             camel_payload["to"] = to
+        if media_paths:
+            media_urls = [_upload_imessage_media_path(identity, media_paths[0])]
         if media_urls:
             payload["media_urls"] = media_urls
             camel_payload["mediaUrls"] = media_urls
@@ -1131,7 +1206,18 @@ SEND_IMESSAGE_SCHEMA = {
             "conversationId": {"type": "string", "description": "Existing Inkbox iMessage conversation UUID. Preferred for replies. Mutually exclusive with `to`."},
             "to": {"type": "string", "description": "Recipient phone number in E.164 format. Only works after that person has messaged this agent. Mutually exclusive with `conversationId`."},
             "text": {"type": "string", "maxLength": IMESSAGE_MAX_LENGTH, "description": "Message body, max 18995 chars."},
-            "mediaUrls": {"type": "array", "items": {"type": "string"}, "maxItems": 1, "description": "Optional media URL (at most one per message)."},
+            "mediaUrls": {
+                "type": "array",
+                "items": {"type": "string", "format": "uri"},
+                "maxItems": 1,
+                "description": "Optional publicly fetchable HTTP(S) media URL. For a local file, use `mediaPaths` instead.",
+            },
+            "mediaPaths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 1,
+                "description": "Optional local file path to upload and attach. The plugin uploads it through Inkbox before sending.",
+            },
             "sendStyle": {
                 "type": "string",
                 "enum": ["celebration", "shooting_star", "fireworks", "lasers", "love", "confetti", "balloons", "spotlight", "echo", "invisible", "gentle", "loud", "slam"],
