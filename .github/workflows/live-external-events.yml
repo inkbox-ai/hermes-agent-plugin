@@ -11,10 +11,10 @@ on:
   workflow_call:
     inputs:
       timeout_s:
-        description: "Seconds to wait for the external-event assertion"
+        description: "Seconds to wait for external-event delivery"
         required: false
         type: string
-        default: "200"
+        default: "45"
       orchestrated:
         description: "True when the full-stack workflow owns the shared live lock"
         required: false
@@ -23,8 +23,8 @@ on:
   workflow_dispatch:
     inputs:
       timeout_s:
-        description: "Seconds to wait for the agent to place the call"
-        default: "200"
+        description: "Seconds to wait for external-event delivery"
+        default: "45"
 
 permissions:
   contents: read
@@ -117,7 +117,7 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
-          LIVE_EXTERNAL_TIMEOUT: ${{ inputs.timeout_s || '200' }}
+          LIVE_EXTERNAL_TIMEOUT: ${{ inputs.timeout_s || '45' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
