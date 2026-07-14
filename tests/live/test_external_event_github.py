@@ -15,7 +15,11 @@ import pytest
 
 GITHUB_SECRET = os.environ.get("INKBOX_WEBHOOK_SECRET_GITHUB")
 WEBHOOK_URL = os.environ.get("AUT_WEBHOOK_URL", "http://127.0.0.1:8765/webhook")
-GATEWAY_LOG = os.environ.get("GATEWAY_LOG", "")
+GATEWAY_LOG = (
+    os.path.join(os.environ["HERMES_HOME"], "logs", "gateway.log")
+    if os.environ.get("HERMES_HOME")
+    else os.environ.get("GATEWAY_LOG", "")
+)
 TIMEOUT_S = float(os.environ.get("LIVE_GITHUB_SESSION_TIMEOUT", "45"))
 POLL_EVERY_S = 0.5
 
