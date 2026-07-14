@@ -15,6 +15,11 @@ try:
     from .setup_wizard import interactive_setup
     from .tools import register_tools
     from .http_routes import register_http_route
+    from .reply_guard import (
+        note_imessage_tool_delivery,
+        record_inbound_route,
+        suppress_duplicate_final,
+    )
     from .webhook_providers import WebhookProvider, register_provider as register_webhook_provider
 except ImportError:  # pragma: no cover - direct local import/test fallback
     import importlib
@@ -34,6 +39,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     _setup_wizard = importlib.import_module(f"{_LOCAL_PACKAGE}.setup_wizard")
     _tools = importlib.import_module(f"{_LOCAL_PACKAGE}.tools")
     _http_routes = importlib.import_module(f"{_LOCAL_PACKAGE}.http_routes")
+    _reply_guard = importlib.import_module(f"{_LOCAL_PACKAGE}.reply_guard")
     _webhook_providers = importlib.import_module(f"{_LOCAL_PACKAGE}.webhook_providers")
 
     InkboxAdapter = _adapter.InkboxAdapter
@@ -47,6 +53,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     interactive_setup = _setup_wizard.interactive_setup
     register_tools = _tools.register_tools
     register_http_route = _http_routes.register_http_route
+    note_imessage_tool_delivery = _reply_guard.note_imessage_tool_delivery
+    record_inbound_route = _reply_guard.record_inbound_route
+    suppress_duplicate_final = _reply_guard.suppress_duplicate_final
     WebhookProvider = _webhook_providers.WebhookProvider
     register_webhook_provider = _webhook_providers.register_provider
 
@@ -201,6 +210,9 @@ def register(ctx) -> None:
         ),
     )
     register_tools(ctx)
+    ctx.register_hook("pre_gateway_dispatch", record_inbound_route)
+    ctx.register_hook("post_tool_call", note_imessage_tool_delivery)
+    ctx.register_hook("transform_llm_output", suppress_duplicate_final)
     ctx.register_cli_command(
         name="inkbox",
         help="Inkbox plugin commands",

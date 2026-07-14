@@ -235,8 +235,9 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "Only call inkbox_send_sms to text a DIFFERENT conversation or number, never "
     "to reply here (that sends your message twice).",
     "imessage": "Your reply in this iMessage thread is sent automatically — just "
-    "write it. Only call inkbox_send_imessage to reach a DIFFERENT conversation or "
-    "person, never to reply here (that sends your message twice).",
+    "write it. For an attachment in this thread, include MEDIA:/absolute/path in "
+    "that one reply. Only call inkbox_send_imessage to reach a DIFFERENT conversation "
+    "or person, never to reply here (that sends your message twice).",
     "email": "Your reply to this email is sent automatically as a threaded reply — "
     "just write it. Only call inkbox_send_email to email a DIFFERENT thread or "
     "recipient, never to reply here (that sends your message twice).",

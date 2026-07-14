@@ -1199,7 +1199,7 @@ IMESSAGE_TRIAGE_NUMBER_SCHEMA = {
 
 SEND_IMESSAGE_SCHEMA = {
     "name": "inkbox_send_imessage",
-    "description": "Send an iMessage from the configured Inkbox identity. Recipient-first channel: a person must have connected via the iMessage router and messaged this agent before outbound sends work, so prefer conversationId from an inbound message or inkbox_list_imessage_conversations.",
+    "description": "Send an iMessage to a different conversation or recipient from the configured Inkbox identity. Do not use this tool to reply to the iMessage that triggered the current turn; Hermes sends the final reply automatically, including MEDIA:/absolute/path attachments. Recipient-first channel: a person must have connected via the iMessage router and messaged this agent before outbound sends work.",
     "parameters": {
         "type": "object",
         "properties": {
