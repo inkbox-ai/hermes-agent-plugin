@@ -173,7 +173,7 @@ def test_distinct_events_get_distinct_threads():
     }
 
 
-def test_github_native_payload_extracts_source_and_run():
+def test_github_native_payload_extracts_source_and_run(caplog):
     # Real GitHub webhooks nest repository.full_name and workflow_run.id/html_url
     # (not our demo `github` block) — the routing fields must still resolve.
     adapter = _adapter()
@@ -186,11 +186,13 @@ def test_github_native_payload_extracts_source_and_run():
             "html_url": "https://github.com/inkbox-ai/servers/actions/runs/991",
         },
     }
+    caplog.set_level("INFO", logger=adapter_mod.logger.name)
     asyncio.run(adapter._on_external_event(body, "req-gh", verified=True))
     event = adapter._enqueued[0]
     assert event.source.chat_id == "external:inkbox-ai/servers"
     assert event.source.thread_id == "external:inkbox-ai/servers:991"
     assert "runs/991" in event.text
+    assert "External event enqueued: external:inkbox-ai/servers:991" in caplog.text
 
 
 def test_external_source_name_sanitized_in_marker():

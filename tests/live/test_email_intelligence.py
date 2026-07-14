@@ -23,6 +23,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -83,10 +84,25 @@ def _manifest_tool_names() -> list[str]:
     return [t for t in manifest.get("provides_tools", []) if isinstance(t, str)]
 
 
-def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
-    """Email the agent a question; return the reply body (lowercased)."""
+def _ask(
+    remote,
+    aut_email: str,
+    remote_email: str,
+    question: str,
+    accept: Callable[[str], bool] | None = None,
+) -> str:
+    """Email the agent and return a matching message created after the request.
+
+    Hermes may answer in-thread or send the substantive content through the
+    email tool before emitting a generic confirmation. Inspect all new mail
+    from the AUT so assertions follow the requested content, not delivery style.
+    """
     from inkbox.mail.types import MessageDirection
 
+    def _inbound():
+        return list(remote.messages.list(remote_email, direction=MessageDirection.INBOUND))
+
+    before = {str(msg.id) for msg in _inbound()}
     nonce = f"smoke-{uuid.uuid4().hex[:8]}"
     sent = remote.messages.send(remote_email, to=[aut_email], subject=f"[{nonce}] {question[:40]}", body_text=question)
     thread_id = str(getattr(sent, "thread_id", "") or "")
@@ -97,16 +113,31 @@ def _ask(remote, aut_email: str, remote_email: str, question: str) -> str:
         frm = (getattr(msg, "from_address", "") or "").lower()
         return aut_email.lower() in frm and nonce in (getattr(msg, "subject", "") or "")
 
+    seen: set[str] = set()
+    candidates: list[str] = []
     deadline = time.monotonic() + TIMEOUT_S
     while time.monotonic() < deadline:
-        for msg in remote.messages.list(remote_email, direction=MessageDirection.INBOUND):
-            if _is_reply(msg):
-                body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
-                bad = [m for m in ERROR_MARKERS if m in body.lower()]
-                assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
-                return body.lower()
+        for msg in _inbound():
+            msg_id = str(msg.id)
+            if msg_id in before or msg_id in seen:
+                continue
+            sender = (getattr(msg, "from_address", "") or "").lower()
+            if aut_email.lower() not in sender:
+                continue
+            seen.add(msg_id)
+            body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
+            lowered = body.lower()
+            bad = [m for m in ERROR_MARKERS if m in lowered]
+            assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
+            candidates.append(body)
+            if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
+                return lowered
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"no reply within {TIMEOUT_S:.0f}s to: {question!r}")
+    previews = "\n---\n".join(body[:500] for body in candidates) or "(none)"
+    pytest.fail(
+        f"no acceptable reply within {TIMEOUT_S:.0f}s to: {question!r}\n"
+        f"new emails from AUT:\n{previews}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -134,10 +165,15 @@ def test_reports_own_identity(ctx):
     aut_phone = _first_phone(aut)
     assert aut_phone, "AUT identity has no phone number to report"
 
-    body = _ask(ctx["remote"], aut_email, ctx["remote_email"],
-                "What is your full Inkbox identity? Reply with your handle, display "
-                "name, email address, and phone number. Write the phone number in "
-                "full — every digit, with no masking, asterisks, or abbreviation.")
+    body = _ask(
+        ctx["remote"], aut_email, ctx["remote_email"],
+        "What is your full Inkbox identity? Reply with your handle, display "
+        "name, email address, and phone number. Write the phone number in "
+        "full — every digit, with no masking, asterisks, or abbreviation.",
+        accept=lambda candidate: (
+            handle in candidate and aut_email in candidate and _phone_present(aut_phone, candidate)
+        ),
+    )
     assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
     # Accept a privacy-masked phone (the model self-redacts the middle digits in
@@ -168,10 +204,17 @@ def test_reports_sender_details(ctx):
     emails = [e.value for e in getattr(contact, "emails", [])]
     phones = [p.value for p in getattr(contact, "phones", [])]
 
-    body = _ask(ctx["remote"], ctx["aut_email"], remote_email,
-                "Who am I to you? Tell me everything you have on file about me. "
-                "Include my phone number in full — every digit, with no masking, "
-                "asterisks, or abbreviation.")
+    body = _ask(
+        ctx["remote"], ctx["aut_email"], remote_email,
+        "Who am I to you? Tell me everything you have on file about me. "
+        "Include my phone number in full — every digit, with no masking, "
+        "asterisks, or abbreviation.",
+        accept=lambda candidate: (
+            (not name or name.lower() in candidate)
+            and any(e.lower() in candidate for e in emails)
+            and (not phones or any(_phone_present(p, candidate) for p in phones))
+        ),
+    )
     if name:
         assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:400]}"
     assert any(e.lower() in body for e in emails), f"reply missing sender email {emails}\n{body[:400]}"
@@ -196,8 +239,11 @@ def test_aware_of_inkbox_tools(ctx):
     assert contact_tools <= set(tool_names)
     assert "inkbox_export_contact_vcard" not in tool_names
 
-    body = _ask(ctx["remote"], ctx["aut_email"], ctx["remote_email"],
-                "List the exact names of all the Inkbox tools you have access to, one per line.")
+    body = _ask(
+        ctx["remote"], ctx["aut_email"], ctx["remote_email"],
+        "List the exact names of all the Inkbox tools you have access to, one per line.",
+        accept=lambda candidate: all(t.lower() in candidate for t in contact_tools),
+    )
     hits = [t for t in tool_names if t.lower() in body]
     assert len(hits) >= 3, f"agent named only {hits} of its tools {tool_names}\n{body[:500]}"
     missing_contacts = sorted(t for t in contact_tools if t.lower() not in body)
@@ -237,6 +283,7 @@ def test_contact_crud_tool_use(ctx):
             "Use inkbox_create_contact now. Create a new contact named "
             f"{contact_name} with email {contact_email}. Do not just describe the action. "
             f"After the tool succeeds, reply exactly: CREATED {nonce}",
+            accept=lambda candidate: "created" in candidate and nonce in candidate,
         )
         assert "created" in created and nonce in created, created[:500]
         matches = _contacts_by_email(aut, contact_email)
@@ -251,6 +298,7 @@ def test_contact_crud_tool_use(ctx):
             "Use inkbox_update_contact now. Update contactId "
             f"{contact_id} and set notes to {updated_notes}. Do not create a second contact. "
             f"After the tool succeeds, reply exactly: UPDATED {nonce}",
+            accept=lambda candidate: "updated" in candidate and nonce in candidate,
         )
         assert "updated" in updated and nonce in updated, updated[:500]
         fetched = aut.contacts.get(contact_id)
@@ -262,6 +310,7 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote_email"],
             "I confirm this is a temporary test contact. Use inkbox_delete_contact now "
             f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
+            accept=lambda candidate: "deleted" in candidate and nonce in candidate,
         )
         assert "deleted" in deleted and nonce in deleted, deleted[:500]
         assert not _contacts_by_email(aut, contact_email)
