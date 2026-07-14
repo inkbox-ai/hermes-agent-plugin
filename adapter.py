@@ -81,6 +81,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import shutil
 import re
@@ -88,6 +89,7 @@ import socket as _socket
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -95,7 +97,6 @@ if TYPE_CHECKING:
     # Used only in forward-ref annotations (the module has `from __future__
     # import annotations`); both are imported locally where actually called.
     import threading
-    from pathlib import Path
 
 try:
     from aiohttp import WSMsgType, web
@@ -240,6 +241,7 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
 }
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
 IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
+IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
 SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
 SMS_TEXT_BATCH_MAX_MESSAGES = 8
 SMS_TEXT_BATCH_MAX_CHARS = 4000
@@ -397,6 +399,12 @@ def _imessage_conversation_target(raw: Any) -> Optional[str]:
         candidate = match.group(1).strip()
         return candidate if candidate and not candidate.startswith("+") else None
     return None
+
+
+def _public_http_media_url(value: Any) -> bool:
+    """Return whether *value* is a hosted HTTP(S) media URL."""
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
 def _sms_state_key(chat_id: Any, thread_id: Any = None) -> str:
@@ -2009,6 +2017,312 @@ class InkboxAdapter(BasePlatformAdapter):
     # Outbound: send / edit / get_chat_info
     # ------------------------------------------------------------------
 
+    def _is_imessage_media_route(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Whether a native media send belongs on the iMessage channel."""
+        meta = metadata or {}
+        explicit_mode = str(meta.get("mode") or "").lower().strip()
+        if explicit_mode:
+            return explicit_mode == "imessage"
+        if chat_id in getattr(self, "_active_call_ws", {}):
+            return False
+        if str(getattr(self, "_last_inbound_modality", {}).get(str(chat_id)) or "") == "imessage":
+            return True
+        thread_id = str(meta.get("thread_id") or "").strip()
+        return bool(
+            _imessage_conversation_target(thread_id)
+            or _imessage_conversation_target(chat_id)
+        )
+
+    async def _resolve_imessage_destination(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Tuple[str, str, str]:
+        """Resolve conversation id, recipient number, and thread id."""
+        meta = metadata or {}
+        thread_id = str(meta.get("thread_id") or "").strip()
+        inbound = getattr(self, "_last_inbound_imessage", {})
+        imessage_meta = (
+            inbound.get(_sms_state_key(chat_id, thread_id))
+            or inbound.get(str(chat_id), {})
+        )
+        conversation_id = str(
+            meta.get("conversation_id")
+            or meta.get("conversationId")
+            or _imessage_conversation_target(thread_id)
+            or _imessage_conversation_target(chat_id)
+            or imessage_meta.get("conversation_id")
+            or ""
+        ).strip()
+        to_number = str(imessage_meta.get("remote_number") or "").strip()
+        if not conversation_id and not to_number:
+            if str(chat_id).startswith("+"):
+                to_number = str(chat_id).strip()
+            else:
+                to_number = await asyncio.to_thread(
+                    self._lookup_contact_phone, chat_id,
+                ) or ""
+        return conversation_id, to_number, thread_id
+
+    async def _send_imessage_media(
+        self,
+        chat_id: str,
+        *,
+        caption: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        media_url: Optional[str] = None,
+        local_path: Optional[str] = None,
+    ) -> SendResult:
+        """Upload local media when needed, then send one native iMessage attachment."""
+        if bool(media_url) == bool(local_path):
+            return SendResult(
+                success=False,
+                error="Specify exactly one iMessage media URL or local path.",
+            )
+        if media_url and not _public_http_media_url(media_url):
+            return SendResult(
+                success=False,
+                error="iMessage media URLs must be hosted HTTP(S) URLs.",
+                raw_response={"error_code": "invalid_imessage_media_url"},
+            )
+        if self._inkbox is None:
+            return SendResult(success=False, error="Inkbox SDK client not initialized")
+
+        try:
+            identity = await asyncio.to_thread(
+                self._inkbox.get_identity, self._identity_handle,
+            )
+        except Exception as exc:
+            return SendResult(success=False, error=f"get_identity failed: {exc}")
+
+        hosted_url = str(media_url or "")
+        if local_path:
+            validator = getattr(self, "validate_media_delivery_path", None)
+            safe_path = validator(local_path) if callable(validator) else None
+            if not safe_path:
+                return SendResult(
+                    success=False,
+                    error=f"Local media path is missing, unsafe, or not allowed: {local_path}",
+                    raw_response={"error_code": "invalid_imessage_media_path"},
+                )
+            path = Path(safe_path)
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                return SendResult(success=False, error=f"Cannot read local media: {exc}")
+            if size > IMESSAGE_MEDIA_MAX_BYTES:
+                return SendResult(
+                    success=False,
+                    error=(
+                        f"iMessage media is {size} bytes; maximum is "
+                        f"{IMESSAGE_MEDIA_MAX_BYTES} bytes (10 MiB)."
+                    ),
+                    raw_response={"error_code": "imessage_media_too_large"},
+                )
+            upload_media = getattr(identity, "upload_imessage_media", None)
+            if not callable(upload_media):
+                return SendResult(
+                    success=False,
+                    error=(
+                        "Installed Inkbox SDK has no upload_imessage_media; "
+                        "upgrade with: pip install -U inkbox"
+                    ),
+                )
+
+            def _upload_local_file():
+                return upload_media(
+                    content=path.read_bytes(),
+                    filename=path.name,
+                    content_type=mimetypes.guess_type(path.name)[0],
+                )
+
+            try:
+                upload = await asyncio.to_thread(_upload_local_file)
+            except Exception as exc:
+                return SendResult(
+                    success=False,
+                    error=f"Inkbox iMessage media upload failed: {exc}",
+                    raw_response={"error_code": "imessage_media_upload_failed"},
+                    retryable=True,
+                )
+            if isinstance(upload, dict):
+                hosted_url = str(upload.get("media_url") or upload.get("mediaUrl") or "")
+            else:
+                hosted_url = str(
+                    getattr(upload, "media_url", None)
+                    or getattr(upload, "mediaUrl", None)
+                    or ""
+                )
+            if not _public_http_media_url(hosted_url):
+                return SendResult(
+                    success=False,
+                    error="Inkbox media upload returned no valid hosted HTTP(S) URL.",
+                    raw_response={"error_code": "invalid_imessage_upload_response"},
+                )
+
+        conversation_id, to_number, thread_id = await self._resolve_imessage_destination(
+            chat_id, metadata,
+        )
+        if not conversation_id and not to_number:
+            return SendResult(
+                success=False,
+                error=f"No iMessage conversation or phone number for chat {chat_id}",
+            )
+
+        self._stop_imessage_typing(conversation_id)
+        send_imessage = getattr(identity, "send_imessage", None)
+        if not callable(send_imessage):
+            return SendResult(
+                success=False,
+                error=(
+                    "Installed Inkbox SDK has no send_imessage; "
+                    "upgrade with: pip install -U inkbox"
+                ),
+            )
+
+        payload: Dict[str, Any] = {
+            "text": caption or None,
+            "media_urls": [hosted_url],
+        }
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+            target_label = f"conversation:{conversation_id}"
+        else:
+            payload["to"] = to_number
+            target_label = redact_phone(to_number)
+        try:
+            msg = await asyncio.to_thread(send_imessage, **payload)
+            raw_response = _text_message_metadata(msg, mode="imessage")
+            logger.info(
+                "[Inkbox] iMessage media queued to %s: id=%s status=%s",
+                target_label,
+                raw_response.get("message_id") or "",
+                raw_response.get("status") or "",
+            )
+            return SendResult(
+                success=True,
+                message_id=str(getattr(msg, "id", "")),
+                raw_response=raw_response,
+            )
+        except Exception as exc:
+            failure = _imessage_send_failure(
+                exc, target=conversation_id or to_number,
+            )
+            await self._maybe_wake_on_send_rejection(
+                mode="imessage",
+                chat_id=chat_id,
+                thread_id=thread_id or None,
+                conversation_id=conversation_id or None,
+                target=to_number or None,
+                content=caption or "[media attachment]",
+                failure=failure,
+            )
+            return failure
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if self._is_imessage_media_route(chat_id, metadata):
+            return await self._send_imessage_media(
+                chat_id,
+                caption=caption,
+                metadata=metadata,
+                media_url=image_url,
+            )
+        return await super().send_image(
+            chat_id, image_url, caption, reply_to, metadata,
+        )
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        if self._is_imessage_media_route(chat_id, metadata):
+            return await self._send_imessage_media(
+                chat_id,
+                caption=caption,
+                metadata=metadata,
+                local_path=image_path,
+            )
+        return await super().send_image_file(
+            chat_id, image_path, caption, reply_to, metadata, **kwargs,
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        if self._is_imessage_media_route(chat_id, metadata):
+            return await self._send_imessage_media(
+                chat_id,
+                caption=caption,
+                metadata=metadata,
+                local_path=file_path,
+            )
+        return await super().send_document(
+            chat_id, file_path, caption, file_name, reply_to, metadata, **kwargs,
+        )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        if self._is_imessage_media_route(chat_id, metadata):
+            return await self._send_imessage_media(
+                chat_id,
+                caption=caption,
+                metadata=metadata,
+                local_path=video_path,
+            )
+        return await super().send_video(
+            chat_id, video_path, caption, reply_to, metadata, **kwargs,
+        )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        if self._is_imessage_media_route(chat_id, metadata):
+            return await self._send_imessage_media(
+                chat_id,
+                caption=caption,
+                metadata=metadata,
+                local_path=audio_path,
+            )
+        return await super().send_voice(
+            chat_id, audio_path, caption, reply_to, metadata, **kwargs,
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -2189,26 +2503,9 @@ class InkboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"get_identity failed: {exc}")
 
         if mode == "imessage":
-            thread_id = str(meta.get("thread_id") or "").strip()
-            imessage_meta = (
-                self._last_inbound_imessage.get(_sms_state_key(chat_id, thread_id))
-                or self._last_inbound_imessage.get(str(chat_id), {})
+            conversation_id, to_number, thread_id = await self._resolve_imessage_destination(
+                chat_id, meta,
             )
-            conversation_id = str(
-                meta.get("conversation_id")
-                or meta.get("conversationId")
-                or _imessage_conversation_target(thread_id)
-                or imessage_meta.get("conversation_id")
-                or ""
-            ).strip()
-            to_number = str(imessage_meta.get("remote_number") or "").strip()
-            if not conversation_id and not to_number:
-                if str(chat_id).startswith("+"):
-                    to_number = str(chat_id).strip()
-                else:
-                    to_number = await asyncio.to_thread(
-                        self._lookup_contact_phone, chat_id,
-                    ) or ""
             if not conversation_id and not to_number:
                 return SendResult(
                     success=False,

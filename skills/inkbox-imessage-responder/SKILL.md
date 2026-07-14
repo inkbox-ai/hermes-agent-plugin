@@ -44,6 +44,8 @@ If a person you're connected to over iMessage asks you to call them (or you deci
 
    Keep the tone conversational — iMessage is a chat thread, not email. A `sendStyle` (confetti, balloons, …) is available for celebratory moments; use sparingly.
 
+   **Attachments:** when replying in the current iMessage thread, include `MEDIA:/absolute/local/path` in the reply and the Inkbox channel uploads it as a native attachment. When sending through `inkbox_send_imessage`, pass local files with `mediaPaths`; use `mediaUrls` only for already-hosted public HTTP(S) URLs. Never put `/tmp/...`, `file://...`, or another local path in `mediaUrls`.
+
 4. **React when a reply would be noise.** A tapback via `inkbox_send_imessage_reaction` (e.g. `like` on an acknowledgment) often beats a filler message.
 
 5. **Mark as handled** if you have the optional tool allowlisted: `inkbox_mark_imessage_conversation_read` with `conversationId` — this also shows the sender a read receipt.
