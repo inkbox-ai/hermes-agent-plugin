@@ -1605,6 +1605,8 @@ class InkboxAdapter(BasePlatformAdapter):
         # delivery-failure feedback loop can stop waking the agent after
         # OUTBOUND_FAILURE_MAX_ATTEMPTS. Reset on inbound / delivered / TTL.
         self._outbound_failure_state: Dict[str, Dict[str, float]] = {}
+        # outbound message id -> context dictionary tracking sent messages.
+        self._outbound_context: Dict[str, Dict[str, Any]] = {}
         # chat_id → unix timestamp at which the contact's call WS most-recently
         # closed.  send() consults this to drop replies generated during the
         # short window after a call ends — when the agent's last in-call turn
@@ -2543,6 +2545,19 @@ class InkboxAdapter(BasePlatformAdapter):
                     raw_response.get("message_id") or "",
                     raw_response.get("status") or "",
                 )
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    self._prune_outbound_context()
+                    self._outbound_context[msg_id] = {
+                        "channel": "imessage",
+                        "chat_id": chat_id,
+                        "recipient": to_number or "",
+                        "body_snippet": content,
+                        "conversation_id": conversation_id or "",
+                        "email_thread_id": None,
+                        "email_subject": None,
+                        "at": time.time(),
+                    }
                 return SendResult(
                     success=True,
                     message_id=str(getattr(msg, "id", "")),
@@ -2615,6 +2630,19 @@ class InkboxAdapter(BasePlatformAdapter):
                     raw_response.get("message_id") or "",
                     raw_response.get("delivery_status") or raw_response.get("status") or "",
                 )
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    self._prune_outbound_context()
+                    self._outbound_context[msg_id] = {
+                        "channel": "sms",
+                        "chat_id": chat_id,
+                        "recipient": to_number or "",
+                        "body_snippet": content,
+                        "conversation_id": conversation_id or "",
+                        "email_thread_id": None,
+                        "email_subject": None,
+                        "at": time.time(),
+                    }
                 return SendResult(
                     success=True,
                     message_id=str(getattr(msg, "id", "")),
@@ -2684,7 +2712,20 @@ class InkboxAdapter(BasePlatformAdapter):
                     body_text=content,
                     in_reply_to_message_id=in_reply_to or None,
                 )
-                return SendResult(success=True, message_id=str(getattr(msg, "id", "")))
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    self._prune_outbound_context()
+                    self._outbound_context[msg_id] = {
+                        "channel": "email",
+                        "chat_id": chat_id,
+                        "recipient": to_addr or "",
+                        "body_snippet": content,
+                        "conversation_id": None,
+                        "email_thread_id": in_reply_to or meta.get("thread_id"),
+                        "email_subject": subject,
+                        "at": time.time(),
+                    }
+                return SendResult(success=True, message_id=msg_id)
             except Exception as exc:
                 failure = SendResult(success=False, error=f"send_email failed: {exc}")
                 await self._maybe_wake_on_send_rejection(
@@ -3182,13 +3223,29 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            thread_id = message.get("thread_id")
-            contact = await self._resolve_contact_full(kind="email", value=to_address)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("email", thread_id),
-                to_address,
-            )
+            ctx = self._outbound_context.get(message_id) if message_id else None
+            if ctx:
+                chat_id = ctx.get("chat_id")
+                thread_id = ctx.get("email_thread_id") or message.get("thread_id")
+                to_address = ctx.get("recipient") or to_address
+                subject = ctx.get("email_subject") or subject
+                failed_body = ctx.get("body_snippet") or str(message.get("snippet") or subject or "")
+                contact = await self._resolve_contact_full(kind="email", value=to_address) if to_address else None
+            else:
+                thread_id = message.get("thread_id")
+                contact = await self._resolve_contact_full(kind="email", value=to_address)
+                chat_id = _chat_id_for_route(
+                    contact,
+                    _channel_thread_key("email", thread_id),
+                    to_address,
+                )
+                failed_body = str(message.get("snippet") or subject or "")
+
+            if not chat_id:
+                logger.warning("[Inkbox] Could not resolve a chat session for email delivery failure; not waking agent")
+                self._dedup_commit(event_key)
+                return web.Response(status=200, text="ok")
+
             # Give send() the threading context for a resend even if the
             # inbound stash predates a restart; the failed message's own
             # RFC 5322 Message-ID keeps a retry on the original thread.
@@ -3204,7 +3261,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 thread_id=_channel_thread_key("email", thread_id),
                 conversation_id=None,
                 target=to_address,
-                failed_body=str(message.get("snippet") or subject or ""),
+                failed_body=failed_body,
                 error_code=str(status) if status else None,
                 error_detail=(
                     f"The email to {to_address}"
@@ -3886,6 +3943,16 @@ class InkboxAdapter(BasePlatformAdapter):
 
     # ── Outbound delivery-failure feedback loop ────────────────────────
     #
+    def _prune_outbound_context(self) -> None:
+        """Prune outbound context entries older than 2 hours."""
+        if not hasattr(self, "_outbound_context"):
+            self._outbound_context = {}
+        now = time.time()
+        cutoff = now - 7200.0
+        stale = [k for k, v in self._outbound_context.items() if v.get("at", 0) < cutoff]
+        for k in stale:
+            self._outbound_context.pop(k, None)
+
     def _outbound_failure_store(self) -> Dict[str, Dict[str, float]]:
         """Return the failure-counter store, creating it if missing.
 
@@ -4231,12 +4298,27 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            contact = await self._resolve_contact_full(kind="phone", value=remote)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("sms", conversation_id),
-                remote,
-            )
+            ctx = self._outbound_context.get(text_id) if text_id else None
+            if ctx:
+                chat_id = ctx.get("chat_id")
+                conversation_id = ctx.get("conversation_id") or conversation_id
+                remote = ctx.get("recipient") or remote
+                failed_body = ctx.get("body_snippet") or str(text_msg.get("text") or "")
+                contact = await self._resolve_contact_full(kind="phone", value=remote) if remote else None
+            else:
+                contact = await self._resolve_contact_full(kind="phone", value=remote)
+                chat_id = _chat_id_for_route(
+                    contact,
+                    _channel_thread_key("sms", conversation_id),
+                    remote,
+                )
+                failed_body = str(text_msg.get("text") or "")
+
+            if not chat_id:
+                logger.warning("[Inkbox] Could not resolve a chat session for SMS delivery failure; not waking agent")
+                self._dedup_commit(event_key)
+                return web.Response(status=200, text="ok")
+
             # Make sure the agent's resend can route even if the inbound
             # stash predates a restart: mirror what _on_text_received_once
             # records, without clobbering fresher state.
@@ -4259,7 +4341,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 thread_id=_channel_thread_key("sms", conversation_id),
                 conversation_id=conversation_id or None,
                 target=remote or None,
-                failed_body=str(text_msg.get("text") or ""),
+                failed_body=failed_body,
                 error_code=str(error_code) if error_code else None,
                 error_detail=str(error_detail) if error_detail else None,
                 stage="delivery_failed",
@@ -4498,12 +4580,27 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            contact = await self._resolve_contact_full(kind="phone", value=remote)
-            chat_id = _chat_id_for_route(
-                contact,
-                _channel_thread_key("imessage", conversation_id),
-                remote,
-            )
+            ctx = self._outbound_context.get(message_id) if message_id else None
+            if ctx:
+                chat_id = ctx.get("chat_id")
+                conversation_id = ctx.get("conversation_id") or conversation_id
+                remote = ctx.get("recipient") or remote
+                failed_body = ctx.get("body_snippet") or str(message.get("content") or message.get("text") or "")
+                contact = await self._resolve_contact_full(kind="phone", value=remote) if remote else None
+            else:
+                contact = await self._resolve_contact_full(kind="phone", value=remote)
+                chat_id = _chat_id_for_route(
+                    contact,
+                    _channel_thread_key("imessage", conversation_id),
+                    remote,
+                )
+                failed_body = str(message.get("content") or message.get("text") or "")
+
+            if not chat_id:
+                logger.warning("[Inkbox] Could not resolve a chat session for iMessage delivery failure; not waking agent")
+                self._dedup_commit(event_key)
+                return web.Response(status=200, text="ok")
+
             # iMessage replies MUST target the conversation id (shared
             # line) — make sure the stash survives a gateway restart.
             if conversation_id:
@@ -4524,7 +4621,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 thread_id=_channel_thread_key("imessage", conversation_id),
                 conversation_id=conversation_id or None,
                 target=remote or None,
-                failed_body=str(message.get("content") or message.get("text") or ""),
+                failed_body=failed_body,
                 error_code=str(error_code) if error_code else None,
                 error_detail=str(error_detail) if error_detail else None,
                 stage="delivery_failed",

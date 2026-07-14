@@ -135,6 +135,7 @@ def _adapter(identity, *, contact=None):
     adapter._last_inbound_sms = {}
     adapter._last_inbound_imessage = {}
     adapter._last_inbound_email = {}
+    adapter._outbound_context = {}
     adapter._stop_imessage_typing = lambda *_a, **_k: None
     adapter._resolve_channel_overrides = lambda *_a, **_k: (None, None)
 
@@ -568,3 +569,124 @@ def test_budget_expires_after_ttl():
 
     assert len(adapter._enqueued) == 2
     assert f"attempt=1/{MAX}" in adapter._enqueued[1].text
+
+
+def test_outbound_context_correlation_first_sms():
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-456", "name": "Alice"})
+    # Seed context
+    adapter._outbound_context["txt-out-2"] = {
+        "channel": "sms",
+        "chat_id": "contact-789",  # Different from the contact-456 resolved via fallback
+        "recipient": "+15555550202",
+        "body_snippet": "Hello Alice!",
+        "conversation_id": "conv-456",
+        "email_thread_id": None,
+        "email_subject": None,
+        "at": time.time(),
+    }
+
+    envelope = _delivery_failed_envelope(text_id="txt-out-2", conversation_id="conv-456")
+    envelope["data"]["text_message"]["remote_phone_number"] = "+15555550202"
+    envelope["data"]["text_message"]["text"] = "Hello Alice! Extra text"
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    # Wakes the chat_id from context (contact-789) not the fallback one (contact-456)
+    assert event.source.chat_id == "contact-789"
+    assert "Hello Alice!" in event.text
+    assert "Hello Alice! Extra text" not in event.text  # uses the body_snippet from context
+
+
+def test_outbound_context_correlation_unresolved_no_wake():
+    adapter = _adapter(FakeIdentity(), contact=None)
+    # The webhook fails to resolve to any contact (contact=None), and no context exists.
+    # Therefore, no usable thread/session can be resolved.
+    envelope = _delivery_failed_envelope(text_id="txt-unknown", conversation_id="")
+    envelope["data"]["text_message"]["remote_phone_number"] = ""
+    envelope["data"]["text_message"]["recipients"] = []
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+    assert response.status == 200
+    assert adapter._enqueued == []  # Not woken
+
+
+def test_outbound_context_correlation_first_imessage():
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-456", "name": "Alice"})
+    adapter._outbound_context["imsg-out-2"] = {
+        "channel": "imessage",
+        "chat_id": "contact-789",
+        "recipient": "+15555550202",
+        "body_snippet": "iMessage snippet",
+        "conversation_id": "imsg-conv-2",
+        "email_thread_id": None,
+        "email_subject": None,
+        "at": time.time(),
+    }
+
+    response = asyncio.run(adapter._on_imessage_lifecycle({
+        "id": "evt-imsg-2",
+        "event_type": "imessage.delivery_failed",
+        "data": {
+            "message": {
+                "id": "imsg-out-2",
+                "direction": "outbound",
+                "remote_number": "+15555550202",
+                "conversation_id": "imsg-conv-2",
+                "content": "Full iMessage body",
+                "status": "delivery_failed",
+                "error_code": "OPTED_OUT",
+                "error_detail": "Recipient has opted out.",
+            },
+        },
+    }))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-789"
+    assert "iMessage snippet" in event.text
+    assert "Full iMessage body" not in event.text
+
+
+def test_outbound_context_correlation_first_email():
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-456", "name": "Alice"})
+    adapter._outbound_context["mail-out-2"] = {
+        "channel": "email",
+        "chat_id": "contact-789",
+        "recipient": "alice@example.com",
+        "body_snippet": "Email body snippet",
+        "conversation_id": None,
+        "email_thread_id": "thread-2",
+        "email_subject": "Proposed Subject",
+        "at": time.time(),
+    }
+
+    envelope = {
+        "id": "evt-mail-2",
+        "event_type": "message.bounced",
+        "data": {
+            "message": {
+                "id": "mail-out-2",
+                "mailbox_id": "mb-1",
+                "thread_id": "thread-fallback",
+                "message_id": "<out-2@inkboxmail.com>",
+                "from_address": "agent@inkboxmail.com",
+                "to_addresses": ["alice@example.com"],
+                "subject": "Fallback Subject",
+                "snippet": "Full Email Snippet",
+                "direction": "outbound",
+                "status": "bounced",
+            },
+        },
+    }
+    response = asyncio.run(adapter._on_mail_delivery_failure(envelope))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-789"
+    assert "email:thread-2" in event.source.thread_id
+    assert "Email body snippet" in event.text
+    assert "Proposed Subject" in event.text
+    assert "Full Email Snippet" not in event.text
+
