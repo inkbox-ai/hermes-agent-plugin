@@ -3080,6 +3080,7 @@ class InkboxAdapter(BasePlatformAdapter):
             internal=True,  # no Inkbox contact behind this — bypass user auth
         )
         await self._enqueue(event)
+        logger.info("[Inkbox] External event enqueued: %s", thread_id)
         return web.Response(status=200, text="ok")
 
     def _resolve_channel_overrides(
