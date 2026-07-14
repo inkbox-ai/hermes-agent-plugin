@@ -484,7 +484,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.0"
+version = "0.2.3"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -501,7 +501,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "inkbox", specifier = ">=0.4.10,<0.4.15" },
+    { name = "inkbox", specifier = ">=0.4.20,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0" },
     { name = "segno", specifier = ">=1.5" },
@@ -574,7 +574,7 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.4.13"
+version = "0.4.24"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -584,9 +584,9 @@ dependencies = [
     { name = "h2" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/45/22/0891e422160349159f7346a76c65107a93fed6bec60e70c9d41d4689a62d/inkbox-0.4.13.tar.gz", hash = "sha256:f7f91757713c60b8d92085264720a7ef013bd4093c969345eaa6b0bb3f42e35c", size = 294977, upload-time = "2026-06-28T04:37:47.655Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/42/ff93f58971b4d32f5e0c2d144c8e940466b0cf5b6205ba35143cba517387/inkbox-0.4.24.tar.gz", hash = "sha256:6495991355316faa4671c8e7bc6867eed62a03fc3499b9432632eb478e4f9df8", size = 339600, upload-time = "2026-07-13T07:29:30.2Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/73/fc566f55d0fb3d5563b53a61e42e9b7e992203081f3543c5cabb58485f66/inkbox-0.4.13-py3-none-any.whl", hash = "sha256:31cf621b84c3e2fbe5c5523fc06b00ac2a8e04ad03be634262e9044df5165281", size = 208866, upload-time = "2026-06-28T04:37:46.393Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/13/3aea8bd266026ba5f168b2f960a1291e8f9ed0bc840d1551207a55550bd1/inkbox-0.4.24-py3-none-any.whl", hash = "sha256:862c5c41283ed23f1bb1b90bb495481e880653c6a11c9d3aaf6dc44b504ce2f3", size = 234801, upload-time = "2026-07-13T07:29:28.863Z" },
 ]
 
 [[package]]

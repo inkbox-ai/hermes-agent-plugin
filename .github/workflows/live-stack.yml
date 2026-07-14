@@ -1,0 +1,120 @@
+name: Full stack e2e
+
+# One owner for the shared AUT identity and tunnel. Component suites run in
+# sequence, and the aggregate job is the only live branch-protection context.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Canary — plugin vs Hermes main"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inkbox-live-aut-tunnel
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  channels:
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    uses: ./.github/workflows/live-channels.yml
+    with:
+      orchestrated: true
+    secrets: inherit
+
+  voice:
+    needs: channels
+    if: >
+      !cancelled() &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'))
+    uses: ./.github/workflows/live-voice.yml
+    with:
+      orchestrated: true
+    secrets: inherit
+
+  external-events:
+    needs: voice
+    if: >
+      !cancelled() &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'))
+    uses: ./.github/workflows/live-external-events.yml
+    with:
+      orchestrated: true
+    secrets: inherit
+
+  full-stack:
+    name: full-stack
+    needs: [channels, voice, external-events]
+    if: >
+      !cancelled() &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every live suite to pass
+        env:
+          CHANNELS_RESULT: ${{ needs.channels.result }}
+          VOICE_RESULT: ${{ needs.voice.result }}
+          EXTERNAL_EVENTS_RESULT: ${{ needs.external-events.result }}
+        run: |
+          failed=0
+          for suite in CHANNELS VOICE EXTERNAL_EVENTS; do
+            result_var="${suite}_RESULT"
+            result="${!result_var}"
+            echo "$suite: $result"
+            if [ "$result" != "success" ]; then failed=1; fi
+          done
+          exit "$failed"
+
+  notify:
+    needs: [channels, voice, external-events, full-stack]
+    if: >
+      always() &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'schedule' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (needs.channels.result != 'success' ||
+       needs.voice.result != 'success' ||
+       needs.external-events.result != 'success' ||
+       needs.full-stack.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Notify Google Chat
+        env:
+          WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+        run: |
+          [ -n "$WEBHOOK_URL" ] || { echo "GOOGLE_CHAT_WEBHOOK_URL is missing"; exit 1; }
+          curl --fail-with-body --retry 3 --retry-all-errors --max-time 20 \
+            -sS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\": \"🚨 hermes-agent-plugin full-stack e2e FAILED (chained off the canary): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$WEBHOOK_URL"

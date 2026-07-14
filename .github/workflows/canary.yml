@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -31,15 +31,21 @@ jobs:
           uv sync --extra test --python 3.12
           uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
 
-      - name: Contract tests vs real Hermes main
-        run: uv run pytest tests/contract -v
+      - name: Complete offline suite vs real Hermes main
+        run: uv run pytest -q
 
-      # Alert only when an unattended (scheduled) run fails — no success pings,
-      # and manual dispatch stays silent (you're watching it). Non-blocking
-      # (--retry + || true) so a flaky webhook can't flip the result.
+  notify:
+    needs: canary
+    if: always() && github.event_name == 'schedule' && needs.canary.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
       - name: Notify Google Chat on scheduled failure
-        if: failure() && github.event_name == 'schedule'
+        env:
+          WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
         run: |
-          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
-            -H 'Content-Type: application/json' \
-            -d '{"text": "⚠️ *FAILED* — Canary: contract suite vs Hermes `main`\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true
+          [ -n "$WEBHOOK_URL" ] || { echo "GOOGLE_CHAT_WEBHOOK_URL is missing"; exit 1; }
+          curl --fail-with-body --retry 3 --retry-all-errors --max-time 20 \
+            -sS -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\": \"🚨 hermes-agent-plugin canary FAILED: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$WEBHOOK_URL"

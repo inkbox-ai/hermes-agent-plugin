@@ -2840,6 +2840,7 @@ class InkboxAdapter(BasePlatformAdapter):
             auto_skill=auto_skill,
         )
         await self._enqueue(event)
+        logger.info("[Inkbox] External event enqueued: %s", thread_id)
         return web.Response(status=200, text="ok")
 
     async def _on_mail_delivery_failure(self, envelope: Dict[str, Any]) -> "web.Response":

@@ -8,9 +8,18 @@ name: Live — external events (escalation → agent calls driver)
 # Real model + real call, so this runs only on ready (non-draft) PRs + dispatch,
 # and shares the AUT tunnel lock with the other live suites.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the external-event assertion"
+        required: false
+        type: string
+        default: "200"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       timeout_s:
@@ -22,18 +31,16 @@ permissions:
 
 concurrency:
   # Same group as the other live suites: only one holder of the AUT tunnel at a time.
-  group: inkbox-live-aut-tunnel
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   external-events:
     runs-on: ubuntu-latest
-    # Skip fork PRs (no secrets) and draft PRs (expensive). Pushes + dispatch always run.
-    if: >-
-      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false))
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up env paths
         run: |
@@ -110,7 +117,7 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
           HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
-          LIVE_EXTERNAL_TIMEOUT: ${{ github.event.inputs.timeout_s || '200' }}
+          LIVE_EXTERNAL_TIMEOUT: ${{ inputs.timeout_s || '200' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
