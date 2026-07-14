@@ -10,19 +10,23 @@ name: Live — agent channels (email + SMS)
 # schedule; the repo-wide tunnel lock below serializes them all. Ephemeral runner:
 # gateway + mock torn down on job end.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for the reply"
+        required: false
+        type: string
+        default: "150"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for the reply"
         default: "150"
-  # Chains off the canary (fires only from the default branch). The job's `if` gates
-  # on a PASSING canary, so live and the host stay in lock-step on the 2x/day cadence.
-  workflow_run:
-    workflows: ["Canary — plugin vs Hermes main"]
-    types: [completed]
 
 permissions:
   contents: read
@@ -31,21 +35,13 @@ concurrency:
   # Only ONE client may hold the AUT's Inkbox tunnel at a time, so EVERY live tunnel
   # workflow (this + any future one) MUST use this exact group → they run one at a
   # time across all triggers (PRs + the main schedule queue behind each other).
-  group: inkbox-live-aut-tunnel
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   live:
     runs-on: ubuntu-latest
-    # Three guards:
-    #  - Skip fork PRs: a public repo doesn't expose secrets to forks → can't auth.
-    #  - Skip DRAFT PRs: this suite is expensive — only spend on ready-for-review PRs.
-    #  - When chained off the canary, only run if that canary PASSED. Never take the
-    #    tunnel or burn tokens against a host we already know is broken.
-    # Ready same-repo PRs + dispatch + a green canary all run (and queue on the lock).
-    if: >-
-      (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.draft == false)) &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → must run one at a time
@@ -53,7 +49,7 @@ jobs:
         mode: [mock, real]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up env paths (HERMES_HOME, spy, log)
         run: |
@@ -155,7 +151,7 @@ jobs:
           AUT_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
           AUT_WEBHOOK_URL: http://127.0.0.1:8765/webhook
           INKBOX_SPY_FILE: ${{ runner.temp }}/send_intents.jsonl
-          LIVE_EMAIL_TIMEOUT: ${{ github.event.inputs.timeout_s || '150' }}
+          LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '150' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
@@ -183,7 +179,7 @@ jobs:
 
       - name: Upload artifacts (on failure only)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-logs-${{ matrix.mode }}
           retention-days: 5
@@ -192,21 +188,3 @@ jobs:
             ${{ runner.temp }}/send_intents.jsonl
             ${{ runner.temp }}/mock.log
           if-no-files-found: ignore
-
-  # Alert only when an unattended run fails — no success pings; PRs + manual
-  # dispatch stay silent (the check is visible inline there). This suite has no
-  # direct `schedule` trigger; its unattended cadence arrives as a `workflow_run`
-  # chained off the scheduled canary, so that event is the "scheduled failure"
-  # trigger here. `always()` lets this job run despite the failed `live`
-  # dependency; needs.live.result is 'failure' if any matrix leg failed.
-  notify:
-    needs: [live]
-    if: always() && needs.live.result == 'failure' && github.event_name == 'workflow_run'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify Google Chat on scheduled failure
-        # Non-blocking: a flaky webhook must never flip the suite result.
-        run: |
-          curl -sS --max-time 10 --retry 3 -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}" \
-            -H 'Content-Type: application/json' \
-            -d '{"text": "⚠️ *FAILED* — Live channels (email + SMS) suite\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' || true

@@ -101,10 +101,18 @@ if not _real_host_available() and "gateway.config" not in sys.modules:
         def build_source(self, **kwargs):
             return types.SimpleNamespace(**kwargs)
 
+    def validate_media_delivery_path(path):
+        from pathlib import Path
+
+        candidate = Path(path).expanduser().resolve()
+        return str(candidate) if candidate.is_file() else None
+
     base_mod.BasePlatformAdapter = BasePlatformAdapter
+    BasePlatformAdapter.validate_media_delivery_path = staticmethod(validate_media_delivery_path)
     base_mod.MessageEvent = MessageEvent
     base_mod.MessageType = MessageType
     base_mod.SendResult = SendResult
+    base_mod.validate_media_delivery_path = validate_media_delivery_path
     sys.modules["gateway.platforms.base"] = base_mod
 
     helpers_mod = types.ModuleType("gateway.platforms.helpers")
