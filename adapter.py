@@ -349,6 +349,7 @@ def _bounded_context_string(value: Any, limit: int = _WEBHOOK_CONTEXT_STRING_CHA
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
     text = " ".join(str(value).split())
+    text = text.replace(_WEBHOOK_CONTEXT_END, "[quoted context delimiter]")
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
 
 
@@ -387,6 +388,12 @@ def _render_webhook_context(
     for kind in ("email", "texts", "calls"):
         block = context.get(kind)
         if not isinstance(block, dict) or not isinstance(block.get("items"), list):
+            continue
+        scope = block.get("scope")
+        allowed_scopes = {"thread", "conversation", "contact"} if not trigger_class else {"contact"}
+        if kind == trigger_class:
+            allowed_scopes.add("thread" if kind == "email" else "conversation")
+        if scope not in allowed_scopes:
             continue
         items = block["items"]
         if stable_trigger_ids and kind == trigger_class:
@@ -3054,8 +3061,9 @@ class InkboxAdapter(BasePlatformAdapter):
 
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
-        if request_id and self._dedup_begin(request_id):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(request_id)
+        if dedup_response is not None:
+            return dedup_response
 
         try:
             if source == "inkbox" and self._is_known_inkbox_event(event_type, envelope):
@@ -3114,7 +3122,10 @@ class InkboxAdapter(BasePlatformAdapter):
         except Exception:
             self._dedup_rollback(request_id)
             raise
-        self._dedup_commit(request_id)
+        if getattr(response, "status", 200) >= 500:
+            self._dedup_rollback(request_id)
+        else:
+            self._dedup_commit(request_id)
         return response
 
     @staticmethod
@@ -3165,6 +3176,17 @@ class InkboxAdapter(BasePlatformAdapter):
             return True
         self._inflight_request_ids[request_id] = time.time()
         return False
+
+    def _begin_dedup_response(self, request_id: str) -> Optional["web.Response"]:
+        if not request_id:
+            return None
+        self._prune_dedup_ids()
+        if request_id in self._seen_request_ids:
+            return web.Response(status=200, text="duplicate")
+        if request_id in self._inflight_request_ids:
+            return web.Response(status=503, text="in progress; retry")
+        self._inflight_request_ids[request_id] = time.time()
+        return None
 
     def _dedup_commit(self, request_id: str) -> None:
         if not request_id:
@@ -3227,8 +3249,9 @@ class InkboxAdapter(BasePlatformAdapter):
         message = (envelope.get("data") or {}).get("message") or {}
         stable_id = str(envelope.get("id") or message.get("id") or "").strip()
         event_key = f"mail:{stable_id}" if stable_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             response = await self._on_mail_received_once(envelope)
         except Exception:
@@ -3298,6 +3321,16 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=rfc_message_id or message.get("id"),
         )
         body_text = message.get("snippet") or subject or ""
+        if body_text.lstrip().startswith("/"):
+            event = MessageEvent(
+                text=body_text.strip(),
+                message_type=MessageType.COMMAND,
+                source=source,
+                raw_message=envelope,
+                message_id=rfc_message_id or str(message.get("id") or ""),
+            )
+            await self._enqueue(event)
+            return web.Response(status=200, text="ok")
         # Modality marker — every inbound is prefixed with one line that
         # tells the agent which modality + which Inkbox Contact (if any)
         # this message belongs to.  PLATFORM_HINTS["inkbox"] explains how
@@ -3368,8 +3401,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # ``bounced`` then ``failed`` can both fire for one message — one
         # wake per failed email, keyed by the message id alone.
         event_key = f"mailfail:{message_id}" if message_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             thread_id = message.get("thread_id")
             contact = await self._resolve_contact_full(kind="email", value=to_address)
@@ -3935,9 +3969,15 @@ class InkboxAdapter(BasePlatformAdapter):
         event.timestamp = fragments[-1].get("timestamp") or event.timestamp
         marker = str(batch["marker"])
         modality = "imessage" if marker.startswith("[inkbox:imessage") else "sms"
+        context_fragment = max(
+            fragments,
+            key=lambda fragment: fragment.get("timestamp") or datetime.min.replace(
+                tzinfo=timezone.utc,
+            ),
+        )
         event.text = _append_webhook_context(
             event.text or "",
-            fragments[-1].get("context_data") or {},
+            context_fragment.get("context_data") or {},
             modality,
             [fragment.get("message_id") for fragment in fragments],
         )
@@ -3947,8 +3987,9 @@ class InkboxAdapter(BasePlatformAdapter):
         text_msg = (envelope.get("data") or {}).get("text_message") or {}
         text_id = str(text_msg.get("id") or "").strip()
         event_key = f"text:{text_id}" if text_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             response = await self._on_text_received_once(envelope)
         except Exception:
@@ -4431,8 +4472,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # (redelivery, subscription overlap) must not double-bill the retry
         # budget or wake the agent twice.
         event_key = f"textfail:{text_id}" if text_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             contact = await self._resolve_contact_full(kind="phone", value=remote)
             chat_id = _chat_id_for_route(
@@ -4542,8 +4584,9 @@ class InkboxAdapter(BasePlatformAdapter):
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
         event_key = f"imessage:{message_id}" if message_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             response = await self._on_imessage_received_once(envelope)
         except Exception:
@@ -4698,8 +4741,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # One wake per failed message — replays must not double-bill the
         # retry budget.
         event_key = f"imessagefail:{message_id}" if message_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             contact = await self._resolve_contact_full(kind="phone", value=remote)
             chat_id = _chat_id_for_route(
@@ -4838,8 +4882,9 @@ class InkboxAdapter(BasePlatformAdapter):
         reaction = (envelope.get("data") or {}).get("reaction") or {}
         reaction_id = str(reaction.get("id") or "").strip()
         event_key = f"imessage_reaction:{reaction_id}" if reaction_id else ""
-        if self._dedup_begin(event_key):
-            return web.Response(status=200, text="duplicate")
+        dedup_response = self._begin_dedup_response(event_key)
+        if dedup_response is not None:
+            return dedup_response
         try:
             response = await self._on_imessage_reaction_once(envelope)
         except Exception:
