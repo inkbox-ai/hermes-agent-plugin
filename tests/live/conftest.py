@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 import uuid
 
 import pytest
@@ -60,6 +62,120 @@ def _client(key: str):
     from inkbox import Inkbox
 
     return Inkbox(api_key=key, base_url=BASE_URL)
+
+
+_ENDED_CALL_STATUSES = {"completed", "failed", "canceled"}
+
+
+def _owned_calls(client, local_phone: str):
+    """Newest calls owned by this live identity, keyed by call id."""
+    return {
+        str(call.id): call
+        for call in client.calls.list(limit=100)
+        if getattr(call, "local_phone_number", None) == local_phone
+    }
+
+
+def _call_status(call) -> str:
+    return str(getattr(call, "status", "") or "").lower()
+
+
+def _hang_up_owned_call(client, call) -> str | None:
+    """Send the authoritative hangup command, tolerating an ended-call race."""
+    call_id = str(call.id)
+    if _call_status(call) in _ENDED_CALL_STATUSES:
+        return None
+    try:
+        client.calls.hangup(call_id)
+        return None
+    except Exception as exc:
+        try:
+            current = client.calls.get(call_id)
+        except Exception as get_exc:
+            return f"hangup={exc!r}; get={get_exc!r}"
+        if _call_status(current) in _ENDED_CALL_STATUSES:
+            return None
+        return f"hangup={exc!r}; status={_call_status(current)!r}"
+
+
+def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
+    """Hang up and verify every call created by this pytest session."""
+    deadline = time.monotonic() + 12
+    last_errors: dict[str, str] = {}
+    while True:
+        current = _owned_calls(client, local_phone)
+        live = {
+            call_id: call
+            for call_id, call in current.items()
+            if call_id not in baseline and _call_status(call) not in _ENDED_CALL_STATUSES
+        }
+        if not live:
+            return
+        for call_id, call in live.items():
+            error = _hang_up_owned_call(client, call)
+            if error:
+                last_errors[call_id] = error
+        if time.monotonic() >= deadline:
+            states = {call_id: _call_status(call) for call_id, call in live.items()}
+            raise RuntimeError(
+                f"live-test calls remained active after API cleanup: "
+                f"states={states!r} errors={last_errors!r}"
+            )
+        time.sleep(0.5)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_up_calls_created_by_live_session():
+    """Own all calls created by this live process and never leak a carrier leg.
+
+    Non-voice suites run a watchdog because a model can unexpectedly choose the
+    phone tool while answering an SMS/email test. Voice tests own their expected
+    call ids directly and use this fixture as a final safety net.
+    """
+    if not AUT_KEY:
+        yield
+        return
+
+    client = _client(AUT_KEY)
+    numbers = client.phone_numbers.list()
+    if not numbers:
+        raise RuntimeError("live-test identity has no phone number for call cleanup")
+    local_phone = numbers[0].number
+    baseline = set(_owned_calls(client, local_phone))
+    watch_client = _client(AUT_KEY)
+    voice_session = bool(os.environ.get("VOICE_SCENARIO"))
+    stop = threading.Event()
+
+    def watchdog() -> None:
+        attempted: set[str] = set()
+        while not stop.wait(1):
+            try:
+                current = _owned_calls(watch_client, local_phone)
+            except Exception:
+                continue
+            for call_id, call in current.items():
+                if (
+                    call_id in baseline
+                    or call_id in attempted
+                    or _call_status(call) in _ENDED_CALL_STATUSES
+                ):
+                    continue
+                attempted.add(call_id)
+                _hang_up_owned_call(watch_client, call)
+
+    watcher = None
+    if not voice_session:
+        watcher = threading.Thread(target=watchdog, name="live-call-cleanup", daemon=True)
+        watcher.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        if watcher is not None:
+            watcher.join(timeout=3)
+        # Catch a call created during the last model turn / watcher shutdown.
+        time.sleep(1)
+        _finish_new_calls(client, local_phone, baseline)
 
 
 def _digits(s: str) -> str:
