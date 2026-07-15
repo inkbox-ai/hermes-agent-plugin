@@ -6,7 +6,7 @@ subject to carrier + spam filtering — so prompts ask for SHORT replies and avo
 spammy content.
 
   * mock leg → reachability (deterministic ``REPLY_OK`` from the mock model).
-  * real leg → intelligence (gpt-5.5): basic, own identity, sender, tools.
+  * real leg → intelligence (gpt-5.4-mini): basic, own identity, sender, tools.
 
 Skipped unless both keys are set. Replies are matched by *new* inbound message id
 from the AUT's number (robust to clock skew).
