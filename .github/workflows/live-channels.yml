@@ -68,7 +68,7 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.4.20,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
+            'inkbox>=0.5.0,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
 
       - name: Configure AUT identity + model (${{ matrix.mode }})
         env:

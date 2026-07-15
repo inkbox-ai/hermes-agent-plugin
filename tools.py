@@ -918,7 +918,7 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
 
         def _place():
             if not hasattr(identity, "place_call"):
-                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.4.15)")
+                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.0)")
             try:
                 return identity.place_call(
                     to_number=to_number,
