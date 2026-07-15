@@ -13,7 +13,7 @@ from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin.adapter import InkboxAdapter
 
 
-def _mail_envelope(from_address, *, agent_identities=None):
+def _mail_envelope(from_address, *, agent_identities=None, headers=None):
     return {
         "event_type": "message.received",
         "timestamp": "2026-05-21T00:00:00Z",
@@ -29,6 +29,7 @@ def _mail_envelope(from_address, *, agent_identities=None):
                 "bcc_addresses": None,
                 "subject": "Loop test",
                 "snippet": "Please reply to yourself.",
+                "headers": headers,
                 "direction": "inbound",
                 "status": "received",
                 "has_attachments": False,
@@ -42,6 +43,7 @@ def _mail_envelope(from_address, *, agent_identities=None):
 
 def _adapter_for_self_mail_check():
     adapter = object.__new__(InkboxAdapter)
+    adapter.platform = "inkbox"
     adapter._identity_handle = "agent"
     adapter._identity_id = None
     adapter._identity_email_addresses = {"agent@inkboxmail.com"}
@@ -172,6 +174,42 @@ def test_unknown_inbound_email_uses_thread_session_key(monkeypatch):
     assert events[0].source.thread_id == "email:thread-1"
     assert adapter._last_inbound_modality["email:thread-1"] == "email"
     assert adapter._last_inbound_email["email:thread-1"]["from_address"] == "person@example.com"
+    assert adapter._last_inbound_email["email:thread-1"]["sender_is_automated"] is False
+
+
+def test_automated_inbound_email_marks_thread_non_replyable(monkeypatch):
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    events = []
+
+    async def _resolve_contact_full(**_kwargs):
+        return None
+
+    async def _enqueue(event):
+        events.append(event)
+
+    adapter = _adapter_for_self_mail_check()
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+    adapter._last_inbound_email = {}
+    adapter._last_inbound_modality = {}
+    adapter._resolve_channel_overrides = lambda *_args, **_kwargs: (None, None)
+
+    response = asyncio.run(
+        adapter._on_mail_received(
+            _mail_envelope(
+                "updates@example.com",
+                headers=[{"name": "Auto-Submitted", "value": "auto-generated"}],
+            )
+        )
+    )
+
+    assert response.status == 200
+    assert len(events) == 1
+    assert adapter._last_inbound_email["email:thread-1"]["sender_is_automated"] is True
 
 
 def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
@@ -197,6 +235,7 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
 
     adapter = object.__new__(InkboxAdapter)
+    adapter.platform = "inkbox"
     adapter._identity_handle = "agent"
     adapter._inkbox = FakeInkbox(identity)
     adapter._active_call_ws = {}
@@ -219,3 +258,94 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
         "body_text": "Reply body",
         "in_reply_to_message_id": "<mail-in-1@example.com>",
     }]
+
+
+def test_email_thread_reply_to_automated_sender_is_suppressed(monkeypatch):
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class FakeIdentity:
+        def __init__(self):
+            self.sent = []
+
+        def send_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return types.SimpleNamespace(id="msg-out")
+
+    class FakeInkbox:
+        def __init__(self, identity):
+            self.identity = identity
+
+        def get_identity(self, _handle):
+            return self.identity
+
+    identity = FakeIdentity()
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+
+    adapter = object.__new__(InkboxAdapter)
+    adapter.platform = "inkbox"
+    adapter._identity_handle = "agent"
+    adapter._inkbox = FakeInkbox(identity)
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {}
+    adapter._last_inbound_modality = {"email:thread-1": "email"}
+    adapter._last_inbound_email = {
+        "email:thread-1": {
+            "subject": "Loop test",
+            "rfc_message_id": "<mail-in-1@example.com>",
+            "from_address": "notifications@github.com",
+            "sender_is_automated": True,
+        },
+    }
+    adapter._stop_imessage_typing_for_chat = lambda *_args, **_kwargs: None
+
+    result = asyncio.run(adapter.send("email:thread-1", "Reply body"))
+
+    assert result.success is True
+    assert result.message_id == "suppressed-automated-email-recipient"
+    assert identity.sent == []
+
+
+def test_explicit_automated_email_recipient_is_suppressed(monkeypatch):
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class FakeIdentity:
+        def __init__(self):
+            self.sent = []
+
+        def send_email(self, **kwargs):
+            self.sent.append(kwargs)
+            return types.SimpleNamespace(id="msg-out")
+
+    class FakeInkbox:
+        def __init__(self, identity):
+            self.identity = identity
+
+        def get_identity(self, _handle):
+            return self.identity
+
+    identity = FakeIdentity()
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+
+    adapter = object.__new__(InkboxAdapter)
+    adapter.platform = "inkbox"
+    adapter._identity_handle = "agent"
+    adapter._inkbox = FakeInkbox(identity)
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_email = {}
+    adapter._stop_imessage_typing_for_chat = lambda *_args, **_kwargs: None
+
+    result = asyncio.run(
+        adapter.send(
+            "contact-123",
+            "Reply body",
+            metadata={"mode": "email", "to_email": "no-reply@mail.haft.sh"},
+        )
+    )
+
+    assert result.success is True
+    assert result.message_id == "suppressed-automated-email-recipient"
+    assert identity.sent == []

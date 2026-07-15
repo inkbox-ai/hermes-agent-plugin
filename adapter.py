@@ -884,6 +884,101 @@ def _identity_email_addresses(identity: Any) -> set[str]:
     }
 
 
+_AUTOMATED_EMAIL_LOCAL_PARTS: frozenset[str] = frozenset({
+    "bounce",
+    "do-not-reply",
+    "donotreply",
+    "mailer-daemon",
+    "no-reply",
+    "noreply",
+    "notifications",
+    "postmaster",
+})
+_AUTOMATED_EMAIL_PRECEDENCE_VALUES: frozenset[str] = frozenset({
+    "auto-reply",
+    "auto_reply",
+    "bulk",
+    "junk",
+    "list",
+})
+
+
+def _header_value(container: Any, header_name: str) -> str:
+    target = header_name.strip().lower()
+    if not target:
+        return ""
+    if isinstance(container, dict):
+        for key, value in container.items():
+            if str(key).strip().lower() == target:
+                return str(value or "").strip()
+        return ""
+    if isinstance(container, (list, tuple)):
+        for entry in container:
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or entry.get("key") or "").strip().lower()
+                if name == target:
+                    return str(entry.get("value") or "").strip()
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                name = str(entry[0] or "").strip().lower()
+                if name == target:
+                    return str(entry[1] or "").strip()
+    return ""
+
+
+def _mail_header_value(message: Dict[str, Any], envelope: Dict[str, Any], header_name: str) -> str:
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    for container in (
+        message.get("headers"),
+        message.get("raw_headers"),
+        message.get("internet_message_headers"),
+        message.get("internetMessageHeaders"),
+        message.get("message_headers"),
+        message.get("messageHeaders"),
+        data.get("headers") if isinstance(data, dict) else None,
+        envelope.get("headers"),
+    ):
+        value = _header_value(container, header_name)
+        if value:
+            return value
+    return ""
+
+
+def _looks_automated_email_address(value: Any) -> bool:
+    address = _normalize_email_address(value)
+    if not address:
+        return False
+    local_part, _, domain = address.partition("@")
+    if local_part in _AUTOMATED_EMAIL_LOCAL_PARTS:
+        return True
+    if any(local_part.startswith(f"{prefix}+") for prefix in _AUTOMATED_EMAIL_LOCAL_PARTS):
+        return True
+    if domain == "reply.github.com" and local_part.startswith("reply+"):
+        return True
+    if domain == "github.com" and local_part == "notifications":
+        return True
+    return False
+
+
+def _mail_sender_is_automated(
+    envelope: Dict[str, Any],
+    message: Dict[str, Any],
+    from_address: str,
+) -> bool:
+    if _looks_automated_email_address(from_address):
+        return True
+    auto_submitted = _mail_header_value(message, envelope, "Auto-Submitted").strip().lower()
+    if auto_submitted and auto_submitted != "no":
+        return True
+    precedence = _mail_header_value(message, envelope, "Precedence").strip().lower()
+    if precedence in _AUTOMATED_EMAIL_PRECEDENCE_VALUES:
+        return True
+    if _mail_header_value(message, envelope, "List-Unsubscribe"):
+        return True
+    if _mail_header_value(message, envelope, "Auto-Response-Suppress"):
+        return True
+    return False
+
+
 def _mail_agent_identity_matches(
     envelope: Dict[str, Any],
     from_address: str,
@@ -1398,7 +1493,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # Used by send()'s email branch to populate Re: <subject> and the
         # In-Reply-To header so replies thread into the original conversation
         # in the recipient's mail client.
-        self._last_inbound_email: Dict[str, Dict[str, str]] = {}
+        self._last_inbound_email: Dict[str, Dict[str, Any]] = {}
         # chat_id → metadata of the most-recent inbound SMS for that chat.
         # Used by send()'s SMS branch to reply by Inkbox conversation id
         # instead of reconstructing a phone-number send. This is required for
@@ -2121,6 +2216,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     error=f"No email address on contact {chat_id}",
                 )
 
+            if stash.get("sender_is_automated") or _looks_automated_email_address(to_addr):
+                logger.warning(
+                    "[Inkbox] Suppressed outbound email to automated recipient %s for chat %s",
+                    to_addr,
+                    chat_id,
+                )
+                self._stop_imessage_typing_for_chat(chat_id)
+                return SendResult(success=True, message_id="suppressed-automated-email-recipient")
+
             # Threading: prefer the inbound RFC 5322 Message-ID we stashed in
             # _on_mail_received, fall back to whatever the gateway passed in
             # as ``reply_to``.  Subject defaults to ``Re: <inbound subject>``
@@ -2529,6 +2633,7 @@ class InkboxAdapter(BasePlatformAdapter):
         contact_name = contact["name"] if contact and contact.get("name") else None
         rfc_message_id = message.get("message_id")  # RFC 5322 Message-ID for threading
         subject = message.get("subject") or ""
+        sender_is_automated = _mail_sender_is_automated(envelope, message, from_address)
 
         # Stash the subject + RFC 5322 Message-ID so send() can populate
         # Re: <subject> and the In-Reply-To header on replies.  Keyed by
@@ -2538,6 +2643,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "subject": subject,
             "rfc_message_id": rfc_message_id or "",
             "from_address": from_address,
+            "sender_is_automated": sender_is_automated,
         }
         self._last_inbound_modality[str(chat_id)] = "email"
 
