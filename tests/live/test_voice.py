@@ -80,6 +80,25 @@ def _aut_phone(aut) -> str:
     return nums[0].number
 
 
+def _ensure_driver_allowed(aut, driver_number: str) -> None:
+    """Allow the live driver through identity-level phone contact rules."""
+    handle = aut.mailboxes.list()[0].email_address.split("@", 1)[0]
+    rules = aut.phone_identity_contact_rules.list(handle)
+    for rule in rules:
+        if (
+            getattr(rule, "match_target", "") == driver_number
+            and str(getattr(rule, "action", "")).lower().endswith("allow")
+            and str(getattr(rule, "status", "active")).lower().endswith("active")
+        ):
+            return
+    aut.phone_identity_contact_rules.create(
+        handle,
+        action="allow",
+        match_type="exact_number",
+        match_target=driver_number,
+    )
+
+
 def _segments(remote, number_id, call_id):
     """Transcript segments for a call, split by who spoke."""
     # Identity-centered transcript read (SDK 0.4.15+); number_id is vestigial.
@@ -128,6 +147,11 @@ def test_inbound_call_inkbox_tts_stt():
     st = _driver_state()
     remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
     aut_phone = _aut_phone(aut)
+
+    # Server-side contact rules run before the plugin or its local allow-all
+    # setting. Whitelisted smoke identities therefore need the driver allowed
+    # explicitly or the call is rejected before either media WS connects.
+    _ensure_driver_allowed(aut, st["number"])
 
     # Place the call to the agent, handing Inkbox the driver's own media WS.
     call = remote.calls.place(
