@@ -49,7 +49,7 @@ jobs:
       orchestrated: true
       # The inbound PSTN carrier currently rejects the call before it reaches
       # the AUT. Keep that leg manually runnable; gate PRs on plugin-owned voice.
-      include_inbound: false
+      include_inbound: true
     secrets: inherit
 
   external-events:
