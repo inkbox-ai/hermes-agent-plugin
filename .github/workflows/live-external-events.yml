@@ -97,7 +97,7 @@ jobs:
           } >> "$HERMES_HOME/.env"
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true
-          hermes config set model.default gpt-5.5 || true
+          hermes config set model.default gpt-5.4-mini || true
 
       - name: Start gateway and wait for readiness
         run: |
