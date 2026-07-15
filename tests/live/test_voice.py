@@ -141,6 +141,29 @@ def _aut_speech_mode(aut, direction, driver_number):
     return c.use_inkbox_tts, c.use_inkbox_stt
 
 
+def _hangup_call(client, call_id) -> None:
+    """End a live test call through the control API, tolerating an ended race."""
+    if not call_id:
+        return
+    try:
+        client.calls.hangup(call_id)
+        return
+    except Exception as hangup_error:
+        deadline = time.monotonic() + 10
+        status = "unknown"
+        while time.monotonic() < deadline:
+            try:
+                status = (getattr(client.calls.get(call_id), "status", "") or "").lower()
+            except Exception:
+                status = "unknown"
+            if status in {"completed", "canceled", "failed"}:
+                return
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"failed to hang up live test call {call_id}; status={status!r}"
+        ) from hangup_error
+
+
 @pytest.mark.skipif(SCENARIO != "inbound_inkbox", reason="inbound Inkbox STT/TTS leg only")
 def test_inbound_call_inkbox_tts_stt():
     """Driver calls the agent; the agent answers via Inkbox STT/TTS and replies."""
@@ -157,11 +180,14 @@ def test_inbound_call_inkbox_tts_stt():
     call = remote.calls.place(
         from_number=st["number"], to_number=aut_phone, client_websocket_url=st["ws_url"],
     )
-    agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
-    assert agent_said, "agent produced no speech on the inbound call"
+    try:
+        agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
+        assert agent_said, "agent produced no speech on the inbound call"
 
-    tts, stt = _aut_speech_mode(aut, "inbound", st["number"])
-    assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
+        tts, stt = _aut_speech_mode(aut, "inbound", st["number"])
+        assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
+    finally:
+        _hangup_call(remote, call.id)
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
@@ -313,14 +339,9 @@ def test_outbound_call_realtime_direct_contact_lookup():
                 break
 
         # Ensure every call actually ends. Realtime sends a `stop` frame, but the
-        # PSTN leg can linger at "answered" — force it closed via the SDK hangup so
-        # it finalizes (and doesn't burn a call slot). Best-effort; already-ended
-        # legs just error out harmlessly.
+        # PSTN leg can linger at "answered" — force it closed via the control API.
         for client, cid in end_ids:
-            try:
-                client.calls.hangup(cid)
-            except Exception:
-                pass
+            _hangup_call(client, cid)
 
         # After teardown the transcript is final — give the recite a last chance
         # to land (in case it persisted on the very last turn).
@@ -383,20 +404,23 @@ def test_outbound_call_realtime():
     before = {c.id for c in _inbound_from_aut()}
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
-    # Wait for the agent to dial back, then verify the call transcript.
-    deadline = time.monotonic() + TIMEOUT_S
     call_id = None
-    while time.monotonic() < deadline:
-        fresh = [c for c in _inbound_from_aut() if c.id not in before]
-        if fresh:
-            call_id = fresh[0].id
-            break
-        time.sleep(POLL_EVERY_S)
-    assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
+    try:
+        # Wait for the agent to dial back, then verify the call transcript.
+        deadline = time.monotonic() + TIMEOUT_S
+        while time.monotonic() < deadline:
+            fresh = [c for c in _inbound_from_aut() if c.id not in before]
+            if fresh:
+                call_id = fresh[0].id
+                break
+            time.sleep(POLL_EVERY_S)
+        assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
 
-    agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
-    assert agent_said, "agent produced no speech on the outbound call"
+        agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
+        assert agent_said, "agent produced no speech on the outbound call"
 
-    tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
-    assert tts is False and stt is False, \
-        f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
+        tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
+        assert tts is False and stt is False, \
+            f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
+    finally:
+        _hangup_call(remote, call_id)
