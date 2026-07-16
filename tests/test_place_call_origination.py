@@ -7,9 +7,17 @@ to "call me" and the call went out over the dedicated number instead of the
 shared iMessage line.
 """
 
+import sys
 import types
+from pathlib import Path
 
-import tools
+
+ROOT = Path(__file__).resolve().parents[1]
+pkg = types.ModuleType("inkbox_plugin")
+pkg.__path__ = [str(ROOT)]
+sys.modules.setdefault("inkbox_plugin", pkg)
+
+from inkbox_plugin import tools
 
 
 def _identity(has_number: bool, imessage: bool):
