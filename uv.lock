@@ -501,7 +501,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "inkbox", specifier = ">=0.4.20,<1.0.0" },
+    { name = "inkbox", specifier = ">=0.4.24,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0" },
     { name = "segno", specifier = ">=1.5" },

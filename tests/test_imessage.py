@@ -19,6 +19,12 @@ from inkbox_plugin.adapter import (
 )
 
 
+def _new_test_adapter():
+    adapter = object.__new__(InkboxAdapter)
+    adapter.platform = types.SimpleNamespace(value="inkbox")
+    return adapter
+
+
 class FakeIMessage:
     id = "im-1"
     conversation_id = "imconv-123"
@@ -232,7 +238,7 @@ def test_adapter_imessage_reply_uses_last_inbound_conversation_id(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
@@ -262,7 +268,7 @@ def test_adapter_imessage_channel_uploads_media_file(monkeypatch, tmp_path):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
     adapter._last_inbound_imessage = {
@@ -303,7 +309,7 @@ def test_adapter_imessage_channel_sends_hosted_media_url(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
     adapter._last_inbound_imessage = {
@@ -332,7 +338,7 @@ def test_adapter_imessage_channel_sends_hosted_media_url(monkeypatch):
 
 def test_adapter_imessage_channel_rejects_unsafe_media_path(monkeypatch):
     identity = FakeIdentity()
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
     adapter._last_inbound_imessage = {}
@@ -353,7 +359,7 @@ def test_adapter_imessage_channel_rejects_unsafe_media_path(monkeypatch):
 
 def test_adapter_imessage_reply_rejects_text_over_limit():
     identity = FakeIdentity()
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
@@ -382,7 +388,7 @@ def test_adapter_imessage_reply_uses_thread_conversation_id(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "imessage"}
@@ -426,7 +432,7 @@ def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -478,7 +484,7 @@ def test_unknown_inbound_imessage_uses_conversation_session_key(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -530,7 +536,7 @@ def test_duplicate_inbound_imessage_event_id_does_not_enqueue_twice(monkeypatch)
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -570,7 +576,7 @@ def test_inbound_imessage_ignores_outbound_echo(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._seen_request_ids = {}
     adapter._enqueue_sms_text_event = _enqueue_sms_text_event
 
@@ -642,7 +648,7 @@ def test_imessage_lifecycle_event_logs_without_agent_turn(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._enqueue = _enqueue
 
     response = asyncio.run(adapter._on_imessage_lifecycle({
@@ -684,7 +690,7 @@ def test_inbound_imessage_starts_typing_pulse(monkeypatch):
     )
 
     async def _run():
-        adapter = object.__new__(InkboxAdapter)
+        adapter = _new_test_adapter()
         adapter._inkbox = FakeInkboxClient(identity)
         adapter._identity_handle = "agent"
         adapter._seen_request_ids = {}
@@ -736,7 +742,7 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -797,7 +803,7 @@ def test_unknown_imessage_reaction_uses_conversation_session_key(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -846,7 +852,7 @@ def test_duplicate_imessage_reaction_event_id_does_not_enqueue_twice(monkeypatch
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -892,7 +898,7 @@ def test_inbound_non_question_reaction_does_not_type(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -933,7 +939,7 @@ def test_inbound_reaction_ignores_outbound_echo(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._seen_request_ids = {}
     adapter._enqueue = _enqueue
 
