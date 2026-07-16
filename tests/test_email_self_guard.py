@@ -13,6 +13,12 @@ from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin.adapter import InkboxAdapter
 
 
+def _new_test_adapter():
+    adapter = object.__new__(InkboxAdapter)
+    adapter.platform = types.SimpleNamespace(value="inkbox")
+    return adapter
+
+
 def _mail_envelope(from_address, *, agent_identities=None):
     return {
         "event_type": "message.received",
@@ -41,7 +47,7 @@ def _mail_envelope(from_address, *, agent_identities=None):
 
 
 def _adapter_for_self_mail_check():
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._identity_handle = "agent"
     adapter._identity_id = None
     adapter._identity_email_addresses = {"agent@inkboxmail.com"}
@@ -89,7 +95,7 @@ def test_self_mail_check_caches_identity_with_no_mailbox_address(monkeypatch):
             return types.SimpleNamespace(id="identity-1", mailbox=None, email_address=None)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._identity_handle = "agent"
     adapter._identity_id = None
     adapter._identity_email_addresses = set()
@@ -196,7 +202,7 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
     identity = FakeIdentity()
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
 
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._identity_handle = "agent"
     adapter._inkbox = FakeInkbox(identity)
     adapter._active_call_ws = {}
