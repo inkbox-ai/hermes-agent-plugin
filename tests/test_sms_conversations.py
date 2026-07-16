@@ -15,6 +15,12 @@ from inkbox_plugin import tools
 from inkbox_plugin.adapter import InkboxAdapter, send_inkbox_direct
 
 
+def _new_test_adapter():
+    adapter = object.__new__(InkboxAdapter)
+    adapter.platform = types.SimpleNamespace(value="inkbox")
+    return adapter
+
+
 class FakeText:
     id = "txt-1"
     delivery_status = "queued"
@@ -110,7 +116,7 @@ def test_adapter_sms_reply_uses_last_inbound_conversation_id(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "sms"}
@@ -132,7 +138,7 @@ def test_adapter_sms_reply_uses_last_inbound_conversation_id(monkeypatch):
 
 def test_adapter_sms_reply_rejects_text_over_limit():
     identity = FakeIdentity()
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "sms"}
@@ -161,7 +167,7 @@ def test_adapter_sms_reply_uses_thread_conversation_id(monkeypatch):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._active_call_ws = {}
     adapter._voice_recently_closed = {}
     adapter._last_inbound_modality = {"contact-123": "sms"}
@@ -205,7 +211,7 @@ def test_inbound_group_sms_injects_silence_policy(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -260,7 +266,7 @@ def test_unknown_inbound_sms_uses_conversation_session_key(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}
@@ -309,7 +315,7 @@ def test_duplicate_inbound_sms_event_id_does_not_enqueue_twice(monkeypatch):
         "web",
         types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
     )
-    adapter = object.__new__(InkboxAdapter)
+    adapter = _new_test_adapter()
     adapter._inkbox = FakeInkboxClient(identity)
     adapter._identity_handle = "agent"
     adapter._seen_request_ids = {}

@@ -47,6 +47,9 @@ jobs:
     uses: ./.github/workflows/live-voice.yml
     with:
       orchestrated: true
+      # The inbound PSTN carrier currently rejects the call before it reaches
+      # the AUT. Keep that leg manually runnable; gate PRs on plugin-owned voice.
+      include_inbound: true
     secrets: inherit
 
   external-events:
