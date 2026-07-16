@@ -135,6 +135,8 @@ def _adapter(identity, *, contact=None):
     adapter._last_inbound_sms = {}
     adapter._last_inbound_imessage = {}
     adapter._last_inbound_email = {}
+    adapter_mod._GLOBAL_OUTBOUND_CONTEXT.clear()
+    adapter._outbound_context = adapter_mod._GLOBAL_OUTBOUND_CONTEXT
     adapter._stop_imessage_typing = lambda *_a, **_k: None
     adapter._resolve_channel_overrides = lambda *_a, **_k: (None, None)
 
@@ -568,3 +570,223 @@ def test_budget_expires_after_ttl():
 
     assert len(adapter._enqueued) == 2
     assert f"attempt=1/{MAX}" in adapter._enqueued[1].text
+
+
+def test_sms_send_to_webhook_correlation_flow():
+    contact = {
+        "id": "contact-123",
+        "name": "Kim",
+        "phones": [types.SimpleNamespace(value="+15555550101", is_primary=True)],
+    }
+    adapter = _adapter(FakeIdentity(), contact=contact)
+    adapter._inkbox.contacts.get = lambda _cid: types.SimpleNamespace(**contact)
+
+    # 1. Send SMS via production path
+    result = asyncio.run(adapter.send(
+        chat_id="contact-123",
+        content="Production path SMS content",
+        metadata={"mode": "sms"},
+    ))
+    assert result.success is True
+    msg_id = result.message_id
+    assert msg_id == "txt-1"
+
+    # Verify context is populated automatically
+    assert msg_id in adapter._outbound_context
+    ctx = adapter._outbound_context[msg_id]
+    assert ctx["channel"] == "sms"
+    assert ctx["chat_id"] == "contact-123"
+    assert ctx["body_snippet"] == "Production path SMS content"
+
+    # 2. Receive incomplete webhook failure (direction is omitted, no remote number)
+    envelope = {
+        "id": "evt-text-1",
+        "event_type": "text.delivery_failed",
+        "data": {
+            "text_message": {
+                "id": msg_id,
+                "conversation_id": "conv-123",
+                "text": "Incomplete webhook text",
+                "delivery_status": "delivery_failed",
+                "error_code": "40002",
+                "error_detail": "Flagged by spam",
+            },
+        },
+    }
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+    assert response.status == 200
+
+    # Verify the agent was woken in the correct contact session with the original text snippet
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-123"
+    assert "Production path SMS content" in event.text
+    assert "Incomplete webhook text" not in event.text
+
+    # Verify terminal cleanup: context is removed after failure
+    assert msg_id not in adapter._outbound_context
+
+
+def test_outbound_context_correlation_unresolved_no_wake():
+    adapter = _adapter(FakeIdentity(), contact=None)
+    # The webhook fails to resolve to any contact (contact=None), and no context exists.
+    # Therefore, no usable thread/session can be resolved.
+    envelope = _delivery_failed_envelope(text_id="txt-unknown", conversation_id="")
+    envelope["data"]["text_message"]["remote_phone_number"] = ""
+    envelope["data"]["text_message"]["recipients"] = []
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+    assert response.status == 200
+    assert adapter._enqueued == []  # Not woken
+
+
+def test_imessage_send_to_webhook_correlation_flow():
+    contact = {
+        "id": "contact-123",
+        "name": "Kim",
+        "phones": [types.SimpleNamespace(value="+15555550101", is_primary=True)],
+    }
+    adapter = _adapter(FakeIdentity(), contact=contact)
+    adapter._inkbox.contacts.get = lambda _cid: types.SimpleNamespace(**contact)
+
+    result = asyncio.run(adapter.send(
+        chat_id="contact-123",
+        content="Production path iMessage content",
+        metadata={"mode": "imessage"},
+    ))
+    assert result.success is True
+    msg_id = result.message_id
+    assert msg_id == "txt-1"
+
+    # 2. Receive incomplete webhook failure
+    envelope = {
+        "id": "evt-imsg-1",
+        "event_type": "imessage.delivery_failed",
+        "data": {
+            "message": {
+                "id": msg_id,
+                "direction": "outbound",
+                "content": "Webhook content",
+                "status": "delivery_failed",
+                "error_code": "OPTED_OUT",
+            },
+        },
+    }
+
+    response = asyncio.run(adapter._on_imessage_lifecycle(envelope))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-123"
+    assert "Production path iMessage content" in event.text
+    assert msg_id not in adapter._outbound_context
+
+
+def test_imessage_media_send_to_webhook_correlation_flow():
+    contact = {
+        "id": "contact-123",
+        "name": "Kim",
+        "phones": [types.SimpleNamespace(value="+15555550101", is_primary=True)],
+    }
+    adapter = _adapter(FakeIdentity(), contact=contact)
+    adapter._inkbox.contacts.get = lambda _cid: types.SimpleNamespace(**contact)
+
+    # send_image routes to _send_imessage_media when mode is imessage and it's a media route
+    result = asyncio.run(adapter.send_image(
+        chat_id="contact-123",
+        image_url="https://example.com/chart.png",
+        caption="Production path iMessage media caption",
+        metadata={"mode": "imessage"},
+    ))
+    assert result.success is True
+    msg_id = result.message_id
+    assert msg_id == "txt-1"
+
+    # 2. Receive incomplete webhook failure
+    envelope = {
+        "id": "evt-imsg-media",
+        "event_type": "imessage.delivery_failed",
+        "data": {
+            "message": {
+                "id": msg_id,
+                "direction": "outbound",
+                "status": "delivery_failed",
+                "error_code": "OPTED_OUT",
+            },
+        },
+    }
+
+    response = asyncio.run(adapter._on_imessage_lifecycle(envelope))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-123"
+    assert "Production path iMessage media caption" in event.text
+    assert msg_id not in adapter._outbound_context
+
+
+def test_email_send_to_webhook_correlation_flow():
+    contact = {
+        "id": "contact-123",
+        "name": "Kim",
+        "emails": [types.SimpleNamespace(value="kim@example.com", is_primary=True)],
+    }
+    adapter = _adapter(FakeIdentity(), contact=contact)
+    adapter._inkbox.contacts.get = lambda _cid: types.SimpleNamespace(**contact)
+
+    result = asyncio.run(adapter.send(
+        chat_id="contact-123",
+        content="Production path Email content",
+        metadata={
+            "mode": "email",
+            "thread_id": "inkbox-thread-uuid-1",
+        },
+        reply_to="rfc-msg-id-1",
+    ))
+    assert result.success is True
+    msg_id = result.message_id
+    assert msg_id == "mail-1"
+
+    # Verify thread_id and rfc_message_id are stored separately in context
+    assert msg_id in adapter._outbound_context
+    ctx = adapter._outbound_context[msg_id]
+    assert ctx["email_thread_id"] == "inkbox-thread-uuid-1"
+    assert ctx["email_rfc_message_id"] == "rfc-msg-id-1"
+    assert ctx["email_subject"] == "(no subject)"
+
+    # 2. Receive incomplete webhook failure (missing recipient to verify context lookup bypass)
+    envelope = {
+        "id": "evt-mail-bounce-1",
+        "event_type": "message.bounced",
+        "data": {
+            "message": {
+                "id": msg_id,
+                "thread_id": "wrong-thread",
+                "message_id": "<wrong-rfc@inkboxmail.com>",
+                "from_address": "agent@inkboxmail.com",
+                "to_addresses": [],  # missing recipient!
+                "subject": "Different Subject",
+                "direction": "outbound",
+                "status": "bounced",
+            },
+        },
+    }
+
+    response = asyncio.run(adapter._on_mail_delivery_failure(envelope))
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert event.source.chat_id == "contact-123"
+    assert event.source.thread_id == "email:inkbox-thread-uuid-1"  # routes to original thread_id
+    assert "Production path Email content" in event.text
+
+    # Verify thread-specific routing state was updated correctly
+    assert adapter._last_inbound_email["contact-123"]["rfc_message_id"] == "rfc-msg-id-1"
+    assert adapter._last_inbound_email["contact-123"]["subject"] == "(no subject)"
+
+    # Verify terminal cleanup
+    assert msg_id not in adapter._outbound_context
+
+
+
