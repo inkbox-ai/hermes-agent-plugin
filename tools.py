@@ -450,9 +450,39 @@ def inkbox_send_email(args: dict, **kwargs) -> str:
             )
 
         msg = _send()
+        msg_id = str(getattr(msg, "id", "")).strip()
+        if msg_id:
+            try:
+                from .adapter import save_outbound_context
+            except ImportError:
+                from adapter import save_outbound_context
+
+            # Resolve chat_id
+            recipient = to[0] if to else ""
+            chat_id = None
+            if recipient:
+                try:
+                    contact = _client.contacts.lookup(recipient)
+                    if contact and getattr(contact, "id", None):
+                        chat_id = str(contact.id)
+                except Exception:
+                    pass
+            if not chat_id:
+                chat_id = recipient
+
+            save_outbound_context(
+                msg_id=msg_id,
+                channel="email",
+                chat_id=chat_id,
+                recipient=recipient,
+                body=body_text or "",
+                email_rfc_message_id=in_reply_to or None,
+                email_subject=subject,
+            )
+
         return _json({
             "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            "message_id": msg_id,
             "to": to,
             "subject": subject,
         })
@@ -499,9 +529,38 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
             payload,
             camel_payload,
         )
+        msg_id = str(getattr(msg, "id", "")).strip()
+        if msg_id:
+            try:
+                from .adapter import save_outbound_context
+            except ImportError:
+                from adapter import save_outbound_context
+
+            # Resolve chat_id
+            recipient = to_list[0] if to_list else ""
+            chat_id = None
+            if recipient:
+                try:
+                    contact = _client.contacts.lookup(recipient)
+                    if contact and getattr(contact, "id", None):
+                        chat_id = str(contact.id)
+                except Exception:
+                    pass
+            if not chat_id:
+                chat_id = conversation_id or recipient
+
+            save_outbound_context(
+                msg_id=msg_id,
+                channel="sms",
+                chat_id=chat_id,
+                recipient=recipient,
+                body=text,
+                conversation_id=conversation_id or "",
+            )
+
         return _json({
             "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            "message_id": msg_id,
             "conversation_id": conversation_id or object_summary(
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),
@@ -694,9 +753,38 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             payload,
             camel_payload,
         )
+        msg_id = str(getattr(msg, "id", "")).strip()
+        if msg_id:
+            try:
+                from .adapter import save_outbound_context
+            except ImportError:
+                from adapter import save_outbound_context
+
+            # Resolve chat_id
+            recipient = to
+            chat_id = None
+            if recipient:
+                try:
+                    contact = _client.contacts.lookup(recipient)
+                    if contact and getattr(contact, "id", None):
+                        chat_id = str(contact.id)
+                except Exception:
+                    pass
+            if not chat_id:
+                chat_id = conversation_id or recipient
+
+            save_outbound_context(
+                msg_id=msg_id,
+                channel="imessage",
+                chat_id=chat_id,
+                recipient=recipient,
+                body=text or "[media attachment]",
+                conversation_id=conversation_id or "",
+            )
+
         return _json({
             "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            "message_id": msg_id,
             "conversation_id": _json_safe(
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),

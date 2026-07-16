@@ -246,6 +246,85 @@ SMS_TEXT_BATCH_DELAY_SECONDS = 0.0
 SMS_TEXT_BATCH_MAX_MESSAGES = 8
 SMS_TEXT_BATCH_MAX_CHARS = 4000
 
+_GLOBAL_OUTBOUND_CONTEXT: Dict[str, Dict[str, Any]] = {}
+OUTBOUND_CONTEXT_MAX_ENTRIES = 1000
+OUTBOUND_CONTEXT_TTL = 7200.0  # 2 hours
+OUTBOUND_FAILURE_BODY_SNIPPET_CHARS = 500
+
+
+def save_outbound_context(
+    msg_id: str,
+    channel: str,
+    chat_id: str,
+    recipient: str,
+    body: str,
+    conversation_id: Optional[str] = None,
+    email_thread_id: Optional[str] = None,
+    email_rfc_message_id: Optional[str] = None,
+    email_subject: Optional[str] = None,
+) -> None:
+    """Save metadata for an outbound message to correlate asynchronous failures later."""
+    if not msg_id:
+        return
+    now = time.time()
+
+    # Prune old entries
+    cutoff = now - OUTBOUND_CONTEXT_TTL
+    stale = [k for k, v in list(_GLOBAL_OUTBOUND_CONTEXT.items()) if v.get("at", 0) < cutoff]
+    for k in stale:
+        _GLOBAL_OUTBOUND_CONTEXT.pop(k, None)
+
+    # Enforce maximum entry count
+    if len(_GLOBAL_OUTBOUND_CONTEXT) >= OUTBOUND_CONTEXT_MAX_ENTRIES:
+        sorted_keys = sorted(_GLOBAL_OUTBOUND_CONTEXT.keys(), key=lambda k: _GLOBAL_OUTBOUND_CONTEXT[k].get("at", 0))
+        # pop the oldest to make room
+        for k in sorted_keys[:len(_GLOBAL_OUTBOUND_CONTEXT) - OUTBOUND_CONTEXT_MAX_ENTRIES + 1]:
+            _GLOBAL_OUTBOUND_CONTEXT.pop(k, None)
+
+    # Truncate body snippet to avoid large memory footprint
+    snippet = (body or "").strip()
+    if len(snippet) > OUTBOUND_FAILURE_BODY_SNIPPET_CHARS:
+        snippet = snippet[:OUTBOUND_FAILURE_BODY_SNIPPET_CHARS] + "…"
+
+    _GLOBAL_OUTBOUND_CONTEXT[msg_id] = {
+        "channel": channel,
+        "chat_id": chat_id,
+        "recipient": recipient or "",
+        "body_snippet": snippet,
+        "conversation_id": conversation_id or None,
+        "email_thread_id": email_thread_id or None,
+        "email_rfc_message_id": email_rfc_message_id or None,
+        "email_subject": email_subject or None,
+        "at": now,
+    }
+
+
+def get_outbound_context(msg_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve outbound context, checking TTL."""
+    if not msg_id:
+        return None
+    ctx = _GLOBAL_OUTBOUND_CONTEXT.get(msg_id)
+    if not ctx:
+        return None
+    if time.time() - ctx.get("at", 0) > OUTBOUND_CONTEXT_TTL:
+        _GLOBAL_OUTBOUND_CONTEXT.pop(msg_id, None)
+        return None
+    return ctx
+
+
+def pop_outbound_context(msg_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve and remove outbound context for a terminal event."""
+    ctx = get_outbound_context(msg_id)
+    if ctx:
+        _GLOBAL_OUTBOUND_CONTEXT.pop(msg_id, None)
+    return ctx
+
+
+def remove_outbound_context(msg_id: str) -> None:
+    """Remove outbound context (e.g. on terminal success)."""
+    if msg_id:
+        _GLOBAL_OUTBOUND_CONTEXT.pop(msg_id, None)
+
 # ── Outbound delivery-failure feedback loop ────────────────────────────
 #
 # An outbound message can die two ways: rejected synchronously at send
@@ -1606,7 +1685,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # OUTBOUND_FAILURE_MAX_ATTEMPTS. Reset on inbound / delivered / TTL.
         self._outbound_failure_state: Dict[str, Dict[str, float]] = {}
         # outbound message id -> context dictionary tracking sent messages.
-        self._outbound_context: Dict[str, Dict[str, Any]] = {}
+        self._outbound_context = _GLOBAL_OUTBOUND_CONTEXT
         # chat_id → unix timestamp at which the contact's call WS most-recently
         # closed.  send() consults this to drop replies generated during the
         # short window after a call ends — when the agent's last in-call turn
@@ -2205,9 +2284,19 @@ class InkboxAdapter(BasePlatformAdapter):
                 raw_response.get("message_id") or "",
                 raw_response.get("status") or "",
             )
+            msg_id = str(getattr(msg, "id", "")).strip()
+            if msg_id:
+                save_outbound_context(
+                    msg_id=msg_id,
+                    channel="imessage",
+                    chat_id=chat_id,
+                    recipient=to_number or "",
+                    body=caption or "[media attachment]",
+                    conversation_id=conversation_id or "",
+                )
             return SendResult(
                 success=True,
-                message_id=str(getattr(msg, "id", "")),
+                message_id=msg_id,
                 raw_response=raw_response,
             )
         except Exception as exc:
@@ -2547,20 +2636,17 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 msg_id = str(getattr(msg, "id", "")).strip()
                 if msg_id:
-                    self._prune_outbound_context()
-                    self._outbound_context[msg_id] = {
-                        "channel": "imessage",
-                        "chat_id": chat_id,
-                        "recipient": to_number or "",
-                        "body_snippet": content,
-                        "conversation_id": conversation_id or "",
-                        "email_thread_id": None,
-                        "email_subject": None,
-                        "at": time.time(),
-                    }
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="imessage",
+                        chat_id=chat_id,
+                        recipient=to_number or "",
+                        body=content,
+                        conversation_id=conversation_id or "",
+                    )
                 return SendResult(
                     success=True,
-                    message_id=str(getattr(msg, "id", "")),
+                    message_id=msg_id,
                     raw_response=raw_response,
                 )
             except Exception as exc:
@@ -2632,20 +2718,17 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 msg_id = str(getattr(msg, "id", "")).strip()
                 if msg_id:
-                    self._prune_outbound_context()
-                    self._outbound_context[msg_id] = {
-                        "channel": "sms",
-                        "chat_id": chat_id,
-                        "recipient": to_number or "",
-                        "body_snippet": content,
-                        "conversation_id": conversation_id or "",
-                        "email_thread_id": None,
-                        "email_subject": None,
-                        "at": time.time(),
-                    }
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="sms",
+                        chat_id=chat_id,
+                        recipient=to_number or "",
+                        body=content,
+                        conversation_id=conversation_id or "",
+                    )
                 return SendResult(
                     success=True,
-                    message_id=str(getattr(msg, "id", "")),
+                    message_id=msg_id,
                     raw_response=raw_response,
                 )
             except Exception as exc:
@@ -2714,17 +2797,16 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 msg_id = str(getattr(msg, "id", "")).strip()
                 if msg_id:
-                    self._prune_outbound_context()
-                    self._outbound_context[msg_id] = {
-                        "channel": "email",
-                        "chat_id": chat_id,
-                        "recipient": to_addr or "",
-                        "body_snippet": content,
-                        "conversation_id": None,
-                        "email_thread_id": in_reply_to or meta.get("thread_id"),
-                        "email_subject": subject,
-                        "at": time.time(),
-                    }
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="email",
+                        chat_id=chat_id,
+                        recipient=to_addr or "",
+                        body=content,
+                        email_thread_id=meta.get("thread_id") or None,
+                        email_rfc_message_id=in_reply_to or None,
+                        email_subject=subject,
+                    )
                 return SendResult(success=True, message_id=msg_id)
             except Exception as exc:
                 failure = SendResult(success=False, error=f"send_email failed: {exc}")
@@ -3193,14 +3275,20 @@ class InkboxAdapter(BasePlatformAdapter):
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
         direction = str(message.get("direction") or "").strip().lower()
-        if direction and direction != "outbound":
+
+        ctx = get_outbound_context(message_id)
+        if direction == "inbound" and not ctx:
             return web.Response(status=200, text="ok")
+
         to_addresses = [
             _normalize_email_address(addr)
             for addr in (message.get("to_addresses") or [])
             if addr
         ]
         to_address = next((addr for addr in to_addresses if addr), "")
+        if ctx:
+            to_address = ctx.get("recipient") or to_address
+
         if not to_address:
             logger.warning(
                 "[Inkbox] Mail %s webhook had no recipient; not waking agent",
@@ -3223,16 +3311,18 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            ctx = self._outbound_context.get(message_id) if message_id else None
+            ctx = pop_outbound_context(message_id)
             if ctx:
                 chat_id = ctx.get("chat_id")
                 thread_id = ctx.get("email_thread_id") or message.get("thread_id")
                 to_address = ctx.get("recipient") or to_address
                 subject = ctx.get("email_subject") or subject
                 failed_body = ctx.get("body_snippet") or str(message.get("snippet") or subject or "")
+                rfc_message_id = ctx.get("email_rfc_message_id") or str(message.get("message_id") or "")
                 contact = await self._resolve_contact_full(kind="email", value=to_address) if to_address else None
             else:
                 thread_id = message.get("thread_id")
+                rfc_message_id = str(message.get("message_id") or "")
                 contact = await self._resolve_contact_full(kind="email", value=to_address)
                 chat_id = _chat_id_for_route(
                     contact,
@@ -3249,12 +3339,12 @@ class InkboxAdapter(BasePlatformAdapter):
             # Give send() the threading context for a resend even if the
             # inbound stash predates a restart; the failed message's own
             # RFC 5322 Message-ID keeps a retry on the original thread.
-            self._last_inbound_modality.setdefault(str(chat_id), "email")
-            self._last_inbound_email.setdefault(str(chat_id), {
+            self._last_inbound_modality[str(chat_id)] = "email"
+            self._last_inbound_email[str(chat_id)] = {
                 "subject": subject,
-                "rfc_message_id": str(message.get("message_id") or ""),
+                "rfc_message_id": rfc_message_id,
                 "from_address": to_address,
-            })
+            }
             await self._note_outbound_delivery_failure(
                 mode="email",
                 chat_id=chat_id,
@@ -3943,15 +4033,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
     # ── Outbound delivery-failure feedback loop ────────────────────────
     #
-    def _prune_outbound_context(self) -> None:
-        """Prune outbound context entries older than 2 hours."""
-        if not hasattr(self, "_outbound_context"):
-            self._outbound_context = {}
-        now = time.time()
-        cutoff = now - 7200.0
-        stale = [k for k, v in self._outbound_context.items() if v.get("at", 0) < cutoff]
-        for k in stale:
-            self._outbound_context.pop(k, None)
+    # _prune_outbound_context is fully replaced by get_outbound_context/save_outbound_context.
 
     def _outbound_failure_store(self) -> Dict[str, Dict[str, float]]:
         """Return the failure-counter store, creating it if missing.
@@ -4281,11 +4363,13 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
-        if direction.lower() != "outbound":
+        ctx = get_outbound_context(text_id)
+        if direction.lower() == "inbound" and not ctx:
             return web.Response(status=200, text="ok")
 
         if event_type == "text.delivered":
             self._clear_outbound_failures("sms", conversation_id, remote)
+            remove_outbound_context(text_id)
             return web.Response(status=200, text="ok")
 
         if event_type != "text.delivery_failed":
@@ -4298,7 +4382,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            ctx = self._outbound_context.get(text_id) if text_id else None
+            ctx = pop_outbound_context(text_id)
             if ctx:
                 chat_id = ctx.get("chat_id")
                 conversation_id = ctx.get("conversation_id") or conversation_id
@@ -4564,11 +4648,13 @@ class InkboxAdapter(BasePlatformAdapter):
             redact_phone(remote),
             error_code or "",
         )
-        if direction == "inbound":
+        ctx = get_outbound_context(message_id)
+        if direction == "inbound" and not ctx:
             return web.Response(status=200, text="ok")
 
         if event_type == "imessage.delivered":
             self._clear_outbound_failures("imessage", conversation_id, remote)
+            remove_outbound_context(message_id)
             return web.Response(status=200, text="ok")
 
         if event_type != "imessage.delivery_failed":
@@ -4580,7 +4666,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._dedup_begin(event_key):
             return web.Response(status=200, text="duplicate")
         try:
-            ctx = self._outbound_context.get(message_id) if message_id else None
+            ctx = pop_outbound_context(message_id)
             if ctx:
                 chat_id = ctx.get("chat_id")
                 conversation_id = ctx.get("conversation_id") or conversation_id
@@ -5867,11 +5953,21 @@ async def send_inkbox_direct(
                             conversation_id,
                         )
                         return _sms_send_failure_dict(exc)
+                    msg_id = str(getattr(msg, "id", "")).strip()
+                    if msg_id:
+                        save_outbound_context(
+                            msg_id=msg_id,
+                            channel="sms",
+                            chat_id=chat_id,
+                            recipient="",
+                            body=message,
+                            conversation_id=conversation_id,
+                        )
                     return {
                         "success": True,
                         "platform": "inkbox",
                         "chat_id": chat_id,
-                        "message_id": str(getattr(msg, "id", "")),
+                        "message_id": msg_id,
                         "mode": "sms",
                         "conversation_id": conversation_id,
                         "delivery_status": _plain_value(
@@ -5895,11 +5991,20 @@ async def send_inkbox_direct(
                         redact_phone(str(target)),
                     )
                     return _sms_send_failure_dict(exc)
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="sms",
+                        chat_id=chat_id,
+                        recipient=target or "",
+                        body=message,
+                    )
                 return {
                     "success": True,
                     "platform": "inkbox",
                     "chat_id": chat_id,
-                    "message_id": str(getattr(msg, "id", "")),
+                    "message_id": msg_id,
                     "mode": "sms",
                     "delivery_status": _plain_value(
                         getattr(msg, "delivery_status", None),
@@ -5936,11 +6041,21 @@ async def send_inkbox_direct(
                         "error": _format_inkbox_imessage_error(fields),
                         **fields,
                     }
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="imessage",
+                        chat_id=chat_id,
+                        recipient=str(chat_id) if str(chat_id).startswith("+") else "",
+                        body=message,
+                        conversation_id=conversation_id or "",
+                    )
                 return {
                     "success": True,
                     "platform": "inkbox",
                     "chat_id": chat_id,
-                    "message_id": str(getattr(msg, "id", "")),
+                    "message_id": msg_id,
                     "mode": "imessage",
                     "conversation_id": conversation_id or _plain_value(
                         getattr(msg, "conversation_id", None),
@@ -5964,11 +6079,21 @@ async def send_inkbox_direct(
                     subject=subject or "(no subject)",
                     body_text=message,
                 )
+                msg_id = str(getattr(msg, "id", "")).strip()
+                if msg_id:
+                    save_outbound_context(
+                        msg_id=msg_id,
+                        channel="email",
+                        chat_id=chat_id,
+                        recipient=target or "",
+                        body=message,
+                        email_subject=subject or "(no subject)",
+                    )
                 return {
                     "success": True,
                     "platform": "inkbox",
                     "chat_id": chat_id,
-                    "message_id": str(getattr(msg, "id", "")),
+                    "message_id": msg_id,
                     "mode": "email",
                 }
 
