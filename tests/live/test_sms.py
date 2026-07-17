@@ -6,7 +6,7 @@ subject to carrier + spam filtering — so prompts ask for SHORT replies and avo
 spammy content.
 
   * mock leg → reachability (deterministic ``REPLY_OK`` from the mock model).
-  * real leg → intelligence (gpt-5.4-mini): basic, own identity, sender, tools.
+  * real leg → intelligence (gpt-5.4): basic, own identity, sender, tools.
 
 Skipped unless both keys are set. Replies are matched by *new* inbound message id
 from the AUT's number (robust to clock skew).
@@ -22,7 +22,6 @@ import re
 import time
 import urllib.request
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -115,18 +114,37 @@ def _settle_inbound(sms) -> set:
     return before
 
 
-def _wait_new_inbound(sms, before: set, timeout_s: float, context: str) -> str:
-    """Poll for the first inbound not in ``before``; return its body lowercased."""
+def _wait_new_inbound(
+    sms,
+    before: set,
+    timeout_s: float,
+    context: str,
+    required_text: str | None = None,
+) -> str:
+    """Poll for a correlated inbound reply and return its body lowercased."""
+    seen = set(before)
+    unmatched = 0
+    required = (required_text or "").lower()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         for m in _inbound_from_aut(sms):
-            if m.id not in before:
-                body = getattr(m, "text", "") or ""
-                bad = [x for x in ERROR_MARKERS if x in body.lower()]
-                assert not bad, f"SMS reply is an error, not a real answer: {bad}\n{body[:200]}"
-                return body.lower()
+            if m.id in seen:
+                continue
+            seen.add(m.id)
+            body = getattr(m, "text", "") or ""
+            body_lower = body.lower()
+            if required and required not in body_lower:
+                unmatched += 1
+                continue
+            bad = [x for x in ERROR_MARKERS if x in body_lower]
+            assert not bad, f"SMS reply is an error, not a real answer: {bad}\n{body[:200]}"
+            return body_lower
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"no SMS reply within {timeout_s:.0f}s to: {context}")
+    correlation = f" containing {required_text!r}" if required_text else ""
+    pytest.fail(
+        f"no SMS reply{correlation} within {timeout_s:.0f}s to: {context}; "
+        f"ignored {unmatched} uncorrelated reply/replies"
+    )
 
 
 def _diversify(text: str) -> str:
@@ -143,11 +161,15 @@ def _diversify(text: str) -> str:
 
 
 def _ask_sms(sms, text: str, timeout_s: float = TIMEOUT_S) -> str:
-    """Text the agent; return the reply body (lowercased), matched by new message id."""
+    """Text the agent; return the reply body matched to this question."""
     remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
     before = _settle_inbound(sms)
-    remote.texts.send(pid, to=aut_phone, text=_diversify(text))
-    return _wait_new_inbound(sms, before, timeout_s, repr(text))
+    reply_tag = f"r{uuid.uuid4().hex[:8]}" if REAL else None
+    question = text
+    if reply_tag:
+        question = f"{text} End your reply with {reply_tag}."
+    remote.texts.send(pid, to=aut_phone, text=_diversify(question))
+    return _wait_new_inbound(sms, before, timeout_s, repr(text), reply_tag)
 
 
 def _ask_sms_besteffort(sms, text: str, timeout_s: float) -> str | None:
@@ -232,13 +254,30 @@ def test_sms_reports_sender_details(sms):
 
 @real_only
 def test_sms_aware_of_inkbox_tools(sms):
-    import yaml
+    """Prove tool wiring with a lookup whose result is absent from the SMS."""
+    from inkbox.contacts.types import ContactEmail
 
-    manifest = yaml.safe_load(Path(__file__).resolve().parents[2].joinpath("plugin.yaml").read_text())
-    tool_names = [t for t in manifest.get("provides_tools", []) if isinstance(t, str)]
-    body = _ask_sms(sms, "Name three of your Inkbox tools (exact names).")
-    hits = [t for t in tool_names if t.lower() in body]
-    assert len(hits) >= 2, f"agent named only {hits} of its tools\n{body[:300]}"
+    aut = sms["aut"]
+    probe_email = f"sms-contact-{uuid.uuid4().hex[:8]}@example.com"
+    surname = f"fenwick-{uuid.uuid4().hex[:8]}"
+    try:
+        aut.contacts.create(
+            given_name="Probe",
+            family_name=surname,
+            emails=[ContactEmail(label="work", value=probe_email)],
+        )
+        body = _ask_sms(
+            sms,
+            "Use your Inkbox contact tools to look up the contact whose email "
+            f"is {probe_email}, then reply with that contact's full name.",
+        )
+        assert surname in body, \
+            f"agent did not report the looked-up contact surname {surname!r}\n{body[:300]}"
+    finally:
+        for contact in aut.contacts.lookup(email=probe_email) or []:
+            contact_id = str(getattr(contact, "id", "") or "")
+            if contact_id:
+                aut.contacts.delete(contact_id)
 
 
 # ── Outbound delivery-failure retry loop ────────────────────────────────
