@@ -965,7 +965,7 @@ WHOAMI_SCHEMA = {
 
 LOOKUP_CONTACT_SCHEMA = {
     "name": "inkbox_lookup_contact",
-    "description": "Reverse-lookup Inkbox contacts by exactly one email/phone filter. Returns contacts visible to this configured identity.",
+    "description": "Reverse-lookup organization-wide Inkbox contacts by exactly one email/phone filter.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -980,7 +980,7 @@ LOOKUP_CONTACT_SCHEMA = {
 
 LIST_CONTACTS_SCHEMA = {
     "name": "inkbox_list_contacts",
-    "description": "Search/list Inkbox contacts visible to this configured identity. Use for name-based queries like 'who is Alex?'.",
+    "description": "Search/list organization-wide Inkbox contacts. Use for name-based queries like 'who is Alex?'.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1040,14 +1040,14 @@ _CONTACT_WRITE_PROPERTIES = {
     "familyName": {"type": "string", "description": "Family/last name."},
     "companyName": {"type": "string", "description": "Company or organization."},
     "jobTitle": {"type": "string", "description": "Job title."},
-    "notes": {"type": "string", "description": "Free-form contact notes."},
+    "notes": {"type": "string", "description": "User-managed contact notes, separate from generated contact facts."},
     "emails": {"type": "array", "items": _CONTACT_EMAIL_ENTRY_SCHEMA, "description": "Email addresses. Strings or objects are accepted."},
     "phones": {"type": "array", "items": _CONTACT_PHONE_ENTRY_SCHEMA, "description": "Phone numbers. Strings or objects are accepted."},
 }
 
 CREATE_CONTACT_SCHEMA = {
     "name": "inkbox_create_contact",
-    "description": "Create an Inkbox address-book contact visible according to Inkbox contact access rules.",
+    "description": "Create an organization-wide Inkbox address-book contact.",
     "parameters": {
         "type": "object",
         "properties": dict(_CONTACT_WRITE_PROPERTIES),

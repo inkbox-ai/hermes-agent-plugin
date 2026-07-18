@@ -301,6 +301,14 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_lookup_contact`
+- `inkbox_list_contacts`
+- `inkbox_get_contact`
+- `inkbox_create_contact`
+- `inkbox_update_contact`
+- `inkbox_delete_contact`
+
+Contacts and generated contact facts are organization-wide. Contact `notes` remain user-managed profile text, separate from source-grounded generated facts. Correspondence still follows the configured identity's channel permissions. Unified correspondence and generated-fact tools are deferred until the installed SDK exposes those resources; this plugin does not use raw API calls as a substitute.
 
 Realtime-only call tools:
 
@@ -322,9 +330,9 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 | `inkbox-imessage-responder` | Sending, replying to, or triaging iMessage |
 | `inkbox-outbound-calling` | Placing calls to numbers or contacts |
 | `inkbox-call-review` | Current-call/post-call context; historical call reads are not exposed in Hermes |
-| `inkbox-contact-lookup` | Using resolved inbound contact context; contact CRUD tools are not exposed in Hermes |
+| `inkbox-contact-lookup` | Resolving, creating, or updating organization-wide contacts |
 | `inkbox-contact-rules` | Explaining server-side contact rules; rule edit tools are not exposed in Hermes |
-| `inkbox-identity-access` | Explaining identity access; grant/revoke tools are not exposed in Hermes |
+| `inkbox-identity-access` | Explaining note access; note grant/revoke tools are not exposed in Hermes |
 | `inkbox-notes-memory` | Explaining note limitations; Inkbox note tools are not exposed in Hermes |
 | `inkbox-credential-use` | Explaining vault limitations; Inkbox vault tools are not exposed in Hermes |
 | `inkbox-outreach-sequence` | Multi-step outreach over email/SMS |
