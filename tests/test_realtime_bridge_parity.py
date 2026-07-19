@@ -34,6 +34,12 @@ from inkbox_plugin.realtime import (
 )
 
 
+def _new_test_adapter():
+    adapter = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    adapter.platform = types.SimpleNamespace(value="inkbox")
+    return adapter
+
+
 if realtime_mod.aiohttp is None:
     realtime_mod.aiohttp = types.SimpleNamespace(
         WSMsgType=types.SimpleNamespace(
@@ -712,7 +718,7 @@ def test_agent_consult_allows_explicit_repeat_sms_request():
 
 
 def test_adapter_realtime_call_ended_enqueues_reflection():
-    adapter = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    adapter = _new_test_adapter()
     events = []
 
     async def _enqueue(event):
@@ -734,7 +740,7 @@ def test_adapter_realtime_call_ended_enqueues_reflection():
 
 
 def test_adapter_realtime_post_call_actions_enqueues_without_auto_skill():
-    adapter = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    adapter = _new_test_adapter()
     events = []
 
     async def _enqueue(event):
