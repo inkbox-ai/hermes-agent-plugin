@@ -156,9 +156,10 @@ jobs:
           LIVE_VOICE_TIMEOUT: ${{ inputs.timeout_s || '220' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
           LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
-            "$PY" -m pytest tests/live/test_voice.py -v
+            "$PYTEST" tests/live/test_voice.py -v
 
       # Failure-only: these logs carry live call content and this repo is public.
       - name: Dump logs (on failure only)
