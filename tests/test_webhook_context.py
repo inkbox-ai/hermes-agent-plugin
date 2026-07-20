@@ -573,3 +573,71 @@ def test_sms_burst_uses_newest_event_context_not_last_arrival(monkeypatch):
     text = instance._enqueued[0].text
     assert "new snapshot" in text
     assert "stale snapshot" not in text
+
+
+def test_context_config_requests_a_wider_window_than_it_renders():
+    for kind, limit in adapter._WEBHOOK_CONTEXT_RENDER_LIMITS.items():
+        requested = adapter._WEBHOOK_CONTEXT_CONFIG[kind]["count"]
+        assert requested == min(50, limit * adapter._WEBHOOK_CONTEXT_OVERFETCH_MULTIPLIER)
+        assert requested >= limit
+
+
+def test_select_relevant_items_defaults_to_tail_slice_with_no_trigger_text():
+    window = [{"id": i} for i in range(10)]
+    assert adapter._select_relevant_items("texts", window, 3, frozenset()) == window[-3:]
+
+
+def test_select_relevant_items_surfaces_relevant_older_item_within_window():
+    window = [
+        {"id": "old-relevant", "text": "the secret launch code is ORCA-7"},
+        {"id": "filler-1", "text": "hey how are you"},
+        {"id": "filler-2", "text": "sounds good talk soon"},
+        {"id": "filler-3", "text": "ok thanks"},
+        {"id": "filler-4", "text": "see you then"},
+    ]
+    trigger_tokens = adapter._context_tokens("what was the launch code again")
+
+    selected = adapter._select_relevant_items("texts", window, 3, trigger_tokens)
+
+    # oldest-but-relevant beats newer-but-irrelevant, and the result stays
+    # in chronological (oldest-first) order for rendering.
+    assert [item["id"] for item in selected] == ["old-relevant", "filler-3", "filler-4"]
+
+
+def test_select_relevant_items_never_reaches_outside_the_window():
+    # A render limit of 3 with a 5-item window can surface item 0 (oldest in
+    # the window) but must never pull in something older than the window.
+    window = [{"id": i, "text": "no match here"} for i in range(5)]
+    trigger_tokens = adapter._context_tokens("no match here")
+
+    selected = adapter._select_relevant_items("texts", window, 3, trigger_tokens)
+
+    assert all(item["id"] in {0, 1, 2, 3, 4} for item in selected)
+    assert len(selected) == 3
+
+
+def test_render_webhook_context_surfaces_relevant_older_email_over_recent_noise():
+    items = [{
+        "id": "relevant",
+        "direction": "inbound",
+        "created_at": "2026-06-01T00:00:00Z",
+        "from_address": "person@example.com",
+        "subject": "project code",
+        "snippet": "the secret code is ORCA-7",
+    }]
+    for index in range(14):
+        items.append({
+            "id": f"filler-{index}",
+            "direction": "inbound",
+            "created_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+            "from_address": "person@example.com",
+            "subject": "unrelated",
+            "snippet": "just checking in, nothing important",
+        })
+    data = {"context": {"email": {"scope": "thread", "truncated": False, "items": items}}}
+
+    rendered = adapter._render_webhook_context(
+        data, "email", None, trigger_text="what was the code you gave me?",
+    )
+
+    assert "ORCA-7" in rendered

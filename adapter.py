@@ -412,15 +412,19 @@ _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
 # Ask Inkbox for a small, server-ordered history window on inbound webhooks.
 # Hermes is an entity-oriented assistant, so this context complements its
 # durable session rather than changing command/reset semantics.
+_WEBHOOK_CONTEXT_RENDER_LIMITS = {"email": 5, "texts": 8, "calls": 3}
+# Request a larger window than we render so relevance ranking (below) has a
+# pool to pick the best items from, instead of only ever seeing the tail.
+_WEBHOOK_CONTEXT_OVERFETCH_MULTIPLIER = 3
 _WEBHOOK_CONTEXT_CONFIG = {
-    "email": {"mode": "count", "count": 5},
-    "texts": {"mode": "count", "count": 8},
-    "calls": {"mode": "count", "count": 3},
+    kind: {"mode": "count", "count": min(50, limit * _WEBHOOK_CONTEXT_OVERFETCH_MULTIPLIER)}
+    for kind, limit in _WEBHOOK_CONTEXT_RENDER_LIMITS.items()
 }
 _WEBHOOK_CONTEXT_END = "--- End recent Inkbox context ---"
 _WEBHOOK_CONTEXT_TOTAL_CHARS = 6000
 _WEBHOOK_CONTEXT_STRING_CHARS = 500
 _WEBHOOK_CONTEXT_TRANSCRIPT_TURNS = 12
+_CONTEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _bounded_context_string(value: Any, limit: int = _WEBHOOK_CONTEXT_STRING_CHARS) -> str:
@@ -441,10 +445,67 @@ def _context_fields(item: Dict[str, Any], fields: list[tuple[str, str]]) -> str:
     return " | ".join(rendered)
 
 
+def _context_tokens(text: str) -> frozenset:
+    return frozenset(tok for tok in _CONTEXT_TOKEN_RE.findall(text.lower()) if len(tok) > 2)
+
+
+def _context_item_text(kind: str, raw: Dict[str, Any]) -> str:
+    """Pull the free-text fields worth matching against the trigger message."""
+    if kind == "email":
+        parts = [raw.get("subject"), raw.get("snippet")]
+    elif kind == "texts":
+        parts = [raw.get("text")]
+    else:
+        transcript = raw.get("transcript")
+        parts = [
+            entry.get("text")
+            for entry in (transcript if isinstance(transcript, list) else [])
+            if isinstance(entry, dict)
+        ]
+    return " ".join(str(part) for part in parts if part)
+
+
+def _select_relevant_items(
+    kind: str,
+    window: list[Any],
+    limit: int,
+    trigger_tokens: frozenset,
+) -> list[Any]:
+    """Pick the `limit` most relevant items from `window`, oldest-first.
+
+    `window` is already the most-recent slice of a kind's history (list
+    order = chronological, per the Inkbox contract). Ranking key is
+    (overlap, position) so position alone breaks every tie — with no
+    `trigger_tokens` (or no overlap at all), this is byte-identical to
+    plain `window[-limit:]`. A real overlap only lets an older-but-more-
+    relevant item in `window` displace a newer-but-irrelevant one; it
+    never reaches outside `window` into older history.
+    """
+    if limit <= 0 or not window:
+        return []
+    scored = [
+        (
+            _jaccard(_context_tokens(_context_item_text(kind, raw)), trigger_tokens)
+            if isinstance(raw, dict) else -1.0,
+            position,
+        )
+        for position, raw in enumerate(window)
+    ]
+    keep = {position for _score, position in sorted(scored, reverse=True)[:limit]}
+    return [raw for position, raw in enumerate(window) if position in keep]
+
+
+def _jaccard(item_tokens: frozenset, trigger_tokens: frozenset) -> float:
+    if not item_tokens or not trigger_tokens:
+        return 0.0
+    return len(item_tokens & trigger_tokens) / len(item_tokens | trigger_tokens)
+
+
 def _render_webhook_context(
     data: Any,
     trigger_modality: str = "",
     trigger_id: Any = None,
+    trigger_text: str = "",
 ) -> str:
     """Render allowlisted webhook history as bounded, explicitly untrusted data."""
     if not isinstance(data, dict) or not isinstance(data.get("context"), dict):
@@ -452,7 +513,8 @@ def _render_webhook_context(
 
     context = data["context"]
     sections: list[str] = []
-    limits = {"email": 5, "texts": 8, "calls": 3}
+    limits = _WEBHOOK_CONTEXT_RENDER_LIMITS
+    trigger_tokens = _context_tokens(trigger_text) if trigger_text else frozenset()
     raw_trigger_ids = (
         trigger_id
         if isinstance(trigger_id, (list, tuple, set, frozenset))
@@ -484,7 +546,8 @@ def _render_webhook_context(
                 )
             ]
         lines: list[str] = []
-        for raw in items[-limits[kind]:]:
+        window = items[-(limits[kind] * _WEBHOOK_CONTEXT_OVERFETCH_MULTIPLIER):]
+        for raw in _select_relevant_items(kind, window, limits[kind], trigger_tokens):
             if not isinstance(raw, dict):
                 continue
             if kind == "email":
@@ -567,7 +630,7 @@ def _render_webhook_context(
 
 
 def _append_webhook_context(text: str, data: Any, modality: str, trigger_id: Any) -> str:
-    context = _render_webhook_context(data, modality, trigger_id)
+    context = _render_webhook_context(data, modality, trigger_id, trigger_text=text)
     return f"{text}\n\n{context}" if context else text
 
 
