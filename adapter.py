@@ -3288,27 +3288,34 @@ class InkboxAdapter(BasePlatformAdapter):
             for rid, _ts in oldest[: len(self._seen_request_ids) - 2000]:
                 self._seen_request_ids.pop(rid, None)
 
+    def _dedup_claim(self, request_id: str) -> str:
+        """Classify ``request_id`` and reserve it if unseen.
+
+        Returns "seen", "inflight", or "new" — a "new" result reserves the
+        id in ``_inflight_request_ids`` before returning, so callers must
+        pair a "new" result with a later ``_dedup_commit``/``_dedup_rollback``.
+        """
+        self._prune_dedup_ids()
+        if request_id in self._seen_request_ids:
+            return "seen"
+        if request_id in self._inflight_request_ids:
+            return "inflight"
+        self._inflight_request_ids[request_id] = time.time()
+        return "new"
+
     def _dedup_begin(self, request_id: str) -> bool:
         if not request_id:
             return False
-        self._prune_dedup_ids()
-        prior = self._seen_request_ids.get(request_id)
-        if prior is not None:
-            return True
-        if request_id in self._inflight_request_ids:
-            return True
-        self._inflight_request_ids[request_id] = time.time()
-        return False
+        return self._dedup_claim(request_id) != "new"
 
     def _begin_dedup_response(self, request_id: str) -> Optional["web.Response"]:
         if not request_id:
             return None
-        self._prune_dedup_ids()
-        if request_id in self._seen_request_ids:
+        state = self._dedup_claim(request_id)
+        if state == "seen":
             return web.Response(status=200, text="duplicate")
-        if request_id in self._inflight_request_ids:
+        if state == "inflight":
             return web.Response(status=503, text="in progress; retry")
-        self._inflight_request_ids[request_id] = time.time()
         return None
 
     def _dedup_commit(self, request_id: str) -> None:
