@@ -36,13 +36,17 @@ jobs:
           key: ${{ runner.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
 
       - name: Install dependencies
-        run: uv sync --extra test --python ${{ matrix.python-version }}
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install \
+            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@8f4b37c56cd153a2acc6cfabe27dbbeb43510f00#subdirectory=sdk/python" \
+            'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0'
 
       - name: Lint
-        run: uv run ruff check .
+        run: .venv/bin/ruff check .
 
       - name: Run unit tests
-        run: uv run pytest -v
+        run: .venv/bin/python -m pytest -v
 
   # Contract suite against the REAL Hermes host at main. This is the lane that
   # catches upstream interface drift (a renamed register_platform kwarg, a moved
@@ -61,8 +65,11 @@ jobs:
 
       - name: Install test deps + real Hermes host (main)
         run: |
-          uv sync --extra test --python 3.12
+          uv venv --python 3.12
+          uv pip install \
+            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@8f4b37c56cd153a2acc6cfabe27dbbeb43510f00#subdirectory=sdk/python" \
+            'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0'
           uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
 
       - name: Contract tests vs real Hermes main
-        run: uv run pytest tests/contract -v
+        run: .venv/bin/pytest --override-ini pythonpath= --import-mode=importlib tests/contract -v
