@@ -43,10 +43,10 @@ jobs:
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0'
 
       - name: Lint
-        run: uv run ruff check .
+        run: .venv/bin/ruff check .
 
       - name: Run unit tests
-        run: uv run pytest -v
+        run: .venv/bin/python -m pytest -v
 
   # Contract suite against the REAL Hermes host at main. This is the lane that
   # catches upstream interface drift (a renamed register_platform kwarg, a moved
@@ -72,4 +72,4 @@ jobs:
           uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
 
       - name: Contract tests vs real Hermes main
-        run: uv run pytest tests/contract -v
+        run: .venv/bin/pytest --override-ini pythonpath= --import-mode=importlib tests/contract -v
