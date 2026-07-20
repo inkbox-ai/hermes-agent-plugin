@@ -154,11 +154,12 @@ jobs:
           LIVE_EMAIL_TIMEOUT: ${{ inputs.timeout_s || '150' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
           if [ "${{ matrix.mode }}" = "real" ]; then
-            LIVE_REAL_MODEL=1 "$PY" -m pytest tests/live -v
+            LIVE_REAL_MODEL=1 "$PYTEST" tests/live -v
           else
-            "$PY" -m pytest tests/live -v
+            "$PYTEST" tests/live -v
           fi
 
       # Failure-only: these logs carry live phone/email/message content and this repo

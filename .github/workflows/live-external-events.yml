@@ -120,10 +120,11 @@ jobs:
           LIVE_EXTERNAL_TIMEOUT: ${{ inputs.timeout_s || '45' }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest
           # Inkbox-signed escalation + GitHub-signed (valid & forged) escalation.
           LIVE_REAL_MODEL=1 AUT_WEBHOOK_URL=http://127.0.0.1:8765/webhook \
-            "$PY" -m pytest \
+            "$PYTEST" \
               tests/live/test_external_event_intelligence.py \
               tests/live/test_external_event_github.py -v
 
