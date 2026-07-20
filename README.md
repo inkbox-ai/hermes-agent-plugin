@@ -182,7 +182,7 @@ iMessage works differently from SMS: the agent does not get its own iMessage num
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`) arrive as webhooks and are logged by the gateway without waking the agent; `imessage.delivery_failed` wakes the agent to fix and resend, matching the SMS lifecycle handling — where `text.delivery_unconfirmed` (carrier uncertainty, not a failure) is likewise logged without a wake.
 
-Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. For explicit `inkbox_send_imessage` calls, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
+Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. Do not also call `inkbox_send_imessage` for that current thread: the final reply is already delivered automatically, and the plugin suppresses a second final bubble if a same-thread explicit send slips through. For explicit sends to a different conversation, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -248,6 +248,21 @@ After the gateway starts:
 | `INKBOX_REALTIME_CONNECT_TIMEOUT_S` | no | `8` | Seconds to wait for OpenAI Realtime preflight before falling back or failing. |
 | `INKBOX_REALTIME_CONSULT_TIMEOUT_S` | no | plugin default | Seconds the Realtime voice agent waits for a Hermes consult before continuing. |
 | `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI Realtime connect/auth fails before call accept. |
+
+## Companion Plugin Extensions
+
+Standalone Hermes plugins can reuse the Inkbox agent tunnel for authenticated
+third-party webhooks and OAuth callbacks without modifying the installed
+Inkbox plugin. Import these functions from the loaded `hermes_plugins.inkbox`
+module during the companion plugin's `register(ctx)` call:
+
+- `register_webhook_provider(ProviderClass)` registers a `WebhookProvider`
+  implementation. Verified events wake Hermes as `external:<provider-name>`.
+- `register_http_route(method, path, handler)` mounts an aiohttp handler on the
+  existing Inkbox tunnel when the gateway starts.
+
+Providers may override `event_key(envelope=..., headers=...)` for retry
+deduplication and set `skill` to auto-load a companion skill for verified events.
 
 ## Channel Overrides
 

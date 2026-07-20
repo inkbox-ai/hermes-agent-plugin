@@ -40,6 +40,12 @@ its events reach the agent regardless of the pass-through flag).
 
 ## Steps to onboard a source
 
+For a provider shipped inside a separate Hermes plugin, import
+`hermes_plugins.inkbox` in that plugin's `register(ctx)` function and call its
+public `register_webhook_provider(ProviderClass)` export. Do not copy a module
+into the installed Inkbox plugin. Providers bundled with this repository may
+continue using the auto-discovered module pattern below.
+
 1. **Drop a new file** `webhook_providers/<name>.py` with a `WebhookProvider`
    subclass decorated with `@register_provider`. That's the whole registration
    step — the package auto-imports it at startup, no other file changes:
@@ -82,6 +88,10 @@ its events reach the agent regardless of the pass-through flag).
 
 4. **Test it** — add a case to `tests/test_webhook_providers.py` covering a
    valid and an invalid signature.
+
+5. **Deduplicate provider retries** — if the source has its own delivery id,
+   override `event_key(envelope=..., headers=...)`. The adapter will use that
+   key when no `X-Inkbox-Request-Id` exists.
 
 ## Getting `verify` right (the common mistakes)
 

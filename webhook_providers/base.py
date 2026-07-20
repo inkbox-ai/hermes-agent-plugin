@@ -7,7 +7,7 @@ startup so their registration runs. See ``skills/inkbox-webhook-providers``.
 
 from __future__ import annotations
 
-from typing import List, Mapping, Optional, Type
+from typing import Any, List, Mapping, Optional, Type
 
 
 class WebhookProvider:
@@ -23,6 +23,8 @@ class WebhookProvider:
     #: Signature header that fingerprints this source. Sources that need more
     #: than one header to identify should override :meth:`matches` instead.
     provider_header: str = ""
+    #: Optional skill auto-loaded whenever this verified provider wakes Hermes.
+    skill: str | list[str] | None = None
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         """Return whether an inbound request came from this source.
@@ -62,6 +64,22 @@ class WebhookProvider:
             bool: True iff the signature is present and authentic.
         """
         raise NotImplementedError
+
+    def event_key(
+        self,
+        *,
+        envelope: Mapping[str, Any],
+        headers: Mapping[str, str],
+    ) -> str:
+        """Return a stable delivery id for providers without a request-id header.
+
+        The adapter uses ``X-Inkbox-Request-Id`` for native Inkbox deliveries.
+        Third-party providers can override this hook to expose their equivalent
+        idempotency key. Returning an empty string leaves deduplication to the
+        event handler.
+        """
+        del envelope, headers
+        return ""
 
 
 # Registered providers, checked in registration order by ``match_provider``.
