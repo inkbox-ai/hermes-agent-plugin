@@ -136,7 +136,15 @@ def test_sms_request_gets_email_response(xc):
                 if aut_email.lower() in (getattr(m, "from_address", "") or "").lower()]
 
     before = {m.id for m in _email_from_aut()}
-    remote.texts.send(xc["remote_pid"], to=xc["aut_phone"], text=f"Please email me the code {token}.")
+    remote.texts.send(
+        xc["remote_pid"],
+        to=xc["aut_phone"],
+        text=(
+            "Use your Inkbox email capability to send me an email containing "
+            f"the code {token}. Find my email address in my contact details. "
+            "Do not send the code back by SMS; this is complete only after the email is sent."
+        ),
+    )
 
     deadline = time.monotonic() + TIMEOUT_S
     while time.monotonic() < deadline:
