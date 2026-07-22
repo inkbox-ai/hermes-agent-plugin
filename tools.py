@@ -918,7 +918,7 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
 
         def _place():
             if not hasattr(identity, "place_call"):
-                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.0)")
+                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.1)")
             try:
                 return identity.place_call(
                     to_number=to_number,
@@ -965,7 +965,7 @@ WHOAMI_SCHEMA = {
 
 LOOKUP_CONTACT_SCHEMA = {
     "name": "inkbox_lookup_contact",
-    "description": "Reverse-lookup Inkbox contacts by exactly one email/phone filter. Returns contacts visible to this configured identity.",
+    "description": "Reverse-lookup organization-wide Inkbox contacts by exactly one email/phone filter.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -980,7 +980,7 @@ LOOKUP_CONTACT_SCHEMA = {
 
 LIST_CONTACTS_SCHEMA = {
     "name": "inkbox_list_contacts",
-    "description": "Search/list Inkbox contacts visible to this configured identity. Use for name-based queries like 'who is Alex?'.",
+    "description": "Search/list organization-wide Inkbox contacts. Use for name-based queries like 'who is Alex?'.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1047,7 +1047,7 @@ _CONTACT_WRITE_PROPERTIES = {
 
 CREATE_CONTACT_SCHEMA = {
     "name": "inkbox_create_contact",
-    "description": "Create an Inkbox address-book contact visible according to Inkbox contact access rules.",
+    "description": "Create an organization-wide Inkbox address-book contact.",
     "parameters": {
         "type": "object",
         "properties": dict(_CONTACT_WRITE_PROPERTIES),

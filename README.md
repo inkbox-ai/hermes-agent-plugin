@@ -75,7 +75,7 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.0,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.5.1,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -96,13 +96,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.0,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.1,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.0,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.1,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -328,7 +328,7 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 | `inkbox-imessage-responder` | Sending, replying to, or triaging iMessage |
 | `inkbox-outbound-calling` | Placing calls to numbers or contacts |
 | `inkbox-call-review` | Current-call/post-call context; historical call reads are not exposed in Hermes |
-| `inkbox-contact-lookup` | Resolving, creating, or updating contacts visible to the configured identity |
+| `inkbox-contact-lookup` | Resolving, creating, or updating organization-wide contacts |
 | `inkbox-contact-rules` | Explaining server-side contact rules; rule edit tools are not exposed in Hermes |
 | `inkbox-identity-access` | Explaining identity access; grant/revoke tools are not exposed in Hermes |
 | `inkbox-notes-memory` | Explaining note limitations; Inkbox note tools are not exposed in Hermes |
