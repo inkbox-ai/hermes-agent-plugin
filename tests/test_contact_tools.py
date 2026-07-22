@@ -145,10 +145,10 @@ def test_lookup_contact_requires_one_filter(monkeypatch):
     assert "exactly one" in too_many["error"]
 
 
-def test_contact_schemas_preserve_identity_scoped_semantics():
-    assert "visible to this configured identity" in tools.LOOKUP_CONTACT_SCHEMA["description"]
-    assert "visible to this configured identity" in tools.LIST_CONTACTS_SCHEMA["description"]
-    assert "contact access rules" in tools.CREATE_CONTACT_SCHEMA["description"]
+def test_contact_schemas_describe_organization_wide_semantics():
+    assert "organization-wide" in tools.LOOKUP_CONTACT_SCHEMA["description"]
+    assert "organization-wide" in tools.LIST_CONTACTS_SCHEMA["description"]
+    assert "organization-wide" in tools.CREATE_CONTACT_SCHEMA["description"]
 
 
 def test_contact_write_tools_validate_required_inputs(monkeypatch):

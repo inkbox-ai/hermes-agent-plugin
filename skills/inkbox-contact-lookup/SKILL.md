@@ -1,12 +1,12 @@
 ---
 name: inkbox-contact-lookup
-description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs contact context. Hermes can read and write Inkbox contacts visible to this identity, but does not expose contact admin tools.
+description: Use when the user asks "who is X", "what's the email for Y", "find a contact named Z", "save this contact", or any question that needs contact context. Contacts are shared across the Inkbox organization.
 user-invocable: false
 ---
 
 # Inkbox contact lookup
 
-Hermes is the Inkbox social-assistant tier. It receives contact context on inbound email, SMS, iMessage, and calls when Inkbox resolves the sender, and it can read or update contacts visible to the configured identity.
+Hermes receives contact context on inbound email, SMS, iMessage, and calls when Inkbox resolves the sender, and it can read or update the organization's shared contacts.
 
 ## Hermes tool availability
 
@@ -32,9 +32,9 @@ Hermes is the Inkbox social-assistant tier. It receives contact context on inbou
 
 ## Access semantics
 
-- Contact context is **filtered server-side** by per-identity grants. If Inkbox does not include a resolved contact marker, this identity may not have access or the sender may be unknown.
-- Hermes contact tools operate only on contacts visible/writable to the configured identity.
-- Grant management is handled by the `inkbox-identity-access` skill when the user asks to share contacts across Inkbox identities.
+- Every identity in the organization can read contacts. Creating, updating, or deleting a contact affects the shared address book.
+- If Inkbox does not include a resolved contact marker, the sender may be unknown or ambiguous.
+- Contacts do not have per-identity access grants.
 
 ## What this skill does NOT cover
 
