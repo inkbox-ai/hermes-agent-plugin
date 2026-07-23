@@ -134,6 +134,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
+    from .a2a_context import read_a2a_turn_context, write_a2a_turn_context
     from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
@@ -148,6 +149,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from a2a_context import read_a2a_turn_context, write_a2a_turn_context
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
@@ -1699,6 +1701,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # voice-intended text into the user's inbox.
         self._voice_recently_closed: Dict[str, float] = {}
         self._a2a_tasks_by_chat: Dict[str, List[str]] = {}
+        self._a2a_session_by_chat: Dict[str, str] = {}
+        self._a2a_session_key_by_chat: Dict[str, str] = {}
+        self._a2a_suppress_next_reply_by_chat: set[str] = set()
         self._a2a_registry_path = _inkbox_state_path().with_name(
             "inkbox_a2a_tasks.json"
         )
@@ -3200,46 +3205,121 @@ class InkboxAdapter(BasePlatformAdapter):
         loaded = json.loads(self._a2a_registry_path.read_text())
         return loaded if isinstance(loaded, dict) else {}
 
-    def _write_a2a_registry(self, event_id: str, data: Dict[str, Any], state: str) -> None:
+    def _write_a2a_registry(self, key: str, data: Dict[str, Any], state: str) -> None:
         """Durably record an A2A delivery before acknowledging its webhook."""
         try:
             current = self._read_a2a_registry()
-            current[event_id] = {
+            current[key] = {
                 "task_id": str(data.get("task_id") or ""),
                 "context_id": str(data.get("context_id") or ""),
                 "message_id": str(data.get("message_id") or ""),
                 "state": state,
+                "data": data,
                 "updated_at": time.time(),
             }
             tmp = self._a2a_registry_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
+            tmp.chmod(0o600)
             os.replace(tmp, self._a2a_registry_path)
+            self._a2a_registry_path.chmod(0o600)
         except Exception:
             logger.exception("[Inkbox] Could not persist A2A task registry")
             raise
 
+    def _finalize_a2a_task_registry(self, task_id: str) -> None:
+        for key, entry in self._read_a2a_registry().items():
+            if (
+                str(entry.get("task_id") or "") == task_id
+                and entry.get("state") != "finalized"
+            ):
+                data = entry.get("data")
+                if not isinstance(data, dict):
+                    data = {
+                        "task_id": task_id,
+                        "context_id": entry.get("context_id"),
+                        "message_id": entry.get("message_id"),
+                    }
+                self._write_a2a_registry(key, data, "finalized")
+
+    def _bind_a2a_turn_context(
+        self,
+        source: Any,
+        *,
+        task_id: str,
+        context_id: str,
+        message_id: str,
+    ) -> None:
+        """Bind verified webhook data to the host session used by tool calls."""
+        handler_owner = getattr(
+            getattr(self, "_message_handler", None),
+            "__self__",
+            None,
+        )
+        session_store = getattr(handler_owner, "session_store", None)
+        if session_store is None:
+            return
+        try:
+            entry = session_store.get_or_create_session(source)
+            session_id = str(entry.session_id)
+            chat_id = str(source.chat_id)
+            self._a2a_session_by_chat[chat_id] = session_id
+            self._a2a_session_key_by_chat[chat_id] = str(entry.session_key)
+            write_a2a_turn_context(
+                session_id,
+                {
+                    "task_id": task_id,
+                    "context_id": context_id,
+                    "message_id": message_id,
+                    "reply_intent_committed": False,
+                },
+            )
+        except Exception:
+            logger.exception("[Inkbox] Could not bind the A2A turn context")
+
     async def _on_a2a_event(self, envelope: Dict[str, Any]) -> "web.Response":
-        event_id = str(envelope.get("id") or "")
         event_type = str(envelope.get("event_type") or "")
         data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
         task_id = str(data.get("task_id") or "")
         context_id = str(data.get("context_id") or "")
         message_id = str(data.get("message_id") or envelope.get("id") or "")
-        if not event_id or not task_id or not context_id:
+        if not task_id or not context_id or not message_id:
             return web.Response(status=200, text="ignored")
-        if event_id in self._read_a2a_registry():
-            return web.Response(status=200, text="duplicate")
         chat_id = f"a2a:{self._identity_id}:{context_id}"
         if event_type == "a2a.task.canceled":
+            queue = self._a2a_tasks_by_chat.get(chat_id, [])
+            was_active = bool(queue and queue[0] == task_id)
+            session_key = self._a2a_session_key_by_chat.get(chat_id)
+            if was_active and session_key:
+                await self.cancel_session_processing(
+                    session_key,
+                    discard_pending=False,
+                )
+            elif was_active:
+                # Older hosts may not expose their session binding. Suppress
+                # one late delivery so it cannot complete the next task.
+                self._a2a_suppress_next_reply_by_chat.add(chat_id)
             self._a2a_tasks_by_chat[chat_id] = [
-                value for value in self._a2a_tasks_by_chat.get(chat_id, [])
+                value for value in queue
                 if value != task_id
             ]
-            self._write_a2a_registry(event_id, data, "finalized")
+            self._finalize_a2a_task_registry(task_id)
+            return web.Response(status=200, text="ok")
+        if event_type == "a2a.sent_task.updated":
+            logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
 
-        self._write_a2a_registry(event_id, data, "queued")
-        self._a2a_tasks_by_chat.setdefault(chat_id, []).append(task_id)
+        key = f"{task_id}:{message_id}"
+        existing = self._read_a2a_registry().get(key)
+        is_resume = str(envelope.get("id") or "").startswith("resume:")
+        if existing and not (
+            is_resume and existing.get("state") != "finalized"
+        ):
+            return web.Response(status=200, text="duplicate")
+        if not existing:
+            self._write_a2a_registry(key, data, "queued")
+        queue = self._a2a_tasks_by_chat.setdefault(chat_id, [])
+        if task_id not in queue:
+            queue.append(task_id)
         caller = data.get("caller") if isinstance(data.get("caller"), dict) else {}
         parts = data.get("parts") if isinstance(data.get("parts"), list) else []
         body = "\n".join(
@@ -3256,18 +3336,30 @@ class InkboxAdapter(BasePlatformAdapter):
             thread_id=None,
             message_id=message_id,
         )
+        self._bind_a2a_turn_context(
+            source,
+            task_id=task_id,
+            context_id=context_id,
+            message_id=message_id,
+        )
         marker = (
             f"[inkbox:a2a_task caller=@{str(caller.get('handle') or 'unknown').lstrip('@')} "
             f"caller_org={caller.get('organization_id') or 'unknown'}]"
         )
         await self._enqueue(MessageEvent(
-            text=f"{marker}\n{body}".rstrip(),
+            text=(
+                f"{marker}\n"
+                "Use inkbox_a2a_complete, inkbox_a2a_ask_caller, or "
+                "inkbox_a2a_fail when an explicit outcome is appropriate.\n"
+                f"{body}"
+            ).rstrip(),
             message_type=MessageType.TEXT,
             source=source,
             raw_message=envelope,
             message_id=message_id,
             internal=True,
         ))
+        self._write_a2a_registry(key, data, "running")
         return web.Response(status=200, text="ok")
 
     async def _catch_up_a2a_tasks(self) -> None:
@@ -3278,6 +3370,51 @@ class InkboxAdapter(BasePlatformAdapter):
             identity = await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
             )
+            for key, entry in self._read_a2a_registry().items():
+                if entry.get("state") == "finalized":
+                    continue
+                task_id = str(entry.get("task_id") or "")
+                if not task_id:
+                    continue
+                full = await asyncio.to_thread(identity.a2a_task, task_id)
+                state = str(getattr(full.state, "value", full.state))
+                if state in {"completed", "failed", "canceled", "rejected"}:
+                    data = entry.get("data")
+                    self._write_a2a_registry(
+                        key,
+                        data if isinstance(data, dict) else {
+                            "task_id": task_id,
+                            "context_id": entry.get("context_id"),
+                            "message_id": entry.get("message_id"),
+                        },
+                        "finalized",
+                    )
+                    continue
+                context_id = str(full.context_id)
+                chat_id = f"a2a:{self._identity_id}:{context_id}"
+                if task_id in self._a2a_tasks_by_chat.get(chat_id, []):
+                    continue
+                message = full.messages[-1] if full.messages else None
+                await self._on_a2a_event({
+                    "id": f"resume:{task_id}",
+                    "event_type": "a2a.task.created",
+                    "data": {
+                        "task_id": task_id,
+                        "context_id": context_id,
+                        "state": state,
+                        "caller": {
+                            "identity_id": str(full.caller.identity_id),
+                            "organization_id": full.caller.organization_id,
+                            "handle": full.caller.handle,
+                        },
+                        "message_id": (
+                            str(message.message_id)
+                            if message
+                            else str(entry.get("message_id") or f"task:{task_id}")
+                        ),
+                        "parts": message.parts if message else [],
+                    },
+                })
             tasks = await asyncio.to_thread(
                 lambda: list(identity.iter_a2a_tasks(state="submitted"))
             )
@@ -3304,10 +3441,27 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.exception("[Inkbox] A2A catch-up failed")
 
     async def _send_a2a_reply(self, chat_id: str, content: str) -> SendResult:
+        if chat_id in self._a2a_suppress_next_reply_by_chat:
+            self._a2a_suppress_next_reply_by_chat.discard(chat_id)
+            return SendResult(success=True, message_id="a2a-canceled")
         queue = self._a2a_tasks_by_chat.get(chat_id) or []
         if not queue or not content.strip() or content.strip().upper() == "[SILENT]":
             return SendResult(success=True, message_id="a2a-no-reply")
         task_id = queue[0]
+        session_id = self._a2a_session_by_chat.get(chat_id)
+        turn_context = (
+            read_a2a_turn_context(session_id)
+            if session_id
+            else None
+        )
+        if (
+            turn_context
+            and str(turn_context.get("task_id") or "") == task_id
+            and turn_context.get("reply_intent_committed") is True
+        ):
+            queue.pop(0)
+            self._finalize_a2a_task_registry(task_id)
+            return SendResult(success=True, message_id=f"a2a:{task_id}")
         try:
             identity = await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
@@ -3319,11 +3473,13 @@ class InkboxAdapter(BasePlatformAdapter):
                 text=content,
             )
             queue.pop(0)
+            self._finalize_a2a_task_registry(task_id)
             return SendResult(success=True, message_id=f"a2a:{task_id}")
         except Exception as exc:
             detail = str(exc).lower()
             if "terminal" in detail:
                 queue.pop(0)
+                self._finalize_a2a_task_registry(task_id)
                 return SendResult(success=True, message_id=f"a2a:{task_id}")
             return SendResult(success=False, error=str(exc), retryable=True)
 

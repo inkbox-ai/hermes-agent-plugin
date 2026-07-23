@@ -13,8 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
+    from .a2a_context import (
+        mark_a2a_reply_committed,
+        read_a2a_turn_context,
+    )
     from .config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
     from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
 SMS_MAX_LENGTH = 1600
@@ -24,6 +29,40 @@ IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
 
 def _json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _a2a_intent(intent: str, text: str, session_id: str) -> str:
+    context = read_a2a_turn_context(session_id)
+    if context is None:
+        return _json({
+            "error": "This tool is only available during an inbound A2A task",
+        })
+    try:
+        _, _, identity = _client_and_identity()
+        result = identity.a2a_reply(
+            str(context["task_id"]),
+            intent=intent,
+            text=text,
+        )
+        mark_a2a_reply_committed(session_id)
+        return _json({"ok": True, "result": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_a2a_complete(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("complete", str(args.get("text") or ""), task_id)
+
+
+def inkbox_a2a_ask_caller(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("ask_caller", str(args.get("text") or ""), task_id)
+
+
+def inkbox_a2a_fail(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("fail", str(args.get("reason") or ""), task_id)
 
 
 def _message_too_long_payload(channel: str, content: str, max_chars: int) -> Dict[str, Any]:
@@ -1330,6 +1369,36 @@ PLACE_CALL_SCHEMA = {
     },
 }
 
+A2A_COMPLETE_SCHEMA = {
+    "name": "inkbox_a2a_complete",
+    "description": "Complete the active inbound A2A task with a final answer.",
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+}
+
+A2A_ASK_CALLER_SCHEMA = {
+    "name": "inkbox_a2a_ask_caller",
+    "description": "Ask the caller for more input on the active inbound A2A task.",
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+}
+
+A2A_FAIL_SCHEMA = {
+    "name": "inkbox_a2a_fail",
+    "description": "Fail the active inbound A2A task with a reason.",
+    "parameters": {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    },
+}
+
 
 def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)
@@ -1355,3 +1424,6 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)
     ctx.register_tool("inkbox_mark_imessage_conversation_read", "inkbox", MARK_IMESSAGE_CONVERSATION_READ_SCHEMA, inkbox_mark_imessage_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_complete", "inkbox", A2A_COMPLETE_SCHEMA, inkbox_a2a_complete, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_ask_caller", "inkbox", A2A_ASK_CALLER_SCHEMA, inkbox_a2a_ask_caller, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_fail", "inkbox", A2A_FAIL_SCHEMA, inkbox_a2a_fail, check_fn=_configured)

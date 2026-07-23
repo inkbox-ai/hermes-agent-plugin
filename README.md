@@ -301,12 +301,20 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_a2a_complete`
+- `inkbox_a2a_ask_caller`
+- `inkbox_a2a_fail`
 - `inkbox_lookup_contact`
 - `inkbox_list_contacts`
 - `inkbox_get_contact`
 - `inkbox_create_contact`
 - `inkbox_update_contact`
 - `inkbox_delete_contact`
+
+Inbound A2A tasks use isolated context sessions and a durable task registry.
+The three A2A outcome tools are accepted only during a verified inbound A2A
+turn. A2A serving requires Inkbox SDK 0.5.5 or newer; the rest of the plugin
+continues to support the base SDK range shown above.
 
 Realtime-only call tools:
 

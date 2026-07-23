@@ -178,6 +178,15 @@ MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("calls", "place a separate outbound phone call", ("inkbox_place_call",)),
     ("identity", "check its own Inkbox identity and numbers", ("inkbox_whoami",)),
     (
+        "a2a",
+        "complete, clarify, or fail an active agent-to-agent task",
+        (
+            "inkbox_a2a_complete",
+            "inkbox_a2a_ask_caller",
+            "inkbox_a2a_fail",
+        ),
+    ),
+    (
         "general",
         "search session history and notes, check the calendar, do research or "
         "computation, call external APIs, and draft long-form replies",
