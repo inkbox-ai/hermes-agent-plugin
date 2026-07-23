@@ -29,7 +29,8 @@ jobs:
       - name: Install test deps + real Hermes host (main)
         run: |
           uv sync --extra test --python 3.12
-          uv pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git@main"
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
+          uv pip install --editable "$RUNNER_TEMP/hermes-agent"
 
       - name: Complete offline suite vs real Hermes main
         run: uv run pytest -q
