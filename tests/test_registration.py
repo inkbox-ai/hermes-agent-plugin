@@ -30,6 +30,7 @@ class DummyContext:
         self.cli_commands = []
         self.commands = []
         self.skills = []
+        self.hooks = []
 
     def register_platform(self, **kwargs):
         self.platforms.append(kwargs)
@@ -45,6 +46,9 @@ class DummyContext:
 
     def register_skill(self, *args, **kwargs):
         self.skills.append((args, kwargs))
+
+    def register_hook(self, *args, **kwargs):
+        self.hooks.append((args, kwargs))
 
 
 def _manifest_provides_tools() -> set[str]:
@@ -111,6 +115,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
+    assert ctx.hooks[0][0][0] == "pre_llm_call"
 
 
 def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):

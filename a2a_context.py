@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+_LOCK = threading.Lock()
 
 
 def _context_root() -> Path:
@@ -27,14 +30,93 @@ def _context_path(session_id: str) -> Path:
     return _context_root() / f"{digest}.json"
 
 
-def write_a2a_turn_context(session_id: str, context: Dict[str, Any]) -> None:
-    """Atomically bind a verified A2A task to one Hermes session."""
-    path = _context_path(session_id)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(context, sort_keys=True) + "\n")
+def _queue_path(session_id: str) -> Path:
+    return _context_path(session_id).with_suffix(".queue.json")
+
+
+def _atomic_write(path: Path, value: Any) -> None:
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(json.dumps(value, sort_keys=True) + "\n")
     tmp.chmod(0o600)
     os.replace(tmp, path)
     path.chmod(0o600)
+
+
+def write_a2a_turn_context(session_id: str, context: Dict[str, Any]) -> None:
+    """Atomically bind a verified A2A task to one Hermes session."""
+    with _LOCK:
+        _atomic_write(_context_path(session_id), context)
+
+
+def enqueue_a2a_turn_context(session_id: str, context: Dict[str, Any]) -> None:
+    """Queue verified context until Hermes starts the corresponding turn."""
+    path = _queue_path(session_id)
+    with _LOCK:
+        try:
+            loaded = json.loads(path.read_text())
+            queue = loaded if isinstance(loaded, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            queue = []
+        identity = (
+            str(context.get("task_id") or ""),
+            str(context.get("message_id") or ""),
+        )
+        if any(
+            (
+                str(item.get("task_id") or ""),
+                str(item.get("message_id") or ""),
+            ) == identity
+            for item in queue
+            if isinstance(item, dict)
+        ):
+            return
+        queue.append(context)
+        _atomic_write(path, queue)
+
+
+def activate_next_a2a_turn_context(session_id: str) -> Optional[Dict[str, Any]]:
+    """Activate the next verified context at Hermes' real turn boundary."""
+    path = _queue_path(session_id)
+    with _LOCK:
+        try:
+            loaded = json.loads(path.read_text())
+            queue = loaded if isinstance(loaded, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        if not queue:
+            return None
+        context = queue.pop(0)
+        if not isinstance(context, dict):
+            return None
+        if queue:
+            _atomic_write(path, queue)
+        else:
+            path.unlink(missing_ok=True)
+        _atomic_write(_context_path(session_id), context)
+        return context
+
+
+def remove_queued_a2a_turn_context(session_id: str, task_id: str) -> None:
+    """Remove canceled work that has not reached the Hermes turn boundary."""
+    path = _queue_path(session_id)
+    with _LOCK:
+        try:
+            loaded = json.loads(path.read_text())
+            queue = loaded if isinstance(loaded, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        remaining = [
+            item
+            for item in queue
+            if not (
+                isinstance(item, dict)
+                and str(item.get("task_id") or "") == task_id
+            )
+        ]
+        if remaining:
+            _atomic_write(path, remaining)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def read_a2a_turn_context(session_id: str) -> Optional[Dict[str, Any]]:
@@ -51,8 +133,13 @@ def read_a2a_turn_context(session_id: str) -> Optional[Dict[str, Any]]:
 
 def mark_a2a_reply_committed(session_id: str) -> None:
     """Record that an explicit A2A intent tool already replied."""
-    context = read_a2a_turn_context(session_id)
-    if context is None:
-        return
-    context["reply_intent_committed"] = True
-    write_a2a_turn_context(session_id, context)
+    with _LOCK:
+        path = _context_path(session_id)
+        try:
+            context = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        if not isinstance(context, dict):
+            return
+        context["reply_intent_committed"] = True
+        _atomic_write(path, context)

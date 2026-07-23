@@ -134,7 +134,11 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
-    from .a2a_context import read_a2a_turn_context, write_a2a_turn_context
+    from .a2a_context import (
+        enqueue_a2a_turn_context,
+        read_a2a_turn_context,
+        remove_queued_a2a_turn_context,
+    )
     from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
@@ -149,7 +153,11 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from a2a_context import read_a2a_turn_context, write_a2a_turn_context
+    from a2a_context import (
+        enqueue_a2a_turn_context,
+        read_a2a_turn_context,
+        remove_queued_a2a_turn_context,
+    )
     from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
     from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
@@ -1701,6 +1709,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # voice-intended text into the user's inbox.
         self._voice_recently_closed: Dict[str, float] = {}
         self._a2a_tasks_by_chat: Dict[str, List[str]] = {}
+        self._a2a_events_by_chat: Dict[str, List[MessageEvent]] = {}
+        self._a2a_active_chats: set[str] = set()
+        self._a2a_default_reply_allowed: Dict[str, bool] = {}
         self._a2a_session_by_chat: Dict[str, str] = {}
         self._a2a_session_key_by_chat: Dict[str, str] = {}
         self._a2a_suppress_next_reply_by_chat: set[str] = set()
@@ -3264,7 +3275,7 @@ class InkboxAdapter(BasePlatformAdapter):
             chat_id = str(source.chat_id)
             self._a2a_session_by_chat[chat_id] = session_id
             self._a2a_session_key_by_chat[chat_id] = str(entry.session_key)
-            write_a2a_turn_context(
+            enqueue_a2a_turn_context(
                 session_id,
                 {
                     "task_id": task_id,
@@ -3289,6 +3300,9 @@ class InkboxAdapter(BasePlatformAdapter):
             queue = self._a2a_tasks_by_chat.get(chat_id, [])
             was_active = bool(queue and queue[0] == task_id)
             session_key = self._a2a_session_key_by_chat.get(chat_id)
+            session_id = self._a2a_session_by_chat.get(chat_id)
+            if session_id:
+                remove_queued_a2a_turn_context(session_id, task_id)
             if was_active and session_key:
                 await self.cancel_session_processing(
                     session_key,
@@ -3301,6 +3315,17 @@ class InkboxAdapter(BasePlatformAdapter):
             self._a2a_tasks_by_chat[chat_id] = [
                 value for value in queue
                 if value != task_id
+            ]
+            self._a2a_events_by_chat[chat_id] = [
+                event
+                for event in self._a2a_events_by_chat.get(chat_id, [])
+                if str(
+                    (
+                        event.raw_message.get("data", {})
+                        if isinstance(event.raw_message, dict)
+                        else {}
+                    ).get("task_id") or ""
+                ) != task_id
             ]
             self._finalize_a2a_task_registry(task_id)
             return web.Response(status=200, text="ok")
@@ -3346,7 +3371,7 @@ class InkboxAdapter(BasePlatformAdapter):
             f"[inkbox:a2a_task caller=@{str(caller.get('handle') or 'unknown').lstrip('@')} "
             f"caller_org={caller.get('organization_id') or 'unknown'}]"
         )
-        await self._enqueue(MessageEvent(
+        message_event = MessageEvent(
             text=(
                 f"{marker}\n"
                 "Use inkbox_a2a_complete, inkbox_a2a_ask_caller, or "
@@ -3358,9 +3383,54 @@ class InkboxAdapter(BasePlatformAdapter):
             raw_message=envelope,
             message_id=message_id,
             internal=True,
-        ))
-        self._write_a2a_registry(key, data, "running")
+        )
+        event_queue = self._a2a_events_by_chat.setdefault(chat_id, [])
+        event_queue.append(message_event)
+        if chat_id not in self._a2a_active_chats:
+            self._a2a_active_chats.add(chat_id)
+            await self._enqueue(message_event)
         return web.Response(status=200, text="ok")
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        if not str(event.source.chat_id).startswith("a2a:"):
+            return
+        self._a2a_default_reply_allowed[str(event.source.chat_id)] = True
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        task_id = str(data.get("task_id") or "")
+        message_id = str(data.get("message_id") or event.message_id or "")
+        if task_id and message_id:
+            self._write_a2a_registry(
+                f"{task_id}:{message_id}",
+                data,
+                "running",
+            )
+
+    async def on_processing_complete(
+        self,
+        event: MessageEvent,
+        outcome: Any,
+    ) -> None:
+        chat_id = str(event.source.chat_id)
+        if not chat_id.startswith("a2a:"):
+            return
+        self._a2a_default_reply_allowed[chat_id] = (
+            str(getattr(outcome, "value", outcome)) == "success"
+        )
+        queue = self._a2a_events_by_chat.get(chat_id, [])
+        if queue:
+            if queue[0] is event:
+                queue.pop(0)
+            else:
+                with suppress(ValueError):
+                    queue.remove(event)
+        if queue:
+            # Feed exactly one next event into the host's per-session pending
+            # lane. The host drains it after this completion hook returns.
+            await self.handle_message(queue[0])
+        else:
+            self._a2a_events_by_chat.pop(chat_id, None)
+            self._a2a_active_chats.discard(chat_id)
 
     async def _catch_up_a2a_tasks(self) -> None:
         """Drain every submitted task through the same durable ingestion path."""
@@ -3441,45 +3511,64 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.exception("[Inkbox] A2A catch-up failed")
 
     async def _send_a2a_reply(self, chat_id: str, content: str) -> SendResult:
+        if not self._a2a_default_reply_allowed.get(chat_id, True):
+            return SendResult(success=True, message_id="a2a-no-reply")
         if chat_id in self._a2a_suppress_next_reply_by_chat:
             self._a2a_suppress_next_reply_by_chat.discard(chat_id)
             return SendResult(success=True, message_id="a2a-canceled")
         queue = self._a2a_tasks_by_chat.get(chat_id) or []
         if not queue or not content.strip() or content.strip().upper() == "[SILENT]":
             return SendResult(success=True, message_id="a2a-no-reply")
-        task_id = queue[0]
         session_id = self._a2a_session_by_chat.get(chat_id)
         turn_context = (
             read_a2a_turn_context(session_id)
             if session_id
             else None
         )
+        task_id = (
+            str(turn_context.get("task_id") or "")
+            if turn_context
+            else ""
+        ) or queue[0]
+
+        def finish_task() -> None:
+            with suppress(ValueError):
+                queue.remove(task_id)
+            self._finalize_a2a_task_registry(task_id)
+
         if (
             turn_context
             and str(turn_context.get("task_id") or "") == task_id
             and turn_context.get("reply_intent_committed") is True
         ):
-            queue.pop(0)
-            self._finalize_a2a_task_registry(task_id)
+            finish_task()
             return SendResult(success=True, message_id=f"a2a:{task_id}")
         try:
             identity = await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
             )
+            authoritative = await asyncio.to_thread(
+                identity.a2a_task,
+                task_id,
+            )
+            state = str(
+                getattr(authoritative.state, "value", authoritative.state)
+            )
+            if state in {"completed", "failed", "canceled", "rejected"}:
+                finish_task()
+                return SendResult(success=True, message_id=f"a2a:{task_id}")
             await asyncio.to_thread(
                 identity.a2a_reply,
                 task_id,
                 intent="complete",
                 text=content,
             )
-            queue.pop(0)
-            self._finalize_a2a_task_registry(task_id)
+            finish_task()
             return SendResult(success=True, message_id=f"a2a:{task_id}")
         except Exception as exc:
             detail = str(exc).lower()
             if "terminal" in detail:
-                queue.pop(0)
-                self._finalize_a2a_task_registry(task_id)
+                finish_task()
                 return SendResult(success=True, message_id=f"a2a:{task_id}")
             return SendResult(success=False, error=str(exc), retryable=True)
 
@@ -4057,6 +4146,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if event.message_type != MessageType.TEXT:
             return None
         text = (event.text or "").lstrip()
+        if text.startswith("[inkbox:a2a_"):
+            return {"mode": "queue"}
         if (
             text.startswith("[inkbox:sms ")
             or text.startswith("[inkbox:sms_burst ")
@@ -4064,7 +4155,6 @@ class InkboxAdapter(BasePlatformAdapter):
             or text.startswith("[inkbox:group_sms_burst ")
             or text.startswith("[inkbox:imessage ")
             or text.startswith("[inkbox:imessage_burst ")
-            or text.startswith("[inkbox:a2a_")
         ):
             return {"mode": "queue", "merge_text": True}
         return None

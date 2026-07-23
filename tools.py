@@ -39,11 +39,32 @@ def _a2a_intent(intent: str, text: str, session_id: str) -> str:
         })
     try:
         _, _, identity = _client_and_identity()
-        result = identity.a2a_reply(
-            str(context["task_id"]),
-            intent=intent,
-            text=text,
-        )
+        task_id = str(context["task_id"])
+        try:
+            result = identity.a2a_reply(
+                task_id,
+                intent=intent,
+                text=text,
+            )
+        except Exception:
+            authoritative = identity.a2a_task(task_id)
+            state = str(
+                getattr(authoritative.state, "value", authoritative.state)
+            )
+            expected = {
+                "complete": "completed",
+                "ask_caller": "input_required",
+                "fail": "failed",
+            }[intent]
+            if state not in {
+                expected,
+                "completed",
+                "failed",
+                "canceled",
+                "rejected",
+            }:
+                raise
+            result = authoritative
         mark_a2a_reply_committed(session_id)
         return _json({"ok": True, "result": _json_safe(result)})
     except Exception as exc:

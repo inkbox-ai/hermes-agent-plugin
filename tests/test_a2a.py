@@ -14,6 +14,8 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import adapter as adapter_mod
 from inkbox_plugin import tools as tools_mod
 from inkbox_plugin.a2a_context import (
+    activate_next_a2a_turn_context,
+    enqueue_a2a_turn_context,
     read_a2a_turn_context,
     write_a2a_turn_context,
 )
@@ -35,6 +37,9 @@ def _adapter(tmp_path):
     adapter._identity_handle = "agent"
     adapter._a2a_registry_path = tmp_path / "a2a.json"
     adapter._a2a_tasks_by_chat = {}
+    adapter._a2a_events_by_chat = {}
+    adapter._a2a_active_chats = set()
+    adapter._a2a_default_reply_allowed = {}
     adapter._a2a_session_by_chat = {}
     adapter._a2a_session_key_by_chat = {}
     adapter._a2a_suppress_next_reply_by_chat = set()
@@ -78,7 +83,7 @@ def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
     assert adapter._enqueued[0].source.chat_id == "a2a:identity-1:context-1"
     assert adapter._a2a_registry_path.exists()
     registry = json.loads(adapter._a2a_registry_path.read_text())
-    assert registry["task-1:message-1"]["state"] == "running"
+    assert registry["task-1:message-1"]["state"] == "queued"
 
 
 def test_a2a_cancel_removes_only_the_addressed_task(tmp_path):
@@ -110,6 +115,46 @@ def test_canceled_task_late_output_cannot_complete_the_next_task(tmp_path):
     assert adapter._a2a_tasks_by_chat[chat_id] == ["task-2"]
 
 
+def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    asyncio.run(adapter._on_a2a_event(_event()))
+    second = _event("evt-2")
+    second["data"]["task_id"] = "task-2"
+    second["data"]["message_id"] = "message-2"
+    asyncio.run(adapter._on_a2a_event(second))
+
+    assert len(adapter._enqueued) == 1
+    assert len(adapter._a2a_events_by_chat["a2a:identity-1:context-1"]) == 2
+
+    handed_off = []
+
+    async def handle_message(event):
+        handed_off.append(event)
+
+    adapter.handle_message = handle_message
+    asyncio.run(
+        adapter.on_processing_complete(
+            adapter._enqueued[0],
+            types.SimpleNamespace(value="success"),
+        )
+    )
+
+    assert [event.message_id for event in handed_off] == ["message-2"]
+
+
+def test_failed_a2a_turn_cannot_default_complete(tmp_path):
+    adapter = _adapter(tmp_path)
+    chat_id = "a2a:identity-1:context-1"
+    adapter._a2a_tasks_by_chat[chat_id] = ["task-1"]
+    adapter._a2a_default_reply_allowed[chat_id] = False
+
+    result = asyncio.run(adapter._send_a2a_reply(chat_id, "Error text."))
+
+    assert result.success is True
+    assert result.message_id == "a2a-no-reply"
+
+
 def test_default_a2a_reply_completes_oldest_task(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     chat_id = "a2a:identity-1:context-1"
@@ -117,6 +162,9 @@ def test_default_a2a_reply_completes_oldest_task(monkeypatch, tmp_path):
     replies = []
 
     class Identity:
+        def a2a_task(self, _task_id):
+            return types.SimpleNamespace(state="working")
+
         def a2a_reply(self, task_id, **kwargs):
             replies.append((task_id, kwargs))
 
@@ -176,6 +224,35 @@ def test_a2a_intent_tools_require_verified_turn_context(
         ("task-1", {"intent": "ask_caller", "text": "Which region?"})
     ]
     assert read_a2a_turn_context("session-1")["reply_intent_committed"] is True
+
+
+def test_a2a_context_activates_in_hermes_turn_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    enqueue_a2a_turn_context(
+        "session-1",
+        {
+            "task_id": "task-1",
+            "context_id": "context-1",
+            "message_id": "message-1",
+            "reply_intent_committed": False,
+        },
+    )
+    enqueue_a2a_turn_context(
+        "session-1",
+        {
+            "task_id": "task-2",
+            "context_id": "context-1",
+            "message_id": "message-2",
+            "reply_intent_committed": False,
+        },
+    )
+
+    first = activate_next_a2a_turn_context("session-1")
+    second = activate_next_a2a_turn_context("session-1")
+
+    assert first["task_id"] == "task-1"
+    assert second["task_id"] == "task-2"
+    assert read_a2a_turn_context("session-1")["task_id"] == "task-2"
 
 
 def test_a2a_catch_up_resumes_nonfinal_registry_entries(
