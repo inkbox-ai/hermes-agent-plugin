@@ -265,6 +265,14 @@ def test_a2a_sent_history_tools_are_scoped_to_configured_identity(
     calls = []
 
     class Identity:
+        def a2a_tasks(self, **kwargs):
+            calls.append(("history", kwargs))
+            return {"items": [], "next_cursor": None}
+
+        def a2a_messages(self, **kwargs):
+            calls.append(("messages", kwargs))
+            return {"items": [], "next_cursor": None}
+
         def a2a_sent_tasks(self, **kwargs):
             calls.append(("list", kwargs))
             return {
@@ -293,10 +301,41 @@ def test_a2a_sent_history_tools_are_scoped_to_configured_identity(
         lambda: (None, None, Identity()),
     )
 
-    page = json.loads(
-        tools_mod.inkbox_list_a2a_sent_tasks({
+    history = json.loads(
+        tools_mod.inkbox_list_a2a_tasks({
+            "direction": "both",
+            "requesterHandle": "requester",
+            "workerHandle": "worker",
             "state": "completed",
             "contextId": "context-1",
+            "query": "summary",
+            "since": "2026-07-01T00:00:00Z",
+            "cursor": "cursor-1",
+            "limit": 3,
+        })
+    )
+    messages = json.loads(
+        tools_mod.inkbox_list_a2a_messages({
+            "direction": "outbound",
+            "requesterHandle": "requester",
+            "workerHandle": "worker",
+            "taskId": "task-1",
+            "contextId": "context-1",
+            "role": "agent",
+            "query": "done",
+            "since": "2026-07-01T00:00:00Z",
+            "cursor": "cursor-2",
+            "limit": 4,
+        })
+    )
+    page = json.loads(
+        tools_mod.inkbox_list_a2a_sent_tasks({
+            "requesterHandle": "requester",
+            "workerHandle": "worker",
+            "state": "completed",
+            "contextId": "context-1",
+            "query": "summary",
+            "since": "2026-07-01T00:00:00Z",
             "cursor": "cursor-1",
             "limit": 3,
         })
@@ -305,15 +344,50 @@ def test_a2a_sent_history_tools_are_scoped_to_configured_identity(
         tools_mod.inkbox_get_a2a_sent_task({"taskId": "task-1"})
     )
 
+    assert history["page"]["items"] == []
+    assert messages["page"]["items"] == []
     assert page["page"]["next_cursor"] == "next-page"
     assert page["page"]["items"][0]["target"]["handle"] == "worker-agent"
     assert task["task"]["messages"][0]["parts"][0]["text"] == "Done."
     assert calls == [
         (
-            "list",
+            "history",
             {
+                "direction": "both",
+                "requester_handle": "requester",
+                "worker_handle": "worker",
                 "state": "completed",
                 "context_id": "context-1",
+                "q": "summary",
+                "since": "2026-07-01T00:00:00Z",
+                "cursor": "cursor-1",
+                "limit": 3,
+            },
+        ),
+        (
+            "messages",
+            {
+                "direction": "outbound",
+                "requester_handle": "requester",
+                "worker_handle": "worker",
+                "task_id": "task-1",
+                "context_id": "context-1",
+                "role": "agent",
+                "q": "done",
+                "since": "2026-07-01T00:00:00Z",
+                "cursor": "cursor-2",
+                "limit": 4,
+            },
+        ),
+        (
+            "list",
+            {
+                "requester_handle": "requester",
+                "worker_handle": "worker",
+                "state": "completed",
+                "context_id": "context-1",
+                "q": "summary",
+                "since": "2026-07-01T00:00:00Z",
                 "cursor": "cursor-1",
                 "limit": 3,
             },
@@ -338,9 +412,13 @@ def test_a2a_sent_history_rejects_unbounded_page_and_missing_task_id(
     page = json.loads(
         tools_mod.inkbox_list_a2a_sent_tasks({"limit": 101})
     )
+    history = json.loads(tools_mod.inkbox_list_a2a_tasks({"limit": 0}))
+    messages = json.loads(tools_mod.inkbox_list_a2a_messages({"limit": 101}))
     task = json.loads(tools_mod.inkbox_get_a2a_sent_task({}))
 
     assert page["error"] == "limit must be between 1 and 100"
+    assert history["error"] == "limit must be between 1 and 100"
+    assert messages["error"] == "limit must be between 1 and 100"
     assert task["error"] == "taskId is required"
 
 

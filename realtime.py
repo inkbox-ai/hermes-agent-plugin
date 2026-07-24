@@ -185,6 +185,8 @@ MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
             "inkbox_a2a_complete",
             "inkbox_a2a_ask_caller",
             "inkbox_a2a_fail",
+            "inkbox_list_a2a_tasks",
+            "inkbox_list_a2a_messages",
             "inkbox_list_a2a_sent_tasks",
             "inkbox_get_a2a_sent_task",
         ),

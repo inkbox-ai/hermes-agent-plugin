@@ -6,7 +6,7 @@ description = "Inkbox platform plugin for Hermes Agent"
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
-  "inkbox>=0.5.1,<1.0.0",
+  "inkbox>=0.5.6,<1.0.0",
   "segno>=1.5",
 ]
 
@@ -20,6 +20,9 @@ test = [
 # Flat-layout Hermes plugin loaded by the gateway, not a pip-installable
 # package — keep uv from trying to build/install the project itself.
 package = false
+
+[tool.uv.sources]
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "fdea6e55ac117f246624852aedeef0feabe08b9a", subdirectory = "sdk/python" }
 
 [tool.ruff]
 line-length = 125

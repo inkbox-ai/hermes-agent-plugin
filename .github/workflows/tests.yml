@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@199bbd27c8dab2f70e379de52ca9cc910b0e141d#subdirectory=sdk/python" \
+            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@fdea6e55ac117f246624852aedeef0feabe08b9a#subdirectory=sdk/python" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -67,7 +67,7 @@ jobs:
         run: |
           uv venv --python 3.12
           uv pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@199bbd27c8dab2f70e379de52ca9cc910b0e141d#subdirectory=sdk/python" \
+            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@fdea6e55ac117f246624852aedeef0feabe08b9a#subdirectory=sdk/python" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
           uv pip install --editable "$RUNNER_TEMP/hermes-agent"
