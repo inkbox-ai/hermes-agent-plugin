@@ -2490,9 +2490,6 @@ class InkboxAdapter(BasePlatformAdapter):
         these are CLI chatter that never belongs in a real user's email or
         SMS thread.  See ``_is_hermes_admin_notice`` for the prefix list.
         """
-        if str(chat_id).startswith("a2a:"):
-            return await self._send_a2a_reply(chat_id, content)
-
         if _is_hermes_admin_notice(content, metadata):
             logger.debug(
                 "[Inkbox] Suppressed admin notice for chat %s: %s…",
@@ -2500,6 +2497,9 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             self._stop_imessage_typing_for_chat(chat_id)
             return SendResult(success=True, message_id="suppressed-admin-notice")
+
+        if str(chat_id).startswith("a2a:"):
+            return await self._send_a2a_reply(chat_id, content)
 
         # The [SILENT] marker is the cron scheduler's "I have nothing to
         # say" sentinel and is also instructed to the agent in the

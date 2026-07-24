@@ -170,6 +170,24 @@ def test_failed_a2a_turn_cannot_default_complete(tmp_path):
     assert result.message_id == "a2a-no-reply"
 
 
+def test_a2a_home_channel_notice_does_not_complete_task(tmp_path):
+    adapter = _adapter(tmp_path)
+    chat_id = "a2a:identity-1:context-1"
+    adapter._a2a_tasks_by_chat[chat_id] = ["task-1"]
+    adapter._last_inbound_imessage = {}
+
+    result = asyncio.run(
+        adapter.send(
+            chat_id,
+            "📬 No home channel is set for Inkbox. Type /sethome to configure one.",
+        )
+    )
+
+    assert result.success is True
+    assert result.message_id == "suppressed-admin-notice"
+    assert adapter._a2a_tasks_by_chat[chat_id] == ["task-1"]
+
+
 def test_default_a2a_reply_completes_oldest_task(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     chat_id = "a2a:identity-1:context-1"
