@@ -77,8 +77,12 @@ def test_detects_only_unsupported_a2a_event_validation_errors():
         detail="a2a.task.created is not a valid event type",
     )
     unrelated = types.SimpleNamespace(status_code=422, detail="invalid webhook URL")
+    local_validation = ValueError(
+        "event_type 'a2a.task.created' does not belong to any known channel"
+    )
 
     assert adapter_mod._is_unsupported_a2a_event_types(unsupported)
+    assert adapter_mod._is_unsupported_a2a_event_types(local_validation)
     assert not adapter_mod._is_unsupported_a2a_event_types(unrelated)
 
 

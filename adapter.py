@@ -428,8 +428,11 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
 def _is_unsupported_a2a_event_types(exc: Exception) -> bool:
     detail = str(getattr(exc, "detail", exc))
     return (
-        getattr(exc, "status_code", None) == 422
-        and any(event_type in detail for event_type in _DESIRED_A2A_EVENTS)
+        any(event_type in detail for event_type in _DESIRED_A2A_EVENTS)
+        and (
+            getattr(exc, "status_code", None) == 422
+            or "does not belong to any known channel" in detail
+        )
     )
 
 
@@ -2088,7 +2091,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     previous_webhook_url=previous_webhook_url,
                     desired_events=tuple(identity_events),
                 )
-            except InkboxAPIError as exc:
+            except Exception as exc:
                 if not _is_unsupported_a2a_event_types(exc):
                     raise
                 logger.warning(
