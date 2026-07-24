@@ -13,7 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=8",
-  "ruff>=0.11.0",
+  "ruff>=0.11.0,<0.16",
 ]
 
 [tool.uv]
