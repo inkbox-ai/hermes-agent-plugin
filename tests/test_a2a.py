@@ -333,3 +333,21 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     assert adapter._a2a_tasks_by_chat[
         "a2a:identity-1:context-1"
     ] == ["task-1"]
+
+
+def test_a2a_catch_up_skips_sdk_without_task_inbox(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: types.SimpleNamespace(),
+    )
+
+    async def inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", inline)
+    asyncio.run(adapter._catch_up_a2a_tasks())
+
+    assert adapter._enqueued == []

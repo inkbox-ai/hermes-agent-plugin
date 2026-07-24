@@ -3467,6 +3467,12 @@ class InkboxAdapter(BasePlatformAdapter):
             identity = await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
             )
+            if not callable(getattr(identity, "iter_a2a_tasks", None)):
+                logger.debug(
+                    "[Inkbox] Installed SDK has no A2A task inbox; "
+                    "skipping catch-up"
+                )
+                return
             for key, entry in self._read_a2a_registry().items():
                 if entry.get("state") == "finalized":
                     continue
