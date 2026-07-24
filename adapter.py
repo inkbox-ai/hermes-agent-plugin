@@ -696,8 +696,7 @@ def _reconcile_subscription(
 ):
     """Reconcile a single owner's webhook subscription against desired state.
 
-    ``owner_kwarg`` is ``"mailbox_id"`` or ``"phone_number_id"``. Returns the
-    active subscription's id for DEBUG logging at the call site.
+    Returns the active subscription's id for DEBUG logging at the call site.
     """
     desired_set = set(desired_events)
     list_kwargs = {owner_kwarg: owner_id}
@@ -730,10 +729,19 @@ def _reconcile_subscription(
     # Previous-URL cleanup runs after the new row is in place so a failure
     # mid-reconcile can never leave the owner with zero receivers.
     if previous_webhook_url and previous_webhook_url != desired_url:
+        previous_urls = {previous_webhook_url}
+        if "?channel=a2a" in desired_url:
+            previous_urls.add(f"{previous_webhook_url}?channel=a2a")
+        desired_families = {
+            event_type.split(".", 1)[0] for event_type in desired_events
+        }
         # Re-list rather than reusing ``existing`` because a create/update
         # may have shifted the visible rows.
         for row in client.webhooks.subscriptions.list(**list_kwargs):
-            if row.url == previous_webhook_url:
+            row_families = {
+                event_type.split(".", 1)[0] for event_type in row.event_types
+            }
+            if row.url in previous_urls and desired_families & row_families:
                 try:
                     client.webhooks.subscriptions.delete(row.id)
                 except InkboxAPIError as exc:
@@ -741,7 +749,6 @@ def _reconcile_subscription(
                         pass  # already gone; fine
                     else:
                         raise
-                break
 
     return active_id
 
@@ -2077,19 +2084,16 @@ class InkboxAdapter(BasePlatformAdapter):
                 self._identity_handle, webhook_url, ws_url,
             )
 
-        # iMessage: identity-owned subscription, only while the identity is
-        # enabled (the server rejects imessage.* subscriptions otherwise).
+        # A2A and iMessage are separate event channels. They need distinct
+        # owner URLs because active subscriptions are unique by owner + URL.
         if self._identity_id:
-            identity_events = list(_DESIRED_A2A_EVENTS)
-            if getattr(identity, "imessage_enabled", False):
-                identity_events = [*_DESIRED_IMESSAGE_EVENTS, *identity_events]
             try:
                 _reconcile_imessage_subscription(
                     self._inkbox,
                     self._identity_id,
-                    desired_url=webhook_url,
+                    desired_url=f"{webhook_url}?channel=a2a",
                     previous_webhook_url=previous_webhook_url,
-                    desired_events=tuple(identity_events),
+                    desired_events=_DESIRED_A2A_EVENTS,
                 )
             except Exception as exc:
                 if not _is_unsupported_a2a_event_types(exc):
@@ -2098,14 +2102,14 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
-                if getattr(identity, "imessage_enabled", False):
-                    _reconcile_imessage_subscription(
-                        self._inkbox,
-                        self._identity_id,
-                        desired_url=webhook_url,
-                        previous_webhook_url=previous_webhook_url,
-                        desired_events=_DESIRED_IMESSAGE_EVENTS,
-                    )
+            if getattr(identity, "imessage_enabled", False):
+                _reconcile_imessage_subscription(
+                    self._inkbox,
+                    self._identity_id,
+                    desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url,
+                    desired_events=_DESIRED_IMESSAGE_EVENTS,
+                )
             logger.info(
                 "[Inkbox] Patched identity events for %s → %s",
                 self._identity_handle, webhook_url,
