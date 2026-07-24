@@ -71,6 +71,17 @@ def _event(event_id="evt-1", event_type="a2a.task.created"):
     }
 
 
+def test_detects_only_unsupported_a2a_event_validation_errors():
+    unsupported = types.SimpleNamespace(
+        status_code=422,
+        detail="a2a.task.created is not a valid event type",
+    )
+    unrelated = types.SimpleNamespace(status_code=422, detail="invalid webhook URL")
+
+    assert adapter_mod._is_unsupported_a2a_event_types(unsupported)
+    assert not adapter_mod._is_unsupported_a2a_event_types(unrelated)
+
+
 def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
     adapter = _adapter(tmp_path)
 

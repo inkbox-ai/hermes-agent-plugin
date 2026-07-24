@@ -425,6 +425,14 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
 )
 
 
+def _is_unsupported_a2a_event_types(exc: Exception) -> bool:
+    detail = str(getattr(exc, "detail", exc))
+    return (
+        getattr(exc, "status_code", None) == 422
+        and any(event_type in detail for event_type in _DESIRED_A2A_EVENTS)
+    )
+
+
 def _inkbox_state_path():
     """Return the on-disk path used for the Inkbox identity state file.
 
@@ -2072,13 +2080,29 @@ class InkboxAdapter(BasePlatformAdapter):
             identity_events = list(_DESIRED_A2A_EVENTS)
             if getattr(identity, "imessage_enabled", False):
                 identity_events = [*_DESIRED_IMESSAGE_EVENTS, *identity_events]
-            _reconcile_imessage_subscription(
-                self._inkbox,
-                self._identity_id,
-                desired_url=webhook_url,
-                previous_webhook_url=previous_webhook_url,
-                desired_events=tuple(identity_events),
-            )
+            try:
+                _reconcile_imessage_subscription(
+                    self._inkbox,
+                    self._identity_id,
+                    desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url,
+                    desired_events=tuple(identity_events),
+                )
+            except InkboxAPIError as exc:
+                if not _is_unsupported_a2a_event_types(exc):
+                    raise
+                logger.warning(
+                    "[Inkbox] API does not support A2A webhook events yet; "
+                    "continuing without A2A delivery until the backend is upgraded",
+                )
+                if getattr(identity, "imessage_enabled", False):
+                    _reconcile_imessage_subscription(
+                        self._inkbox,
+                        self._identity_id,
+                        desired_url=webhook_url,
+                        previous_webhook_url=previous_webhook_url,
+                        desired_events=_DESIRED_IMESSAGE_EVENTS,
+                    )
             logger.info(
                 "[Inkbox] Patched identity events for %s → %s",
                 self._identity_handle, webhook_url,
