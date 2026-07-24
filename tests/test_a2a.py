@@ -259,6 +259,91 @@ def test_a2a_intent_tools_require_verified_turn_context(
     assert read_a2a_turn_context("session-1")["reply_intent_committed"] is True
 
 
+def test_a2a_sent_history_tools_are_scoped_to_configured_identity(
+    monkeypatch,
+):
+    calls = []
+
+    class Identity:
+        def a2a_sent_tasks(self, **kwargs):
+            calls.append(("list", kwargs))
+            return {
+                "items": [
+                    {
+                        "id": "task-1",
+                        "state": "completed",
+                        "target": {"handle": "worker-agent"},
+                    }
+                ],
+                "next_cursor": "next-page",
+            }
+
+        def a2a_sent_task(self, task_id):
+            calls.append(("get", task_id))
+            return {
+                "id": task_id,
+                "messages": [
+                    {"role": "agent", "parts": [{"text": "Done."}]}
+                ],
+            }
+
+    monkeypatch.setattr(
+        tools_mod,
+        "_client_and_identity",
+        lambda: (None, None, Identity()),
+    )
+
+    page = json.loads(
+        tools_mod.inkbox_list_a2a_sent_tasks({
+            "state": "completed",
+            "contextId": "context-1",
+            "cursor": "cursor-1",
+            "limit": 3,
+        })
+    )
+    task = json.loads(
+        tools_mod.inkbox_get_a2a_sent_task({"taskId": "task-1"})
+    )
+
+    assert page["page"]["next_cursor"] == "next-page"
+    assert page["page"]["items"][0]["target"]["handle"] == "worker-agent"
+    assert task["task"]["messages"][0]["parts"][0]["text"] == "Done."
+    assert calls == [
+        (
+            "list",
+            {
+                "state": "completed",
+                "context_id": "context-1",
+                "cursor": "cursor-1",
+                "limit": 3,
+            },
+        ),
+        ("get", "task-1"),
+    ]
+
+
+def test_a2a_sent_history_rejects_unbounded_page_and_missing_task_id(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        tools_mod,
+        "_client_and_identity",
+        lambda: (
+            None,
+            None,
+            types.SimpleNamespace(a2a_sent_tasks=lambda **_kwargs: {}),
+        ),
+    )
+
+    page = json.loads(
+        tools_mod.inkbox_list_a2a_sent_tasks({"limit": 101})
+    )
+    task = json.loads(tools_mod.inkbox_get_a2a_sent_task({}))
+
+    assert page["error"] == "limit must be between 1 and 100"
+    assert task["error"] == "taskId is required"
+
+
 def test_a2a_context_activates_in_hermes_turn_order(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     enqueue_a2a_turn_context(

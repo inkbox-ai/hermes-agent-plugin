@@ -86,6 +86,65 @@ def inkbox_a2a_fail(args: dict, task_id: str = "", **kwargs) -> str:
     return _a2a_intent("fail", str(args.get("reason") or ""), task_id)
 
 
+def inkbox_list_a2a_sent_tasks(args: dict, **kwargs) -> str:
+    """List the configured identity's caller-side A2A task history."""
+    del kwargs
+    try:
+        _, _, identity = _client_and_identity()
+        method = _identity_method(
+            identity,
+            "a2a_sent_tasks",
+            "a2aSentTasks",
+        )
+        state = str(args.get("state") or "").strip() or None
+        context_id = str(
+            args.get("contextId") or args.get("context_id") or ""
+        ).strip() or None
+        cursor = str(args.get("cursor") or "").strip() or None
+        limit = int(args.get("limit", 50))
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        result = _call_with_kwargs_or_payload(
+            method,
+            {
+                "state": state,
+                "context_id": context_id,
+                "cursor": cursor,
+                "limit": limit,
+            },
+            {
+                "state": state,
+                "contextId": context_id,
+                "cursor": cursor,
+                "limit": limit,
+            },
+        )
+        return _json({"ok": True, "page": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_a2a_sent_task(args: dict, **kwargs) -> str:
+    """Fetch one full caller-side A2A task from the configured identity."""
+    del kwargs
+    task_id = str(args.get("taskId") or args.get("task_id") or "").strip()
+    if not task_id:
+        return _json({"error": "taskId is required"})
+    try:
+        _, _, identity = _client_and_identity()
+        method = _identity_method(
+            identity,
+            "a2a_sent_task",
+            "a2aSentTask",
+        )
+        return _json({
+            "ok": True,
+            "task": _json_safe(method(task_id)),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
 def _message_too_long_payload(channel: str, content: str, max_chars: int) -> Dict[str, Any]:
     char_count = len(content or "")
     return {
@@ -1420,6 +1479,66 @@ A2A_FAIL_SCHEMA = {
     },
 }
 
+A2A_LIST_SENT_TASKS_SCHEMA = {
+    "name": "inkbox_list_a2a_sent_tasks",
+    "description": (
+        "List A2A tasks sent by this Inkbox identity, newest first. This is the "
+        "identity's durable caller-side history. Follow next_cursor until it is "
+        "null to read every page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "state": {
+                "type": "string",
+                "enum": [
+                    "submitted",
+                    "working",
+                    "input_required",
+                    "auth_required",
+                    "completed",
+                    "failed",
+                    "canceled",
+                    "rejected",
+                ],
+                "description": "Optional task lifecycle-state filter.",
+            },
+            "contextId": {
+                "type": "string",
+                "description": "Optional A2A context UUID filter.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque next_cursor from the previous page.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50,
+            },
+        },
+    },
+}
+
+A2A_GET_SENT_TASK_SCHEMA = {
+    "name": "inkbox_get_a2a_sent_task",
+    "description": (
+        "Fetch one A2A task sent by this Inkbox identity, including its complete "
+        "message and state-transition history."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {
+                "type": "string",
+                "description": "A2A task UUID from inkbox_list_a2a_sent_tasks.",
+            },
+        },
+        "required": ["taskId"],
+    },
+}
+
 
 def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)
@@ -1448,3 +1567,5 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_a2a_complete", "inkbox", A2A_COMPLETE_SCHEMA, inkbox_a2a_complete, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_ask_caller", "inkbox", A2A_ASK_CALLER_SCHEMA, inkbox_a2a_ask_caller, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_fail", "inkbox", A2A_FAIL_SCHEMA, inkbox_a2a_fail, check_fn=_configured)
+    ctx.register_tool("inkbox_list_a2a_sent_tasks", "inkbox", A2A_LIST_SENT_TASKS_SCHEMA, inkbox_list_a2a_sent_tasks, check_fn=_configured)
+    ctx.register_tool("inkbox_get_a2a_sent_task", "inkbox", A2A_GET_SENT_TASK_SCHEMA, inkbox_get_a2a_sent_task, check_fn=_configured)

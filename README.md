@@ -304,6 +304,8 @@ Hermes direct tools:
 - `inkbox_a2a_complete`
 - `inkbox_a2a_ask_caller`
 - `inkbox_a2a_fail`
+- `inkbox_list_a2a_sent_tasks`
+- `inkbox_get_a2a_sent_task`
 - `inkbox_lookup_contact`
 - `inkbox_list_contacts`
 - `inkbox_get_contact`

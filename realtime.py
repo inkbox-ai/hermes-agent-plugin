@@ -179,11 +179,14 @@ MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("identity", "check its own Inkbox identity and numbers", ("inkbox_whoami",)),
     (
         "a2a",
-        "complete, clarify, or fail an active agent-to-agent task",
+        "complete, clarify, or fail an active agent-to-agent task and read "
+        "tasks it previously sent",
         (
             "inkbox_a2a_complete",
             "inkbox_a2a_ask_caller",
             "inkbox_a2a_fail",
+            "inkbox_list_a2a_sent_tasks",
+            "inkbox_get_a2a_sent_task",
         ),
     ),
     (
