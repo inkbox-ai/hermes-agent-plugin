@@ -13,8 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
+    from .a2a_context import (
+        mark_a2a_reply_committed,
+        read_a2a_turn_context,
+    )
     from .config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
     from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
 SMS_MAX_LENGTH = 1600
@@ -24,6 +29,230 @@ IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
 
 def _json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _a2a_intent(intent: str, text: str, session_id: str) -> str:
+    context = read_a2a_turn_context(session_id)
+    if context is None:
+        return _json({
+            "error": "This tool is only available during an inbound A2A task",
+        })
+    try:
+        _, _, identity = _client_and_identity()
+        task_id = str(context["task_id"])
+        try:
+            result = identity.a2a_reply(
+                task_id,
+                intent=intent,
+                text=text,
+            )
+        except Exception:
+            authoritative = identity.a2a_task(task_id)
+            state = str(
+                getattr(authoritative.state, "value", authoritative.state)
+            )
+            expected = {
+                "complete": "completed",
+                "ask_caller": "input_required",
+                "fail": "failed",
+            }[intent]
+            if state not in {
+                expected,
+                "completed",
+                "failed",
+                "canceled",
+                "rejected",
+            }:
+                raise
+            result = authoritative
+        mark_a2a_reply_committed(session_id)
+        return _json({"ok": True, "result": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_a2a_complete(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("complete", str(args.get("text") or ""), task_id)
+
+
+def inkbox_a2a_ask_caller(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("ask_caller", str(args.get("text") or ""), task_id)
+
+
+def inkbox_a2a_fail(args: dict, task_id: str = "", **kwargs) -> str:
+    del kwargs
+    return _a2a_intent("fail", str(args.get("reason") or ""), task_id)
+
+
+def _a2a_optional(args: dict, camel: str, snake: str | None = None) -> str | None:
+    value = args.get(camel)
+    if value is None and snake is not None:
+        value = args.get(snake)
+    return str(value or "").strip() or None
+
+
+def _a2a_limit(args: dict) -> int:
+    limit = int(args.get("limit", 50))
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    return limit
+
+
+def inkbox_list_a2a_tasks(args: dict, **kwargs) -> str:
+    """List the configured identity's A2A task history."""
+    del kwargs
+    try:
+        python_options = {
+            "direction": _a2a_optional(args, "direction"),
+            "requester_handle": _a2a_optional(
+                args, "requesterHandle", "requester_handle"
+            ),
+            "worker_handle": _a2a_optional(
+                args, "workerHandle", "worker_handle"
+            ),
+            "state": _a2a_optional(args, "state"),
+            "context_id": _a2a_optional(args, "contextId", "context_id"),
+            "q": _a2a_optional(args, "query", "q"),
+            "since": _a2a_optional(args, "since"),
+            "cursor": _a2a_optional(args, "cursor"),
+            "limit": _a2a_limit(args),
+        }
+        _, _, identity = _client_and_identity()
+        method = _identity_method(identity, "a2a_tasks", "a2aTasks")
+        result = _call_with_kwargs_or_payload(
+            method,
+            python_options,
+            {
+                "direction": python_options["direction"],
+                "requesterHandle": python_options["requester_handle"],
+                "workerHandle": python_options["worker_handle"],
+                "state": python_options["state"],
+                "contextId": python_options["context_id"],
+                "q": python_options["q"],
+                "since": python_options["since"],
+                "cursor": python_options["cursor"],
+                "limit": python_options["limit"],
+            },
+        )
+        return _json({"ok": True, "page": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_a2a_messages(args: dict, **kwargs) -> str:
+    """List the configured identity's A2A message history."""
+    del kwargs
+    try:
+        python_options = {
+            "direction": _a2a_optional(args, "direction"),
+            "requester_handle": _a2a_optional(
+                args, "requesterHandle", "requester_handle"
+            ),
+            "worker_handle": _a2a_optional(
+                args, "workerHandle", "worker_handle"
+            ),
+            "task_id": _a2a_optional(args, "taskId", "task_id"),
+            "context_id": _a2a_optional(args, "contextId", "context_id"),
+            "role": _a2a_optional(args, "role"),
+            "q": _a2a_optional(args, "query", "q"),
+            "since": _a2a_optional(args, "since"),
+            "cursor": _a2a_optional(args, "cursor"),
+            "limit": _a2a_limit(args),
+        }
+        _, _, identity = _client_and_identity()
+        method = _identity_method(identity, "a2a_messages", "a2aMessages")
+        result = _call_with_kwargs_or_payload(
+            method,
+            python_options,
+            {
+                "direction": python_options["direction"],
+                "requesterHandle": python_options["requester_handle"],
+                "workerHandle": python_options["worker_handle"],
+                "taskId": python_options["task_id"],
+                "contextId": python_options["context_id"],
+                "role": python_options["role"],
+                "q": python_options["q"],
+                "since": python_options["since"],
+                "cursor": python_options["cursor"],
+                "limit": python_options["limit"],
+            },
+        )
+        return _json({"ok": True, "page": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_list_a2a_sent_tasks(args: dict, **kwargs) -> str:
+    """List the configured identity's caller-side A2A task history."""
+    del kwargs
+    try:
+        _, _, identity = _client_and_identity()
+        method = _identity_method(
+            identity,
+            "a2a_sent_tasks",
+            "a2aSentTasks",
+        )
+        requester_handle = _a2a_optional(
+            args, "requesterHandle", "requester_handle"
+        )
+        worker_handle = _a2a_optional(
+            args, "workerHandle", "worker_handle"
+        )
+        state = _a2a_optional(args, "state")
+        context_id = _a2a_optional(args, "contextId", "context_id")
+        query = _a2a_optional(args, "query", "q")
+        since = _a2a_optional(args, "since")
+        cursor = _a2a_optional(args, "cursor")
+        limit = _a2a_limit(args)
+        result = _call_with_kwargs_or_payload(
+            method,
+            {
+                "requester_handle": requester_handle,
+                "worker_handle": worker_handle,
+                "state": state,
+                "context_id": context_id,
+                "q": query,
+                "since": since,
+                "cursor": cursor,
+                "limit": limit,
+            },
+            {
+                "requesterHandle": requester_handle,
+                "workerHandle": worker_handle,
+                "state": state,
+                "contextId": context_id,
+                "q": query,
+                "since": since,
+                "cursor": cursor,
+                "limit": limit,
+            },
+        )
+        return _json({"ok": True, "page": _json_safe(result)})
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_get_a2a_sent_task(args: dict, **kwargs) -> str:
+    """Fetch one full caller-side A2A task from the configured identity."""
+    del kwargs
+    task_id = str(args.get("taskId") or args.get("task_id") or "").strip()
+    if not task_id:
+        return _json({"error": "taskId is required"})
+    try:
+        _, _, identity = _client_and_identity()
+        method = _identity_method(
+            identity,
+            "a2a_sent_task",
+            "a2aSentTask",
+        )
+        return _json({
+            "ok": True,
+            "task": _json_safe(method(task_id)),
+        })
+    except Exception as exc:
+        return _json({"error": str(exc)})
 
 
 def _message_too_long_payload(channel: str, content: str, max_chars: int) -> Dict[str, Any]:
@@ -918,7 +1147,7 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
 
         def _place():
             if not hasattr(identity, "place_call"):
-                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.1)")
+                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.6)")
             try:
                 return identity.place_call(
                     to_number=to_number,
@@ -1330,6 +1559,225 @@ PLACE_CALL_SCHEMA = {
     },
 }
 
+A2A_COMPLETE_SCHEMA = {
+    "name": "inkbox_a2a_complete",
+    "description": "Complete the active inbound A2A task with a final answer.",
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+}
+
+A2A_ASK_CALLER_SCHEMA = {
+    "name": "inkbox_a2a_ask_caller",
+    "description": "Ask the caller for more input on the active inbound A2A task.",
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+}
+
+A2A_FAIL_SCHEMA = {
+    "name": "inkbox_a2a_fail",
+    "description": "Fail the active inbound A2A task with a reason.",
+    "parameters": {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    },
+}
+
+A2A_HISTORY_DIRECTIONS = ["inbound", "outbound", "both"]
+A2A_TASK_STATES = [
+    "submitted",
+    "working",
+    "input_required",
+    "auth_required",
+    "completed",
+    "failed",
+    "canceled",
+    "rejected",
+]
+
+A2A_LIST_TASKS_SCHEMA = {
+    "name": "inkbox_list_a2a_tasks",
+    "description": (
+        "List this identity's A2A task history, newest first. Direction defaults "
+        "to inbound. Follow next_cursor until it is null to read every page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "direction": {
+                "type": "string",
+                "enum": A2A_HISTORY_DIRECTIONS,
+                "description": "Optional inbound, outbound, or both filter.",
+            },
+            "requesterHandle": {
+                "type": "string",
+                "description": "Optional requester identity handle filter.",
+            },
+            "workerHandle": {
+                "type": "string",
+                "description": "Optional worker identity handle filter.",
+            },
+            "state": {
+                "type": "string",
+                "enum": A2A_TASK_STATES,
+                "description": "Optional task lifecycle-state filter.",
+            },
+            "contextId": {
+                "type": "string",
+                "description": "Optional A2A context UUID filter.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional keyword search across task messages.",
+            },
+            "since": {
+                "type": "string",
+                "description": "Optional ISO 8601 lower timestamp bound.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque next_cursor from the previous page.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50,
+            },
+        },
+    },
+}
+
+A2A_LIST_MESSAGES_SCHEMA = {
+    "name": "inkbox_list_a2a_messages",
+    "description": (
+        "List messages from this identity's inbound and outbound A2A history, "
+        "newest first. Follow next_cursor until it is null to read every page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "direction": {
+                "type": "string",
+                "enum": A2A_HISTORY_DIRECTIONS,
+                "description": "Optional inbound, outbound, or both filter.",
+            },
+            "requesterHandle": {
+                "type": "string",
+                "description": "Optional requester identity handle filter.",
+            },
+            "workerHandle": {
+                "type": "string",
+                "description": "Optional worker identity handle filter.",
+            },
+            "taskId": {
+                "type": "string",
+                "description": "Optional A2A task UUID filter.",
+            },
+            "contextId": {
+                "type": "string",
+                "description": "Optional A2A context UUID filter.",
+            },
+            "role": {
+                "type": "string",
+                "enum": ["caller", "agent"],
+                "description": "Optional message role filter.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional keyword search across message text.",
+            },
+            "since": {
+                "type": "string",
+                "description": "Optional ISO 8601 lower timestamp bound.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque next_cursor from the previous page.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50,
+            },
+        },
+    },
+}
+
+A2A_LIST_SENT_TASKS_SCHEMA = {
+    "name": "inkbox_list_a2a_sent_tasks",
+    "description": (
+        "List A2A tasks sent by this Inkbox identity, newest first. This is the "
+        "identity's durable caller-side history. Follow next_cursor until it is "
+        "null to read every page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "state": {
+                "type": "string",
+                "enum": A2A_TASK_STATES,
+                "description": "Optional task lifecycle-state filter.",
+            },
+            "requesterHandle": {
+                "type": "string",
+                "description": "Optional requester identity handle filter.",
+            },
+            "workerHandle": {
+                "type": "string",
+                "description": "Optional worker identity handle filter.",
+            },
+            "contextId": {
+                "type": "string",
+                "description": "Optional A2A context UUID filter.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional keyword search across task messages.",
+            },
+            "since": {
+                "type": "string",
+                "description": "Optional ISO 8601 lower timestamp bound.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque next_cursor from the previous page.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50,
+            },
+        },
+    },
+}
+
+A2A_GET_SENT_TASK_SCHEMA = {
+    "name": "inkbox_get_a2a_sent_task",
+    "description": (
+        "Fetch one A2A task sent by this Inkbox identity, including its message "
+        "history."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {
+                "type": "string",
+                "description": "A2A task UUID from inkbox_list_a2a_sent_tasks.",
+            },
+        },
+        "required": ["taskId"],
+    },
+}
+
 
 def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)
@@ -1355,3 +1803,10 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)
     ctx.register_tool("inkbox_mark_imessage_conversation_read", "inkbox", MARK_IMESSAGE_CONVERSATION_READ_SCHEMA, inkbox_mark_imessage_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_complete", "inkbox", A2A_COMPLETE_SCHEMA, inkbox_a2a_complete, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_ask_caller", "inkbox", A2A_ASK_CALLER_SCHEMA, inkbox_a2a_ask_caller, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_fail", "inkbox", A2A_FAIL_SCHEMA, inkbox_a2a_fail, check_fn=_configured)
+    ctx.register_tool("inkbox_list_a2a_tasks", "inkbox", A2A_LIST_TASKS_SCHEMA, inkbox_list_a2a_tasks, check_fn=_configured)
+    ctx.register_tool("inkbox_list_a2a_messages", "inkbox", A2A_LIST_MESSAGES_SCHEMA, inkbox_list_a2a_messages, check_fn=_configured)
+    ctx.register_tool("inkbox_list_a2a_sent_tasks", "inkbox", A2A_LIST_SENT_TASKS_SCHEMA, inkbox_list_a2a_sent_tasks, check_fn=_configured)
+    ctx.register_tool("inkbox_get_a2a_sent_task", "inkbox", A2A_GET_SENT_TASK_SCHEMA, inkbox_get_a2a_sent_task, check_fn=_configured)

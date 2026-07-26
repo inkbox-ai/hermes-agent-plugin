@@ -1,6 +1,6 @@
 ---
 name: inkbox-contact-rules
-description: Use when the user wants to block, allow, pause, delete, or list Inkbox contact-rule filters for the agent's mailbox or phone number. Hermes does not expose contact-rule edit tools; guide the user to Inkbox Console or explain the limitation.
+description: Use when the user wants to block, allow, delete, or list Inkbox contact-rule filters for the agent's mailbox or phone number. Hermes does not expose contact-rule edit tools; guide the user to Inkbox Console or explain the limitation.
 user-invocable: false
 ---
 
@@ -26,8 +26,7 @@ Use this skill when discussing who can reach the agent's Inkbox mailbox or phone
 3. For phone rules, explain the intended settings:
    - `matchType: "exact_number"` for E.164 numbers.
    - Rules apply to SMS and voice calls for that phone number.
-4. Mention that `status: "paused"` can temporarily disable a rule without deleting it if Console exposes that option.
-5. Explain that blocked inbound messages/calls may be rejected before the agent sees an event.
+4. Explain that blocked inbound messages/calls may be rejected before the agent sees an event.
 
 ## Safety
 

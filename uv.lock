@@ -484,7 +484,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.3"
+version = "0.2.4"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -501,9 +501,9 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "inkbox", specifier = ">=0.4.24,<1.0.0" },
+    { name = "inkbox", specifier = ">=0.5.6,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0" },
+    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
 ]
 provides-extras = ["test"]
@@ -574,7 +574,7 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.4.24"
+version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -584,9 +584,9 @@ dependencies = [
     { name = "h2" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/49/42/ff93f58971b4d32f5e0c2d144c8e940466b0cf5b6205ba35143cba517387/inkbox-0.4.24.tar.gz", hash = "sha256:6495991355316faa4671c8e7bc6867eed62a03fc3499b9432632eb478e4f9df8", size = 339600, upload-time = "2026-07-13T07:29:30.2Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/25/40ce6a1b74480cfbd747e27f658c93bb9b641c68b6de9c21c3a65a651ea0/inkbox-0.5.6.tar.gz", hash = "sha256:03abc18382deccd6ad8c9adba00fb9c77de11d740da46190cdc68ee46eff2720", size = 371398, upload-time = "2026-07-26T06:34:42.32Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/13/3aea8bd266026ba5f168b2f960a1291e8f9ed0bc840d1551207a55550bd1/inkbox-0.4.24-py3-none-any.whl", hash = "sha256:862c5c41283ed23f1bb1b90bb495481e880653c6a11c9d3aaf6dc44b504ce2f3", size = 234801, upload-time = "2026-07-13T07:29:28.863Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/1c/4ec564d853d7f0419403d1fd3577dc3460e8641c13f7e2502081e40a93e3/inkbox-0.5.6-py3-none-any.whl", hash = "sha256:81b1baeab1a73aaf6b9a25dedd820d75f9218329743f5cbef758d4b08bf64c45", size = 255695, upload-time = "2026-07-26T06:34:41.035Z" },
 ]
 
 [[package]]

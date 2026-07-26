@@ -75,7 +75,7 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.1,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.5.6,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -96,13 +96,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.1,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.6,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.1,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.6,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -301,12 +301,25 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_a2a_complete`
+- `inkbox_a2a_ask_caller`
+- `inkbox_a2a_fail`
+- `inkbox_list_a2a_tasks`
+- `inkbox_list_a2a_messages`
+- `inkbox_list_a2a_sent_tasks`
+- `inkbox_get_a2a_sent_task`
 - `inkbox_lookup_contact`
 - `inkbox_list_contacts`
 - `inkbox_get_contact`
 - `inkbox_create_contact`
 - `inkbox_update_contact`
 - `inkbox_delete_contact`
+
+Inbound A2A tasks use isolated context sessions and a durable task registry.
+The three A2A outcome tools are accepted only during a verified inbound A2A
+turn. The history tools support direction, participant, lifecycle, context,
+keyword, timestamp, and cursor filters. The sent-task tools remain available as
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.5.6 or newer.
 
 Realtime-only call tools:
 
