@@ -33,6 +33,7 @@ def fake_web(monkeypatch):
 
 def _adapter(tmp_path):
     adapter = object.__new__(InkboxAdapter)
+    adapter.platform = "inkbox"
     adapter._identity_id = "identity-1"
     adapter._identity_handle = "agent"
     adapter._a2a_registry_path = tmp_path / "a2a.json"
