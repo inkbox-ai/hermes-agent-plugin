@@ -21,9 +21,6 @@ test = [
 # package — keep uv from trying to build/install the project itself.
 package = false
 
-[tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "fdea6e55ac117f246624852aedeef0feabe08b9a", subdirectory = "sdk/python" }
-
 [tool.ruff]
 line-length = 125
 

@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@fdea6e55ac117f246624852aedeef0feabe08b9a#subdirectory=sdk/python" \
+            'inkbox>=0.5.6,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -67,10 +67,16 @@ jobs:
         run: |
           uv venv --python 3.12
           uv pip install \
-            "inkbox @ git+https://github.com/inkbox-ai/inkbox.git@fdea6e55ac117f246624852aedeef0feabe08b9a#subdirectory=sdk/python" \
+            'inkbox>=0.5.6,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
           uv pip install --editable "$RUNNER_TEMP/hermes-agent"
 
       - name: Contract tests vs real Hermes main
-        run: .venv/bin/pytest --override-ini pythonpath= --import-mode=importlib tests/contract -v
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest \
+            --rootdir="$GITHUB_WORKSPACE" \
+            --override-ini pythonpath= \
+            --import-mode=importlib \
+            "$GITHUB_WORKSPACE/tests/contract" -v
