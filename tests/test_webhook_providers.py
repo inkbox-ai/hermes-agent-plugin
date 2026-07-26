@@ -390,6 +390,30 @@ def test_require_signature_false_bypasses_verify():
     assert resp.status == 200 and resp.text == "ok"
 
 
+def test_retry_response_rolls_back_outer_request_reservation(monkeypatch):
+    adapter = _adapter(require_signature=False, external_events_enabled=False)
+    monkeypatch.setattr(
+        adapter_mod,
+        "match_provider",
+        lambda _headers: types.SimpleNamespace(name="inkbox", verify=lambda **_kwargs: True),
+    )
+
+    async def retry(_envelope):
+        return types.SimpleNamespace(status=503, text="in progress; retry")
+
+    monkeypatch.setattr(adapter, "_on_mail_received", retry)
+    request = _FakeRequest(
+        b'{"event_type":"message.received","data":{"message":{"id":"mail-1"}}}',
+        headers={"X-Inkbox-Signature": "sha256=unchecked"},
+        request_id="retry-request",
+    )
+
+    first = asyncio.run(adapter._handle_webhook(request))
+    second = asyncio.run(adapter._handle_webhook(request))
+
+    assert first.status == 503 and second.status == 503
+
+
 # --- provider unit edges -------------------------------------------------
 
 def test_register_provider_returns_class_and_registers(monkeypatch):
