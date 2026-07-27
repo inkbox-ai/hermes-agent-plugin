@@ -21,9 +21,9 @@ On ``connect()`` the adapter:
   2. Registers webhook subscriptions for the configured identity's
      mailbox (``message.*`` events), phone number (``text.*``
      events), and — when the identity is iMessage-enabled — the
-     identity itself (``imessage.*`` events; iMessage rides shared
-     Inkbox-managed numbers, so the subscription owner is the agent
-     identity rather than a phone number) pointing at the tunnel, and
+     identity itself (``imessage.*`` events; shared and dedicated iMessage
+     lines are all owned by the agent identity at the webhook layer) pointing
+     at the tunnel, and
      patches the phone number's incoming-call webhook URL + WebSocket
      URL on the resource itself (the call channel is a synchronous
      control-plane callback and is not a fan-out subscription).
@@ -46,7 +46,9 @@ Hermes session spans email + SMS + voice for the same remote party::
 
     inbound mail     → chat_id=contact_id, thread_id=f"email:{tid}"
     inbound SMS      → chat_id=contact_id, thread_id=None
-    inbound iMessage → chat_id=contact_id, thread_id=f"imessage:{cid}"
+    inbound iMessage → chat_id=contact_id, thread_id=f"imessage:{cid}" (1:1)
+    group iMessage   → chat_id=f"imessage:{cid}",
+                       thread_id=f"imessage:{cid}" (shared group context)
     inbound call     → chat_id=contact_id, thread_id=f"call:{call_id}"
     outbound call    → chat_id=contact_id, thread_id=None  (joins the
                        contact's main session so the agent inherits the
@@ -63,9 +65,9 @@ Outbound
   - ``sms``      → ``identity.send_text(conversation_id=..., text=...)``
                    for replies, falling back to ``to=...`` for legacy/new sends
   - ``imessage`` → ``identity.send_imessage(conversation_id=..., text=...)``.
-    iMessage is recipient-first: the remote party must have messaged the
-    agent at least once before outbound sends work, so replies always
-    target an existing conversation.
+    Replies always target the existing 1:1 or group conversation. The
+    ``inkbox_send_imessage`` tool may initiate a conversation by recipient;
+    groups require a dedicated outbound iMessage line.
   - ``voice``    → push a ``text`` frame onto the contact's active call
     WebSocket so Inkbox-managed TTS speaks it to the caller.
 
@@ -4122,6 +4124,34 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return None
 
+    async def _lookup_imessage_conversation(self, conversation_id: str) -> Any:
+        """Fetch iMessage conversation metadata for events that omit group fields."""
+        if not conversation_id or self._inkbox is None:
+            return None
+
+        def _lookup():
+            identity = self._inkbox.get_identity(self._identity_handle)
+            method = getattr(identity, "get_imessage_conversation", None)
+            if callable(method):
+                return method(conversation_id)
+            method = getattr(identity, "getImessageConversation", None)
+            if callable(method):
+                try:
+                    return method(conversation_id)
+                except TypeError:
+                    return method({"conversationId": conversation_id})
+            return None
+
+        try:
+            return await asyncio.to_thread(_lookup)
+        except Exception as exc:
+            logger.debug(
+                "[Inkbox] iMessage conversation lookup failed for %s: %s",
+                conversation_id,
+                exc,
+            )
+            return None
+
     def _build_sms_text_event(
         self,
         *,
@@ -4214,6 +4244,8 @@ class InkboxAdapter(BasePlatformAdapter):
             or text.startswith("[inkbox:group_sms_burst ")
             or text.startswith("[inkbox:imessage ")
             or text.startswith("[inkbox:imessage_burst ")
+            or text.startswith("[inkbox:group_imessage ")
+            or text.startswith("[inkbox:group_imessage_burst ")
         ):
             return {"mode": "queue", "merge_text": True}
         return None
@@ -4307,6 +4339,16 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[inkbox:group_sms ",
                     (
                         f"[inkbox:group_sms_burst messages={len(fragments)} "
+                        f"first_at={_format_inkbox_timestamp(first_at)} "
+                        f"last_at={_format_inkbox_timestamp(last_at)} "
+                    ),
+                    1,
+                )
+            elif str(batch["marker"]).startswith("[inkbox:group_imessage "):
+                burst_marker = batch["marker"].replace(
+                    "[inkbox:group_imessage ",
+                    (
+                        f"[inkbox:group_imessage_burst messages={len(fragments)} "
                         f"first_at={_format_inkbox_timestamp(first_at)} "
                         f"last_at={_format_inkbox_timestamp(last_at)} "
                     ),
@@ -4912,14 +4954,26 @@ class InkboxAdapter(BasePlatformAdapter):
         media_urls: Optional[list[str]] = None,
         media_types: Optional[list[str]] = None,
         conversation_id: Optional[str] = None,
+        is_group: bool = False,
+        participants: Optional[list[str]] = None,
         agent_identity: Optional[Dict[str, str]] = None,
     ) -> MessageEvent:
         thread_id = f"imessage:{conversation_id}" if conversation_id else None
+        chat_name = (
+            f"Inkbox iMessage group {conversation_id or remote}"
+            if is_group
+            else contact_name or remote
+        )
+        user_id = (
+            str((contact or {}).get("id") or remote)
+            if is_group
+            else str(chat_id)
+        )
         source = self.build_source(
             chat_id=str(chat_id),
-            chat_name=contact_name or remote,
-            chat_type="dm",
-            user_id=str(chat_id),
+            chat_name=chat_name,
+            chat_type="group" if is_group else "dm",
+            user_id=user_id,
             user_name=contact_name or remote,
             user_id_alt=remote,
             thread_id=thread_id,
@@ -4927,10 +4981,27 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         if text is None:
             contact_block = self._contact_marker(contact, agent_identity)
-            conversation_part = (
-                f" conversation_id={conversation_id}" if conversation_id else ""
-            )
-            text = f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]\n{body}"
+            if is_group:
+                marker_parts = [
+                    f"[inkbox:group_imessage conversation_id={conversation_id or 'unknown'}",
+                    f"from={remote}",
+                    f"participants={','.join(participants or [])}" if participants else None,
+                    "reply_mode=conversation_id",
+                    f"| {contact_block}]",
+                ]
+                marker = " ".join(part for part in marker_parts if part)
+                group_policy = "\n".join([
+                    "Group iMessage response policy: you receive every message in this group so you can track context.",
+                    "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
+                    "Treat ordinary group chatter as context only.",
+                    "If no visible reply is warranted, return exactly [SILENT].",
+                ])
+                text = "\n".join(part for part in [marker, group_policy, body] if part)
+            else:
+                conversation_part = (
+                    f" conversation_id={conversation_id}" if conversation_id else ""
+                )
+                text = f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]\n{body}"
         # iMessage always carries the responder playbook alongside the general
         # guide; operator overrides for this channel layer on top.
         default_skills = (
@@ -4956,10 +5027,9 @@ class InkboxAdapter(BasePlatformAdapter):
     async def _on_imessage_received(self, envelope: Dict[str, Any]) -> "web.Response":
         """Route an inbound iMessage into the contact's Hermes session.
 
-        Mirrors ``_on_text_received`` minus the SMS-only concerns: there is
-        no group support, no opt-in control words, and no local number —
-        iMessage rides a shared Inkbox-managed line, so the conversation id
-        is the only stable reply target and is stashed for ``send()``.
+        Mirrors ``_on_text_received`` while preserving iMessage-specific
+        delivery behavior. The conversation id is the stable reply target for
+        both one-to-one and group chats and is stashed for ``send()``.
         """
         message = (envelope.get("data") or {}).get("message") or {}
         message_id = str(message.get("id") or "").strip()
@@ -4981,26 +5051,34 @@ class InkboxAdapter(BasePlatformAdapter):
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
         remote = str(
-            message.get("remote_number") or message.get("remoteNumber") or ""
+            message.get("sender_number")
+            or message.get("senderNumber")
+            or message.get("remote_number")
+            or message.get("remoteNumber")
+            or ""
         ).strip()
         if not remote:
             return web.Response(status=200, text="ok")
         conversation_id = str(
             message.get("conversation_id") or message.get("conversationId") or ""
         ).strip()
+        participants = _string_list_field(message, "participants")
+        is_group = bool(_field(message, "isGroup", "is_group")) or len(participants) > 1
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = _chat_id_for_route(
-            contact,
-            _channel_thread_key("imessage", conversation_id),
-            remote,
+        chat_id = (
+            _channel_thread_key("imessage", conversation_id) or remote
+            if is_group
+            else _chat_id_for_route(
+                contact,
+                _channel_thread_key("imessage", conversation_id),
+                remote,
+            )
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
-        # Sender labelling fallback; no group iMessage, so the exactly-one
-        # rule alone guards against ambiguity.
         sender_identity = (
             None
-            if contact
+            if contact or is_group
             else _single_agent_identity(_webhook_list(
                 envelope.get("data") or {}, "agent_identities", "agentIdentities",
             ))
@@ -5021,6 +5099,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "conversation_id": conversation_id,
             "remote_number": remote,
             "message_id": message_id,
+            "conversation_kind": "group" if is_group else "direct",
         }
         self._last_inbound_imessage[str(chat_id)] = imessage_state
         if conversation_id:
@@ -5048,6 +5127,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 media_urls=media_urls,
                 media_types=media_types,
                 conversation_id=conversation_id,
+                is_group=is_group,
+                participants=participants,
                 agent_identity=sender_identity,
             )
             await self._enqueue(event)
@@ -5065,11 +5146,15 @@ class InkboxAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             conversation_id=conversation_id,
+            is_group=is_group,
+            participants=participants,
             agent_identity=sender_identity,
         )
-        # Show the recipient a typing indicator while the agent works on the
-        # reply. The pulse is cancelled in send() once the response goes out.
-        self._start_imessage_typing(conversation_id)
+        # Group iMessage does not support typing indicators.
+        if not is_group:
+            # Show the recipient a typing indicator while the agent works on
+            # the reply. The pulse is cancelled in send() once it goes out.
+            self._start_imessage_typing(conversation_id)
         # iMessage users send fragment bursts just like SMS users — reuse
         # the quiet-window batcher (the burst marker rewrite understands
         # the [inkbox:imessage ...] prefix).
@@ -5308,17 +5393,37 @@ class InkboxAdapter(BasePlatformAdapter):
         ) or "unknown"
         timestamp = _parse_inkbox_timestamp(reaction.get("created_at"))
 
+        # One-to-one reactions carry an assignment id. Group reactions do not,
+        # so fetch conversation metadata only for that ambiguous/group-capable
+        # shape instead of adding a read to every ordinary tapback.
+        assignment_id = str(
+            reaction.get("assignment_id") or reaction.get("assignmentId") or ""
+        ).strip()
+        conversation = (
+            await self._lookup_imessage_conversation(conversation_id)
+            if not assignment_id
+            else None
+        )
+        participants = _string_list_field(conversation, "participants")
+        is_group = (
+            _conversation_summary_is_group(conversation)
+            or len(participants) > 1
+        )
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = _chat_id_for_route(
-            contact,
-            _channel_thread_key("imessage", conversation_id),
-            remote,
+        chat_id = (
+            _channel_thread_key("imessage", conversation_id) or remote
+            if is_group
+            else _chat_id_for_route(
+                contact,
+                _channel_thread_key("imessage", conversation_id),
+                remote,
+            )
         )
         contact_name = contact["name"] if contact and contact.get("name") else None
         # Same sender-labelling fallback as an inbound iMessage body.
         sender_identity = (
             None
-            if contact
+            if contact or is_group
             else _single_agent_identity(_webhook_list(
                 envelope.get("data") or {}, "agent_identities", "agentIdentities",
             ))
@@ -5334,6 +5439,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "conversation_id": conversation_id,
             "remote_number": remote,
             "message_id": target_message_id,
+            "conversation_kind": "group" if is_group else "direct",
         }
         self._last_inbound_imessage[str(chat_id)] = imessage_state
         if conversation_id:
@@ -5347,9 +5453,15 @@ class InkboxAdapter(BasePlatformAdapter):
         target_part = (
             f" target_message_id={target_message_id}" if target_message_id else ""
         )
+        marker_kind = (
+            "group_imessage_reaction" if is_group else "imessage_reaction"
+        )
+        participants_part = (
+            f" participants={','.join(participants)}" if participants else ""
+        )
         marker = (
-            f"[inkbox:imessage_reaction from={remote} reaction={reaction_label}"
-            f"{conversation_part}{target_part} | {contact_block}]"
+            f"[inkbox:{marker_kind} from={remote} reaction={reaction_label}"
+            f"{conversation_part}{target_part}{participants_part} | {contact_block}]"
         )
         policy = "\n".join([
             f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
@@ -5364,9 +5476,17 @@ class InkboxAdapter(BasePlatformAdapter):
 
         source = self.build_source(
             chat_id=str(chat_id),
-            chat_name=contact_name or remote,
-            chat_type="dm",
-            user_id=str(chat_id),
+            chat_name=(
+                f"Inkbox iMessage group {conversation_id or remote}"
+                if is_group
+                else contact_name or remote
+            ),
+            chat_type="group" if is_group else "dm",
+            user_id=(
+                str((contact or {}).get("id") or remote)
+                if is_group
+                else str(chat_id)
+            ),
             user_name=contact_name or remote,
             user_id_alt=remote,
             thread_id=f"imessage:{conversation_id}" if conversation_id else None,
@@ -5392,7 +5512,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # [SILENT] path if the agent decides no reply is warranted after all).
         # Other reaction types most often resolve to [SILENT], so we don't
         # promise a reply that isn't coming.
-        if reaction_type == "question":
+        if reaction_type == "question" and not is_group:
             self._start_imessage_typing(conversation_id)
         await self._enqueue(event)
         return web.Response(status=200, text="ok")

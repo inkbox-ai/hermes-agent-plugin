@@ -380,6 +380,27 @@ def _normalize_recipients(value: Any) -> Optional[List[str]]:
     return []
 
 
+def _identity_can_start_imessage_conversations(identity: Any) -> bool:
+    """Whether the identity has a dedicated outbound iMessage line."""
+    number = getattr(identity, "imessage_number", None)
+    if number is None:
+        number = getattr(identity, "imessageNumber", None)
+    if number is None:
+        return False
+
+    can_start = getattr(number, "can_start_conversations", None)
+    if can_start is None:
+        can_start = getattr(number, "canStartConversations", None)
+    if isinstance(can_start, bool):
+        return can_start
+
+    number_type = getattr(number, "type", None)
+    if isinstance(number, dict):
+        number_type = number.get("type")
+    number_type = getattr(number_type, "value", number_type)
+    return str(number_type or "").strip().lower() == "dedicated_outbound"
+
+
 def _identity_method(identity: Any, snake_name: str, camel_name: Optional[str] = None):
     method = getattr(identity, snake_name, None)
     if callable(method):
@@ -980,9 +1001,29 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             })
 
         conversation_id = str(args.get("conversationId") or args.get("conversation_id") or "").strip()
-        to = str(args.get("to") or "").strip()
-        if bool(conversation_id) == bool(to):
+        to_list = _normalize_recipients(args.get("to"))
+        has_to = to_list is not None and len(to_list) > 0
+        has_conversation = bool(conversation_id)
+        if has_to == has_conversation:
             return _json({"error": "Specify exactly one of `to` or `conversationId`."})
+        if to_list is not None and len(to_list) == 0:
+            return _json({"error": "`to` must include at least one recipient."})
+        if to_list and len(to_list) > 8:
+            return _json({"error": "Inkbox iMessage groups support at most 8 recipients."})
+        if to_list and len(set(to_list)) != len(to_list):
+            return _json({"error": "iMessage recipients must be distinct."})
+        if (
+            to_list
+            and len(to_list) > 1
+            and not _identity_can_start_imessage_conversations(identity)
+        ):
+            return _json({
+                "error": (
+                    "Starting an iMessage group requires a dedicated outbound "
+                    "iMessage line. Reply to an existing group with `conversationId`."
+                ),
+                "error_code": "imessage_group_requires_dedicated_outbound",
+            })
 
         payload: dict[str, Any] = {"text": text or None}
         camel_payload: dict[str, Any] = {"text": text or None}
@@ -990,8 +1031,8 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             payload["conversation_id"] = conversation_id
             camel_payload["conversationId"] = conversation_id
         else:
-            payload["to"] = to
-            camel_payload["to"] = to
+            payload["to"] = to_list[0] if to_list and len(to_list) == 1 else to_list
+            camel_payload["to"] = payload["to"]
         if media_paths:
             media_urls = [_upload_imessage_media_path(identity, media_paths[0])]
         if media_urls:
@@ -1024,10 +1065,24 @@ def inkbox_list_imessage_conversations(args: dict, **kwargs) -> str:
     del kwargs
     try:
         _cfg, _client, identity = _client_and_identity()
-        options = {"limit": int(args.get("limit") or 25), "offset": int(args.get("offset") or 0)}
+        options = {
+            "limit": int(args.get("limit") or 25),
+            "offset": int(args.get("offset") or 0),
+            "include_groups": (
+                args.get("includeGroups")
+                if "includeGroups" in args
+                else args.get("include_groups", True)
+            ),
+        }
+        camel_options = {
+            "limit": options["limit"],
+            "offset": options["offset"],
+            "includeGroups": options["include_groups"],
+        }
         convos = _call_with_kwargs_or_payload(
             _identity_method(identity, "list_imessage_conversations", "listImessageConversations"),
             options,
+            camel_options,
         )
         return _json({"ok": True, "count": len(convos or []), "conversations": _json_safe(convos or [])})
     except Exception as exc:
@@ -1512,12 +1567,24 @@ IMESSAGE_TRIAGE_NUMBER_SCHEMA = {
 
 SEND_IMESSAGE_SCHEMA = {
     "name": "inkbox_send_imessage",
-    "description": "Send an iMessage from the configured Inkbox identity. Recipient-first channel: a person must have connected via the iMessage router and messaged this agent before outbound sends work, so prefer conversationId from an inbound message or inkbox_list_imessage_conversations.",
+    "description": "Send an iMessage from the configured Inkbox identity. Use conversationId to reply into an existing 1:1 or group conversation. A dedicated outbound iMessage line may initiate a 1:1 or 2-8 recipient group; shared and dedicated inbound lines remain recipient-first.",
     "parameters": {
         "type": "object",
         "properties": {
-            "conversationId": {"type": "string", "description": "Existing Inkbox iMessage conversation UUID. Preferred for replies. Mutually exclusive with `to`."},
-            "to": {"type": "string", "description": "Recipient phone number in E.164 format. Only works after that person has messaged this agent. Mutually exclusive with `conversationId`."},
+            "conversationId": {"type": "string", "description": "Existing Inkbox iMessage conversation UUID. Preferred for 1:1 and group replies. Mutually exclusive with `to`."},
+            "to": {
+                "description": "One E.164 recipient or a list of 1-8 distinct recipients. Two or more starts a group and requires a dedicated outbound iMessage line. Mutually exclusive with `conversationId`.",
+                "oneOf": [
+                    {"type": "string"},
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": True,
+                    },
+                ],
+            },
             "text": {"type": "string", "maxLength": IMESSAGE_MAX_LENGTH, "description": "Message body, max 18995 chars."},
             "mediaUrls": {
                 "type": "array",
@@ -1554,19 +1621,20 @@ LIST_IMESSAGE_ASSIGNMENTS_SCHEMA = {
 
 LIST_IMESSAGE_CONVERSATIONS_SCHEMA = {
     "name": "inkbox_list_imessage_conversations",
-    "description": "List iMessage conversation summaries for the configured Inkbox identity. Returns conversation IDs for replies, latest-message previews, unread counts, and assignment_status (released = that person disconnected; replies fail until they reconnect).",
+    "description": "List iMessage conversation summaries for the configured Inkbox identity. Includes group chats by default and returns conversation IDs for replies, participant lists, latest-message previews, unread counts, and assignment status.",
     "parameters": {
         "type": "object",
         "properties": {
             "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
             "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "includeGroups": {"type": "boolean", "default": True, "description": "Include group conversations."},
         },
     },
 }
 
 GET_IMESSAGE_CONVERSATION_SCHEMA = {
     "name": "inkbox_get_imessage_conversation",
-    "description": "Fetch messages in one iMessage conversation, newest first. Messages include any live tapback reactions.",
+    "description": "Fetch messages in one 1:1 or group iMessage conversation, newest first. Messages include sender and participant metadata plus any live tapback reactions.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1598,7 +1666,7 @@ SEND_IMESSAGE_REACTION_SCHEMA = {
 
 MARK_IMESSAGE_CONVERSATION_READ_SCHEMA = {
     "name": "inkbox_mark_imessage_conversation_read",
-    "description": "Send a read receipt and mark every inbound message in an iMessage conversation as read.",
+    "description": "Send a read receipt and mark every inbound message in a 1:1 iMessage conversation as read. Group iMessage conversations do not support read receipts.",
     "parameters": {
         "type": "object",
         "properties": {

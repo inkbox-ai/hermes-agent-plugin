@@ -234,8 +234,8 @@ def test_imessage_single_agent_identity_labels_sender():
 
 
 def test_imessage_two_identities_keep_unknown_fallback():
-    # iMessage has no group split, so this directly exercises the
-    # exactly-one rule: two entries must not collapse to the first.
+    # A non-group payload with ambiguous identity metadata must not collapse
+    # to the first entry.
     adapter = _adapter(contact=None)
     two = [
         IDENTITY,
