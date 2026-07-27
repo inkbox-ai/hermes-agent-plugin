@@ -86,6 +86,90 @@ def inkbox_a2a_fail(args: dict, task_id: str = "", **kwargs) -> str:
     return _a2a_intent("fail", str(args.get("reason") or ""), task_id)
 
 
+def inkbox_a2a_call(args: dict, **kwargs) -> str:
+    """Send work to an A2A 1.0 Agent Card."""
+    del kwargs
+    card_url = _a2a_optional(args, "cardUrl", "card_url")
+    text = str(args.get("text") or "").strip()
+    if not card_url:
+        return _json({"error": "cardUrl is required"})
+    if not text:
+        return _json({"error": "text is required"})
+    try:
+        _, _, identity = _client_and_identity()
+        a2a = _identity_method(identity, "a2a_client", "a2aClient")()
+        try:
+            target = a2a.fetch_card(card_url)
+            result = a2a.send(
+                target,
+                text=text,
+                context_id=_a2a_optional(args, "contextId", "context_id"),
+                task_id=_a2a_optional(args, "taskId", "task_id"),
+                message_id=_a2a_optional(args, "messageId", "message_id"),
+            )
+            return _json({"ok": True, "result": _json_safe(result)})
+        finally:
+            a2a.close()
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_a2a_check(args: dict, **kwargs) -> str:
+    """Fetch an outbound A2A task, optionally waiting until it stops."""
+    del kwargs
+    card_url = _a2a_optional(args, "cardUrl", "card_url")
+    task_id = _a2a_optional(args, "taskId", "task_id")
+    if not card_url:
+        return _json({"error": "cardUrl is required"})
+    if not task_id:
+        return _json({"error": "taskId is required"})
+    try:
+        _, _, identity = _client_and_identity()
+        a2a = _identity_method(identity, "a2a_client", "a2aClient")()
+        try:
+            target = a2a.fetch_card(card_url)
+            result = (
+                a2a.wait(target, task_id)
+                if bool(args.get("wait"))
+                else a2a.get_task(target, task_id)
+            )
+            return _json({"ok": True, "task": _json_safe(result)})
+        finally:
+            a2a.close()
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
+def inkbox_a2a_reply(args: dict, **kwargs) -> str:
+    """Reply to an outbound A2A task that requested more input."""
+    del kwargs
+    card_url = _a2a_optional(args, "cardUrl", "card_url")
+    task_id = _a2a_optional(args, "taskId", "task_id")
+    text = str(args.get("text") or "").strip()
+    if not card_url:
+        return _json({"error": "cardUrl is required"})
+    if not task_id:
+        return _json({"error": "taskId is required"})
+    if not text:
+        return _json({"error": "text is required"})
+    try:
+        _, _, identity = _client_and_identity()
+        a2a = _identity_method(identity, "a2a_client", "a2aClient")()
+        try:
+            target = a2a.fetch_card(card_url)
+            result = a2a.send(
+                target,
+                text=text,
+                task_id=task_id,
+                message_id=_a2a_optional(args, "messageId", "message_id"),
+            )
+            return _json({"ok": True, "result": _json_safe(result)})
+        finally:
+            a2a.close()
+    except Exception as exc:
+        return _json({"error": str(exc)})
+
+
 def _a2a_optional(args: dict, camel: str, snake: str | None = None) -> str | None:
     value = args.get(camel)
     if value is None and snake is not None:
@@ -1589,6 +1673,94 @@ A2A_FAIL_SCHEMA = {
     },
 }
 
+A2A_CALL_SCHEMA = {
+    "name": "inkbox_a2a_call",
+    "description": (
+        "Send work to an A2A 1.0 Agent Card. Keep the returned task and context "
+        "ids for later checks or replies."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cardUrl": {
+                "type": "string",
+                "description": "HTTPS URL of the worker's A2A Agent Card.",
+            },
+            "text": {
+                "type": "string",
+                "description": "Task instructions for the worker.",
+            },
+            "contextId": {
+                "type": "string",
+                "description": "Optional context id for a new task in an existing session.",
+            },
+            "taskId": {
+                "type": "string",
+                "description": "Optional task id when continuing an existing task.",
+            },
+            "messageId": {
+                "type": "string",
+                "description": "Optional caller-generated idempotency id.",
+            },
+        },
+        "required": ["cardUrl", "text"],
+    },
+}
+
+A2A_CHECK_SCHEMA = {
+    "name": "inkbox_a2a_check",
+    "description": (
+        "Fetch an outbound A2A task, or wait until it reaches a final or "
+        "input-required state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cardUrl": {
+                "type": "string",
+                "description": "HTTPS URL of the worker's A2A Agent Card.",
+            },
+            "taskId": {
+                "type": "string",
+                "description": "A2A task id returned by inkbox_a2a_call.",
+            },
+            "wait": {
+                "type": "boolean",
+                "default": False,
+                "description": "Wait for the task to stop instead of returning immediately.",
+            },
+        },
+        "required": ["cardUrl", "taskId"],
+    },
+}
+
+A2A_REPLY_SCHEMA = {
+    "name": "inkbox_a2a_reply",
+    "description": "Reply to an outbound A2A task that requested more input.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cardUrl": {
+                "type": "string",
+                "description": "HTTPS URL of the worker's A2A Agent Card.",
+            },
+            "taskId": {
+                "type": "string",
+                "description": "A2A task id currently awaiting caller input.",
+            },
+            "text": {
+                "type": "string",
+                "description": "Additional input for the worker.",
+            },
+            "messageId": {
+                "type": "string",
+                "description": "Optional caller-generated idempotency id.",
+            },
+        },
+        "required": ["cardUrl", "taskId", "text"],
+    },
+}
+
 A2A_HISTORY_DIRECTIONS = ["inbound", "outbound", "both"]
 A2A_TASK_STATES = [
     "submitted",
@@ -1803,6 +1975,9 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)
     ctx.register_tool("inkbox_mark_imessage_conversation_read", "inkbox", MARK_IMESSAGE_CONVERSATION_READ_SCHEMA, inkbox_mark_imessage_conversation_read, check_fn=_configured)
     ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_call", "inkbox", A2A_CALL_SCHEMA, inkbox_a2a_call, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_check", "inkbox", A2A_CHECK_SCHEMA, inkbox_a2a_check, check_fn=_configured)
+    ctx.register_tool("inkbox_a2a_reply", "inkbox", A2A_REPLY_SCHEMA, inkbox_a2a_reply, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_complete", "inkbox", A2A_COMPLETE_SCHEMA, inkbox_a2a_complete, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_ask_caller", "inkbox", A2A_ASK_CALLER_SCHEMA, inkbox_a2a_ask_caller, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_fail", "inkbox", A2A_FAIL_SCHEMA, inkbox_a2a_fail, check_fn=_configured)

@@ -260,6 +260,116 @@ def test_a2a_intent_tools_require_verified_turn_context(
     assert read_a2a_turn_context("session-1")["reply_intent_committed"] is True
 
 
+def test_a2a_delegation_tools_send_check_wait_and_reply(monkeypatch):
+    clients = []
+
+    class A2A:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+            clients.append(self)
+
+        def fetch_card(self, card_url):
+            self.calls.append(("fetch_card", card_url))
+            return {"rpc_url": "https://worker.example/a2a"}
+
+        def send(self, target, **kwargs):
+            self.calls.append(("send", target, kwargs))
+            return {
+                "kind": "task",
+                "task": {
+                    "id": kwargs.get("task_id") or "task-1",
+                    "contextId": kwargs.get("context_id") or "context-1",
+                },
+            }
+
+        def get_task(self, target, task_id):
+            self.calls.append(("get_task", target, task_id))
+            return {"id": task_id, "status": {"state": "TASK_STATE_WORKING"}}
+
+        def wait(self, target, task_id):
+            self.calls.append(("wait", target, task_id))
+            return {"id": task_id, "status": {"state": "TASK_STATE_COMPLETED"}}
+
+        def close(self):
+            self.closed = True
+
+    identity = types.SimpleNamespace(a2a_client=A2A)
+    monkeypatch.setattr(
+        tools_mod,
+        "_client_and_identity",
+        lambda: (None, None, identity),
+    )
+
+    created = json.loads(
+        tools_mod.inkbox_a2a_call({
+            "cardUrl": "https://worker.example/card",
+            "text": "Investigate this.",
+            "contextId": "context-1",
+            "messageId": "message-1",
+        })
+    )
+    checked = json.loads(
+        tools_mod.inkbox_a2a_check({
+            "card_url": "https://worker.example/card",
+            "task_id": "task-1",
+        })
+    )
+    waited = json.loads(
+        tools_mod.inkbox_a2a_check({
+            "cardUrl": "https://worker.example/card",
+            "taskId": "task-1",
+            "wait": True,
+        })
+    )
+    replied = json.loads(
+        tools_mod.inkbox_a2a_reply({
+            "cardUrl": "https://worker.example/card",
+            "taskId": "task-1",
+            "text": "Use the production window.",
+            "messageId": "message-2",
+        })
+    )
+
+    assert created["result"]["task"]["id"] == "task-1"
+    assert checked["task"]["status"]["state"] == "TASK_STATE_WORKING"
+    assert waited["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert replied["result"]["task"]["id"] == "task-1"
+    assert clients[0].calls[-1][2] == {
+        "text": "Investigate this.",
+        "context_id": "context-1",
+        "task_id": None,
+        "message_id": "message-1",
+    }
+    assert clients[3].calls[-1][2] == {
+        "text": "Use the production window.",
+        "task_id": "task-1",
+        "message_id": "message-2",
+    }
+    assert all(client.closed for client in clients)
+
+
+def test_a2a_delegation_tools_validate_required_fields(monkeypatch):
+    monkeypatch.setattr(
+        tools_mod,
+        "_client_and_identity",
+        lambda: pytest.fail("invalid input must not create an SDK client"),
+    )
+
+    assert json.loads(tools_mod.inkbox_a2a_call({"text": "Work"})) == {
+        "error": "cardUrl is required"
+    }
+    assert json.loads(
+        tools_mod.inkbox_a2a_check({"cardUrl": "https://worker.example/card"})
+    ) == {"error": "taskId is required"}
+    assert json.loads(
+        tools_mod.inkbox_a2a_reply({
+            "cardUrl": "https://worker.example/card",
+            "taskId": "task-1",
+        })
+    ) == {"error": "text is required"}
+
+
 def test_a2a_sent_history_tools_are_scoped_to_configured_identity(
     monkeypatch,
 ):

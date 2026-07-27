@@ -301,6 +301,9 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_a2a_call`
+- `inkbox_a2a_check`
+- `inkbox_a2a_reply`
 - `inkbox_a2a_complete`
 - `inkbox_a2a_ask_caller`
 - `inkbox_a2a_fail`
@@ -317,9 +320,11 @@ Hermes direct tools:
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
 The three A2A outcome tools are accepted only during a verified inbound A2A
-turn. The history tools support direction, participant, lifecycle, context,
-keyword, timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.5.6 or newer.
+turn. Outbound delegation tools can create tasks, wait for worker state changes,
+and answer requests for more input. The history tools support direction,
+participant, lifecycle, context, keyword, timestamp, and cursor filters. The
+sent-task tools remain available as outbound-only compatibility aliases. The
+plugin requires Inkbox SDK 0.5.6 or newer.
 
 Realtime-only call tools:
 
