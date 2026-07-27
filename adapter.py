@@ -607,6 +607,28 @@ def _string_list_field(obj: Any, *names: str) -> list[str]:
     return [str(item).strip() for item in _list_field(obj, *names) if str(item).strip()]
 
 
+def _inbound_mail_body(message: Dict[str, Any]) -> str:
+    """Body text for an inbound email webhook.
+
+    ``message.received`` carries the full body; older payloads and replays
+    only have the 200-char ``snippet``, so fall back to it.
+    """
+    body = str(message.get("body") or "")
+    if not body.strip():
+        return str(message.get("snippet") or "")
+    if str(message.get("body_state") or "") != "truncated":
+        return body
+    total = message.get("body_total_chars")
+    included = message.get("body_included_chars")
+    msg_id = str(message.get("id") or "")
+    counts = f"{included} of {total} characters" if total and included else "part"
+    return (
+        f"{body}\n\n[inkbox: this email was too long to deliver in full. "
+        f"You are seeing {counts}."
+        + (f" Fetch email {msg_id} to read the rest.]" if msg_id else "]")
+    )
+
+
 def _webhook_list(data: Dict[str, Any], *names: str) -> list[Any]:
     for name in names:
         value = data.get(name)
@@ -3669,7 +3691,7 @@ class InkboxAdapter(BasePlatformAdapter):
             # actually threads the reply.
             message_id=rfc_message_id or message.get("id"),
         )
-        body_text = message.get("snippet") or subject or ""
+        body_text = _inbound_mail_body(message) or subject or ""
         # Modality marker — every inbound is prefixed with one line that
         # tells the agent which modality + which Inkbox Contact (if any)
         # this message belongs to.  PLATFORM_HINTS["inkbox"] explains how
