@@ -33,8 +33,24 @@ jobs:
       orchestrated: true
     secrets: inherit
 
-  voice:
+  a2a:
     needs: channels
+    if: >
+      !cancelled() &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'))
+    uses: ./.github/workflows/live-a2a.yml
+    with:
+      orchestrated: true
+    secrets: inherit
+
+  voice:
+    needs: a2a
     if: >
       !cancelled() &&
       ((github.event_name == 'pull_request' &&
@@ -70,7 +86,7 @@ jobs:
 
   full-stack:
     name: full-stack
-    needs: [channels, voice, external-events]
+    needs: [channels, a2a, voice, external-events]
     if: >
       !cancelled() &&
       ((github.event_name == 'pull_request' &&
@@ -85,11 +101,12 @@ jobs:
       - name: Require every live suite to pass
         env:
           CHANNELS_RESULT: ${{ needs.channels.result }}
+          A2A_RESULT: ${{ needs.a2a.result }}
           VOICE_RESULT: ${{ needs.voice.result }}
           EXTERNAL_EVENTS_RESULT: ${{ needs.external-events.result }}
         run: |
           failed=0
-          for suite in CHANNELS VOICE EXTERNAL_EVENTS; do
+          for suite in CHANNELS A2A VOICE EXTERNAL_EVENTS; do
             result_var="${suite}_RESULT"
             result="${!result_var}"
             echo "$suite: $result"
@@ -98,7 +115,7 @@ jobs:
           exit "$failed"
 
   notify:
-    needs: [channels, voice, external-events, full-stack]
+    needs: [channels, a2a, voice, external-events, full-stack]
     if: >
       always() &&
       github.event_name == 'workflow_run' &&
@@ -106,6 +123,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
       (needs.channels.result != 'success' ||
+       needs.a2a.result != 'success' ||
        needs.voice.result != 'success' ||
        needs.external-events.result != 'success' ||
        needs.full-stack.result != 'success')

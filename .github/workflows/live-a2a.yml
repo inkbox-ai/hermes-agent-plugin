@@ -1,0 +1,127 @@
+name: Live — Agent2Agent
+
+# Four real protocol legs cover both roles and conversation lengths:
+# inbound/outbound × single-turn/multi-turn. The plugin and remote identities
+# are preconfigured to allow one another in both directions.
+on:
+  workflow_call:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for each A2A transition"
+        required: false
+        type: string
+        default: "300"
+      orchestrated:
+        description: "True when the full-stack workflow owns the shared live lock"
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      timeout_s:
+        description: "Seconds to wait for each A2A transition"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ inputs.orchestrated && format('inkbox-live-child-{0}', github.run_id) || 'inkbox-live-aut-tunnel' }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  a2a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        scenario:
+          - inbound-single
+          - inbound-multi
+          - outbound-single
+          - outbound-multi
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up runtime paths
+        run: |
+          echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
+          echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
+
+      - name: Install Hermes
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install plugin and protocol driver
+        run: |
+          mkdir -p "$HERMES_HOME/plugins"
+          ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
+          hermes plugins enable inkbox
+          "$HERMES_HOME/bin/uv" pip install \
+            --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            'inkbox>=0.5.6,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
+
+      - name: Configure the real model and AUT identity
+        env:
+          HERMES_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
+          HANDLE="$("$PY" - <<'PY'
+          import os
+          from inkbox import Inkbox
+          client = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"])
+          print(client.mailboxes.list()[0].email_address.split("@", 1)[0])
+          PY
+          )"
+          {
+            echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
+            echo "INKBOX_IDENTITY=$HANDLE"
+            echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
+            echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY"
+            echo "OPENAI_BASE_URL=https://api.openai.com/v1"
+          } >> "$HERMES_HOME/.env"
+          hermes config set model.provider custom || true
+          hermes config set model.base_url https://api.openai.com/v1 || true
+          hermes config set model.default gpt-5.4 || true
+
+      - name: Start gateway
+        run: |
+          hermes gateway run > "$GATEWAY_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/gateway.pid"
+          for _ in $(seq 1 36); do
+            hermes inkbox doctor 2>/dev/null | grep -q '"ok": true' && exit 0
+            if ! kill -0 "$(cat "$RUNNER_TEMP/gateway.pid")" 2>/dev/null; then
+              echo "::error::gateway exited during startup"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::gateway did not become ready"
+          exit 1
+
+      - name: Run ${{ matrix.scenario }}
+        env:
+          A2A_SCENARIO: ${{ matrix.scenario }}
+          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '300' }}
+          AUT_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
+          REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
+        run: |
+          "$HERMES_HOME/hermes-agent/venv/bin/python3" tests/live/a2a_driver.py
+
+      - name: Dump gateway log on failure
+        if: failure()
+        run: tail -n 300 "$GATEWAY_LOG" 2>/dev/null || true
+
+      - name: Stop gateway
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
