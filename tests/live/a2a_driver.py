@@ -89,10 +89,11 @@ def _send_task(a2a: Any, target: Any, text: str) -> Any:
 def _find_inbound_task(identity: Any, token: str, timeout: float) -> Any:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        page = identity.a2a_tasks(direction="inbound", limit=100)
+        page = identity.a2a_tasks(direction="inbound", q=token, limit=10)
         for item in page.items:
-            if token in _rest_history_text(item):
-                return identity.a2a_task(item.id)
+            task = identity.a2a_task(item.id)
+            if token in _rest_history_text(task):
+                return task
         time.sleep(1)
     raise TimeoutError("Plugin did not create the expected outbound A2A task")
 
