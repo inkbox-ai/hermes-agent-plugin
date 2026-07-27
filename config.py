@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Dict
 
 
 # Empty means "do not override"; the Inkbox SDK owns its API default.
 INKBOX_BASE_URL_DEFAULT = ""
 INKBOX_WS_PATH = "/phone/media/ws"
+
+USER_AGENT_NAME = "inkbox-hermes"
+DISTRIBUTION_NAME = "hermes-agent-plugin"
 
 
 @dataclass
@@ -31,8 +36,22 @@ def inkbox_base_url_kwargs(base_url: str | None = None) -> Dict[str, str]:
     return {"base_url": normalized} if normalized else {}
 
 
+@lru_cache(maxsize=1)
+def plugin_user_agent() -> str:
+    """Identifies this plugin ahead of the SDK's own ``User-Agent`` token."""
+    try:
+        version = importlib.metadata.version(DISTRIBUTION_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    return f"{USER_AGENT_NAME}/{version}"
+
+
 def inkbox_client_kwargs(api_key: str, base_url: str | None = None) -> Dict[str, str]:
-    return {"api_key": api_key, **inkbox_base_url_kwargs(base_url)}
+    return {
+        "api_key": api_key,
+        "user_agent_prefix": plugin_user_agent(),
+        **inkbox_base_url_kwargs(base_url),
+    }
 
 
 def env_flag(name: str, default: bool = False) -> bool:
