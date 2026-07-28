@@ -715,9 +715,9 @@ def test_gateway_launch_offered_when_service_installed(monkeypatch, capsys):
 
 def test_gateway_install_offered_when_no_service_slot(monkeypatch, capsys):
     ran = []
-    states = iter([(False, False), (True, True)])
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
-    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: next(states))
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: True)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
 
@@ -727,17 +727,44 @@ def test_gateway_install_offered_when_no_service_slot(monkeypatch, capsys):
     assert "Gateway installed and running" in capsys.readouterr().out
 
 
-def test_gateway_install_that_did_not_start_reports_not_live(monkeypatch, capsys):
-    # `hermes gateway install` asks its own start-now question; a "no" there
-    # leaves the service installed but down.
-    states = iter([(False, False), (False, True)])
+def test_unconfirmed_install_never_tells_the_operator_to_start_one(monkeypatch, capsys):
+    # `install` can come up as a plain background process when the platform's
+    # service manager refuses the bootstrap. Telling the operator to start
+    # another one on top of that would duplicate the gateway.
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
-    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: next(states))
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: False)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: True)
 
-    assert setup_wizard._offer_gateway_restart() is False
-    assert "hermes gateway start" in capsys.readouterr().out
+    assert setup_wizard._offer_gateway_restart() is True
+
+    out = capsys.readouterr().out
+    assert "hermes gateway status" in out
+    assert "hermes gateway start" not in out
+    assert "hermes gateway run" not in out
+
+
+def test_wait_for_gateway_running_polls_until_it_appears(monkeypatch):
+    # A gateway takes its runtime lock partway through startup, so the first
+    # probe after a start can legitimately miss it.
+    states = iter([(False, False), (False, False), (True, True)])
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: next(states))
+    monkeypatch.setattr(setup_wizard.time, "sleep", lambda _s: None)
+
+    assert setup_wizard._wait_for_gateway_running(timeout=30.0) is True
+
+
+def test_wait_for_gateway_running_gives_up_at_the_timeout(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        setup_wizard, "_gateway_runtime_state", lambda: calls.append(1) or (False, True)
+    )
+    monkeypatch.setattr(setup_wizard.time, "sleep", lambda _s: None)
+
+    assert setup_wizard._wait_for_gateway_running(timeout=0.0) is False
+    # Timeout 0 still probes once before giving up.
+    assert calls == [1]
 
 
 def test_gateway_install_declined_points_at_foreground_run(monkeypatch, capsys):

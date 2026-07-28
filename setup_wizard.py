@@ -68,6 +68,9 @@ OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
 # A restart drains in-flight agent runs before coming back up, so give it more
 # room than the CLI's own 90s service-restart timeout.
 GATEWAY_COMMAND_TIMEOUT = 180
+# A gateway only becomes visible to the CLI once it has taken its runtime lock
+# and written its PID record, which happens partway through its own startup.
+GATEWAY_START_CONFIRM_TIMEOUT = 15.0
 
 
 def print_header(title: str) -> None:
@@ -1505,12 +1508,34 @@ def _run_gateway_command(action: str) -> bool:
         return False
 
 
+def _wait_for_gateway_running(timeout: float = GATEWAY_START_CONFIRM_TIMEOUT) -> bool:
+    """Poll for gateway liveness after a start or install.
+
+    Args:
+        timeout (float): Seconds to keep polling before giving up.
+
+    Returns:
+        bool: True once a gateway reports running. A single immediate probe
+        races a gateway that is still coming up, so poll rather than ask once.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        running, _ = _gateway_runtime_state()
+        if running:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1.0)
+
+
 def _offer_gateway_restart() -> bool:
     """Offer to restart (or start) the gateway so the new config takes effect.
 
     Returns:
-        bool: True when a gateway is running by the time this returns, so the
-        caller can drop `hermes gateway run` from the closing next-steps list.
+        bool: True when the closing next-steps list should NOT tell the
+        operator to start a gateway - either one is confirmed running, or a
+        start/install we ran reported success and a second one would duplicate
+        it.
     """
     print()
     print(color("  --- Hermes gateway ---", Colors.CYAN))
@@ -1572,15 +1597,20 @@ def _offer_gateway_restart() -> bool:
         print_info("  Start one in the foreground instead: hermes gateway run")
         return False
 
-    # `install` only starts the gateway if the operator said yes to its own
-    # start-now prompt, so re-check rather than assuming it came up.
-    started, _ = _gateway_runtime_state()
-    if started:
+    # `install` brings the gateway up in whatever way the platform allows - a
+    # service slot, or a plain background process when the service manager
+    # refuses the bootstrap. Either way it needs a moment to become visible.
+    if _wait_for_gateway_running():
         print_success("  Gateway installed and running with the new Inkbox config.")
         return True
-    print_success("  Gateway service installed.")
-    print_info("  Start it with: hermes gateway start")
-    return False
+
+    # Install reported success, so never answer it with "now go start one":
+    # if it did bring a gateway up, a second start would duplicate it.
+    print_success("  Gateway install completed.")
+    print_info("  Could not confirm the gateway came up within "
+               f"{int(GATEWAY_START_CONFIRM_TIMEOUT)}s.")
+    print_info("  Check it with: hermes gateway status")
+    return True
 
 
 def interactive_setup() -> None:
