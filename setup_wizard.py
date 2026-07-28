@@ -1508,6 +1508,43 @@ def _run_gateway_command(action: str) -> bool:
         return False
 
 
+def _running_gateway_pids() -> tuple[int, ...]:
+    """Return the PIDs of every gateway process visible for this profile.
+
+    Returns:
+        tuple[int, ...]: Gateway PIDs, empty when none are visible or the CLI
+        cannot be asked. The snapshot deduplicates, so one gateway is one PID.
+    """
+    try:
+        from hermes_cli.gateway import get_gateway_runtime_snapshot
+
+        return tuple(get_gateway_runtime_snapshot().gateway_pids)
+    except Exception:
+        return ()
+
+
+def _warn_if_multiple_gateways() -> bool:
+    """Warn when more than one gateway is alive for this profile.
+
+    Only one process can hold the Inkbox platform lock and the adapter's listen
+    port, so the extras start with Inkbox dead - and the survivor may predate
+    the config this wizard just wrote.
+
+    Returns:
+        bool: True when a warning was printed.
+    """
+    pids = _running_gateway_pids()
+    if len(pids) < 2:
+        return False
+    print()
+    print_warning(f"  Found {len(pids)} running gateway processes: {', '.join(str(p) for p in pids)}")
+    print_info("  Only one can own this Inkbox identity - the rest start with")
+    print_info("  Inkbox dead (platform lock held, or listen port already in use),")
+    print_info("  and the one that wins may predate the config just written.")
+    print_info("  Clear them out with: hermes gateway stop --all")
+    return True
+
+
 def _wait_for_gateway_running(timeout: float = GATEWAY_START_CONFIRM_TIMEOUT) -> bool:
     """Poll for gateway liveness after a start or install.
 
@@ -1559,14 +1596,16 @@ def _offer_gateway_restart() -> bool:
         print_success("  Detected a running Hermes gateway.")
         print_info("  It is still on the old config - Inkbox only takes effect")
         print_info("  once the gateway restarts.")
+        _warn_if_multiple_gateways()
         if not prompt_yes_no("  Restart the gateway now?", True):
             print_warning("  Skipped. Run `hermes gateway restart` before using Inkbox.")
             return True
         print_info("  Restarting...")
-        if _run_gateway_command("restart"):
-            print_success("  Gateway restarted with the new Inkbox config.")
-        else:
+        if not _run_gateway_command("restart"):
             print_info("  Restart it manually: hermes gateway restart")
+            return True
+        if not _warn_if_multiple_gateways():
+            print_success("  Gateway restarted with the new Inkbox config.")
         return True
 
     print_warning("  Did not detect a running Hermes gateway - Inkbox is")
@@ -1577,11 +1616,20 @@ def _offer_gateway_restart() -> bool:
             print_info("  Skipped. Run `hermes gateway start` when you're ready.")
             return False
         print_info("  Starting...")
-        if _run_gateway_command("start"):
-            print_success("  Gateway started with the new Inkbox config.")
+        if not _run_gateway_command("start"):
+            print_info("  Start it manually: hermes gateway start")
+            return False
+        # Exit 0 only means the command ran. Confirm a gateway is actually up,
+        # and that a stale sibling is not holding the Inkbox lock against it.
+        if _wait_for_gateway_running():
+            if not _warn_if_multiple_gateways():
+                print_success("  Gateway started with the new Inkbox config.")
             return True
-        print_info("  Start it manually: hermes gateway start")
-        return False
+        print_success("  Gateway start completed.")
+        print_info("  Could not confirm the gateway came up within "
+                   f"{int(GATEWAY_START_CONFIRM_TIMEOUT)}s.")
+        print_info("  Check it with: hermes gateway status")
+        return True
 
     # No service slot yet: `install` sets one up under systemd/launchd/Windows
     # and asks its own start-now question, so it covers install-and-launch in
@@ -1601,7 +1649,8 @@ def _offer_gateway_restart() -> bool:
     # service slot, or a plain background process when the service manager
     # refuses the bootstrap. Either way it needs a moment to become visible.
     if _wait_for_gateway_running():
-        print_success("  Gateway installed and running with the new Inkbox config.")
+        if not _warn_if_multiple_gateways():
+            print_success("  Gateway installed and running with the new Inkbox config.")
         return True
 
     # Install reported success, so never answer it with "now go start one":

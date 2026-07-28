@@ -675,6 +675,7 @@ def test_gateway_restart_offered_when_running(monkeypatch, capsys):
     ran = []
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (True, True))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
 
@@ -687,6 +688,7 @@ def test_gateway_restart_offered_when_running(monkeypatch, capsys):
 def test_gateway_restart_declined_still_reports_live(monkeypatch, capsys):
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (True, True))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         setup_wizard,
@@ -704,6 +706,7 @@ def test_gateway_launch_offered_when_service_installed(monkeypatch, capsys):
     ran = []
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, True))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
 
@@ -717,6 +720,7 @@ def test_gateway_install_offered_when_no_service_slot(monkeypatch, capsys):
     ran = []
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: True)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
@@ -733,6 +737,7 @@ def test_unconfirmed_install_never_tells_the_operator_to_start_one(monkeypatch, 
     # another one on top of that would duplicate the gateway.
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: False)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: True)
@@ -770,6 +775,7 @@ def test_wait_for_gateway_running_gives_up_at_the_timeout(monkeypatch):
 def test_gateway_install_declined_points_at_foreground_run(monkeypatch, capsys):
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         setup_wizard,
@@ -785,6 +791,7 @@ def test_gateway_install_failure_falls_back_to_foreground_run(monkeypatch, capsy
     # Termux / bare WSL have no service manager and `install` exits non-zero.
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: False)
 
@@ -861,3 +868,52 @@ def test_avatar_declined_for_existing_agent(monkeypatch):
 
     identity = types.SimpleNamespace(agent_handle="dev-agent")
     setup_wizard._configure_avatar("https://inkbox.ai", "ApiKey_x", identity, is_signup=False)
+
+
+def test_duplicate_gateways_are_reported(monkeypatch, capsys):
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111, 222, 333))
+
+    assert setup_wizard._warn_if_multiple_gateways() is True
+
+    out = capsys.readouterr().out
+    assert "Found 3 running gateway processes: 111, 222, 333" in out
+    assert "hermes gateway stop --all" in out
+
+
+def test_single_gateway_is_not_reported(monkeypatch, capsys):
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
+
+    assert setup_wizard._warn_if_multiple_gateways() is False
+    assert capsys.readouterr().out == ""
+
+
+def test_restart_does_not_claim_success_over_a_stale_sibling(monkeypatch, capsys):
+    # A second gateway holds the Inkbox platform lock and listen port, so the
+    # one we just restarted comes up with Inkbox dead. Saying "restarted with
+    # the new Inkbox config" there would be a lie.
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (True, True))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111, 222))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: True)
+
+    assert setup_wizard._offer_gateway_restart() is True
+
+    out = capsys.readouterr().out
+    assert "Found 2 running gateway processes" in out
+    assert "restarted with the new Inkbox config" not in out
+
+
+def test_start_confirms_liveness_before_claiming_success(monkeypatch, capsys):
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, True))
+    monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
+    monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: True)
+
+    assert setup_wizard._offer_gateway_restart() is True
+
+    out = capsys.readouterr().out
+    assert "hermes gateway status" in out
+    assert "started with the new Inkbox config" not in out
