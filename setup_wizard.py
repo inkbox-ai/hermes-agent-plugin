@@ -65,6 +65,12 @@ _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.
 _RAW_AVATAR_BASE_URL_DEFAULT = "https://inkbox.ai"
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
+# A restart drains in-flight agent runs before coming back up, so give it more
+# room than the CLI's own 90s service-restart timeout.
+GATEWAY_COMMAND_TIMEOUT = 180
+# A gateway only becomes visible to the CLI once it has taken its runtime lock
+# and written its PID record, which happens partway through its own startup.
+GATEWAY_START_CONFIRM_TIMEOUT = 15.0
 
 
 def print_header(title: str) -> None:
@@ -959,9 +965,10 @@ def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) ->
         identity.mark_imessage_conversation_read(conversation_id)
     except Exception:
         pass
-    print_info("  Start the gateway (`hermes gateway run`) and keep chatting there.")
-    print_info("  If the gateway is already running, restart it (`hermes gateway restart`)")
-    print_info("  so it picks up this new iMessage connection.")
+    # The wizard's closing step offers to start or restart the gateway, so
+    # point at that rather than handing out commands mid-flow.
+    print_info("  Keep chatting in that thread. Setup finishes by bringing the")
+    print_info("  gateway up so it picks up this new iMessage connection.")
 
 
 def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[Any | None, str, bool]:
@@ -1421,8 +1428,9 @@ def _print_agent_summary(identity: Any) -> None:
         print_info("  Phone:    (none - provision later in the Inkbox console)")
 
     print()
+    # The gateway (re)start is offered as the wizard's closing step, so don't
+    # tell the operator to run it here as well.
     print_info("  Wrote INKBOX_API_KEY and INKBOX_IDENTITY to .env.")
-    print_info("  Start the gateway with: hermes gateway run")
 
     if phone is not None and getattr(phone, "type", None) == "local":
         print()
@@ -1443,6 +1451,243 @@ def _print_agent_summary(identity: Any) -> None:
     print_info("  Open the Inkbox console to control who can reach this agent:")
     print_info("    https://inkbox.ai/console/contact-rules")
     print_info("  You can allow or block specific contacts, phone numbers, email addresses, and domains.")
+
+
+def _gateway_runtime_state() -> tuple[bool | None, bool]:
+    """Detect whether a Hermes gateway is live for the current profile.
+
+    Returns:
+        tuple[bool | None, bool]: ``(running, service_installed)``. ``running``
+        is None when neither liveness source is importable (plugin loaded
+        outside a Hermes install), in which case ``service_installed`` is False.
+    """
+    # Preferred: the CLI's unified snapshot — covers systemd/launchd/s6 service
+    # slots as well as a bare `hermes gateway run` process.
+    try:
+        from hermes_cli.gateway import get_gateway_runtime_snapshot
+
+        snapshot = get_gateway_runtime_snapshot()
+        return bool(snapshot.running), bool(snapshot.service_installed)
+    except Exception:
+        pass
+    # Fallback: the PID/lock file the gateway writes for itself. It knows
+    # nothing about installed services, so callers only get liveness here.
+    try:
+        from gateway.status import is_gateway_running
+
+        return bool(is_gateway_running()), False
+    except Exception:
+        return None, False
+
+
+def _run_gateway_command(action: str) -> bool:
+    """Run ``hermes gateway <action>`` in a subprocess.
+
+    Args:
+        action (str): Gateway subcommand to run - "restart", "start" or
+            "install".
+
+    Returns:
+        bool: True when the command exited 0. The Hermes profile carries over
+        via the inherited HERMES_HOME the CLI exported for this process.
+    """
+    hermes = shutil.which("hermes")
+    command = (
+        [hermes, "gateway", action]
+        if hermes
+        else [sys.executable, "-m", "hermes_cli.main", "gateway", action]
+    )
+    # `install` asks its own questions on this terminal — don't put a clock on
+    # the operator. The unattended actions keep the bound.
+    timeout = None if action == "install" else GATEWAY_COMMAND_TIMEOUT
+    try:
+        subprocess.check_call(command, timeout=timeout)
+        return True
+    except Exception as exc:
+        print_error(f"  `hermes gateway {action}` failed: {exc}")
+        return False
+
+
+def _print_ready_banner(handle: str) -> None:
+    """Print the closing banner for a setup that ended with a live gateway.
+
+    Args:
+        handle (str): Inkbox agent identity the gateway is now running as.
+
+    Returns:
+        None: Replaces the next-steps list - there is nothing left to run.
+    """
+    rows = (("Inkbox identity", handle), ("Check its health", "hermes inkbox doctor"))
+    label_width = max(len(label) for label, _ in rows) + 1  # +1 for the colon
+    body = [
+        "Your Hermes agent is set up and running on Inkbox.",
+        "",
+        *(f"  {(label + ':').ljust(label_width)}  {value}" for label, value in rows),
+    ]
+    width = max(len(line) for line in body) + 4
+    print()
+    print(color("╭" + "─" * (width - 2) + "╮", Colors.GREEN))
+    for line in body:
+        print(
+            color("│ ", Colors.GREEN)
+            + color(line.ljust(width - 4), Colors.GREEN, Colors.BOLD)
+            + color(" │", Colors.GREEN)
+        )
+    print(color("╰" + "─" * (width - 2) + "╯", Colors.GREEN))
+
+
+def _running_gateway_pids() -> tuple[int, ...]:
+    """Return the PIDs of every gateway process visible for this profile.
+
+    Returns:
+        tuple[int, ...]: Gateway PIDs, empty when none are visible or the CLI
+        cannot be asked. The snapshot deduplicates, so one gateway is one PID.
+    """
+    try:
+        from hermes_cli.gateway import get_gateway_runtime_snapshot
+
+        return tuple(get_gateway_runtime_snapshot().gateway_pids)
+    except Exception:
+        return ()
+
+
+def _warn_if_multiple_gateways() -> bool:
+    """Warn when more than one gateway is alive for this profile.
+
+    Only one process can hold the Inkbox platform lock and the adapter's listen
+    port, so the extras start with Inkbox dead - and the survivor may predate
+    the config this wizard just wrote.
+
+    Returns:
+        bool: True when a warning was printed.
+    """
+    pids = _running_gateway_pids()
+    if len(pids) < 2:
+        return False
+    print()
+    print_warning(f"  Found {len(pids)} running gateway processes: {', '.join(str(p) for p in pids)}")
+    print_info("  Only one can own this Inkbox identity - the rest start with")
+    print_info("  Inkbox dead (platform lock held, or listen port already in use),")
+    print_info("  and the one that wins may predate the config just written.")
+    print_info("  Clear them out with: hermes gateway stop --all")
+    return True
+
+
+def _wait_for_gateway_running(timeout: float = GATEWAY_START_CONFIRM_TIMEOUT) -> bool:
+    """Poll for gateway liveness after a start or install.
+
+    Args:
+        timeout (float): Seconds to keep polling before giving up.
+
+    Returns:
+        bool: True once a gateway reports running. A single immediate probe
+        races a gateway that is still coming up, so poll rather than ask once.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        running, _ = _gateway_runtime_state()
+        if running:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1.0)
+
+
+def _offer_gateway_restart() -> bool:
+    """Offer to restart (or start) the gateway so the new config takes effect.
+
+    Returns:
+        bool: True when the closing next-steps list should NOT tell the
+        operator to start a gateway - either one is confirmed running, or a
+        start/install we ran reported success and a second one would duplicate
+        it.
+    """
+    print()
+    print(color("  --- Hermes gateway ---", Colors.CYAN))
+
+    # Hermes refuses a self-targeting restart (it would loop against the
+    # supervisor's KeepAlive), so don't offer one we can't actually run.
+    if os.getenv("_HERMES_GATEWAY") == "1":
+        print_info("  Setup is running inside the gateway process.")
+        print_info("  Restart it from a shell: hermes gateway restart")
+        return True
+
+    running, service_installed = _gateway_runtime_state()
+
+    if running is None:
+        print_info("  Could not tell whether a gateway is running.")
+        print_info("  Restart a running one with `hermes gateway restart` so it")
+        print_info("  picks up this config, or start one with `hermes gateway run`.")
+        return False
+
+    if running:
+        print_success("  Detected a running Hermes gateway.")
+        print_info("  It is still on the old config - Inkbox only takes effect")
+        print_info("  once the gateway restarts.")
+        _warn_if_multiple_gateways()
+        if not prompt_yes_no("  Restart the gateway now?", True):
+            print_warning("  Skipped. Run `hermes gateway restart` before using Inkbox.")
+            return True
+        print_info("  Restarting...")
+        if not _run_gateway_command("restart"):
+            print_info("  Restart it manually: hermes gateway restart")
+            return True
+        if not _warn_if_multiple_gateways():
+            print_success("  Gateway restarted with the new Inkbox config.")
+        return True
+
+    print_warning("  Did not detect a running Hermes gateway - Inkbox is")
+    print_warning("  configured, but nothing is listening for it yet.")
+
+    if service_installed:
+        if not prompt_yes_no("  Launch the gateway now?", True):
+            print_info("  Skipped. Run `hermes gateway start` when you're ready.")
+            return False
+        print_info("  Starting...")
+        if not _run_gateway_command("start"):
+            print_info("  Start it manually: hermes gateway start")
+            return False
+        # Exit 0 only means the command ran. Confirm a gateway is actually up,
+        # and that a stale sibling is not holding the Inkbox lock against it.
+        if _wait_for_gateway_running():
+            if not _warn_if_multiple_gateways():
+                print_success("  Gateway started with the new Inkbox config.")
+            return True
+        print_success("  Gateway start completed.")
+        print_info("  Could not confirm the gateway came up within "
+                   f"{int(GATEWAY_START_CONFIRM_TIMEOUT)}s.")
+        print_info("  Check it with: hermes gateway status")
+        return True
+
+    # No service slot yet: `install` sets one up under systemd/launchd/Windows
+    # and asks its own start-now question, so it covers install-and-launch in
+    # one step. It exits non-zero on platforms with no service manager (Termux,
+    # bare WSL) — fall back to the foreground command there.
+    print_info("  Installing the background service keeps it running across reboots.")
+    if not prompt_yes_no("  Install and launch the gateway service now?", True):
+        print_info("  Skipped. Run `hermes gateway install`, or `hermes gateway run`")
+        print_info("  to start one in the foreground.")
+        return False
+    print_info("  Installing...")
+    if not _run_gateway_command("install"):
+        print_info("  Start one in the foreground instead: hermes gateway run")
+        return False
+
+    # `install` brings the gateway up in whatever way the platform allows - a
+    # service slot, or a plain background process when the service manager
+    # refuses the bootstrap. Either way it needs a moment to become visible.
+    if _wait_for_gateway_running():
+        if not _warn_if_multiple_gateways():
+            print_success("  Gateway installed and running with the new Inkbox config.")
+        return True
+
+    # Install reported success, so never answer it with "now go start one":
+    # if it did bring a gateway up, a second start would duplicate it.
+    print_success("  Gateway install completed.")
+    print_info("  Could not confirm the gateway came up within "
+               f"{int(GATEWAY_START_CONFIRM_TIMEOUT)}s.")
+    print_info("  Check it with: hermes gateway status")
+    return True
 
 
 def interactive_setup() -> None:
@@ -1535,6 +1780,17 @@ def interactive_setup() -> None:
     _configure_realtime_calls(identity, imessage_enabled=imessage_on)
 
     _setup_signing_key(api_key, base_url, Inkbox)
+
+    # Last, once every value is on disk: nothing above reaches the agent until
+    # the gateway reloads .env, so offer to do that here instead of leaving it
+    # as a printed instruction.
+    gateway_live = _offer_gateway_restart()
+
+    # A live gateway means setup finished the job, so close on that rather than
+    # a to-do list. Only when nothing is listening is there a next step left.
+    if gateway_live:
+        _print_ready_banner(identity.agent_handle)
+        return
 
     print()
     print("Next steps:")
