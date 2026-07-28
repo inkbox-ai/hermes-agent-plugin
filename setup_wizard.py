@@ -1508,6 +1508,34 @@ def _run_gateway_command(action: str) -> bool:
         return False
 
 
+def _print_ready_banner(handle: str) -> None:
+    """Print the closing banner for a setup that ended with a live gateway.
+
+    Args:
+        handle (str): Inkbox agent identity the gateway is now running as.
+
+    Returns:
+        None: Replaces the next-steps list - there is nothing left to run.
+    """
+    rows = (("Inkbox identity", handle), ("Check its health", "hermes inkbox doctor"))
+    label_width = max(len(label) for label, _ in rows) + 1  # +1 for the colon
+    body = [
+        "Your Hermes agent is set up and running on Inkbox.",
+        "",
+        *(f"  {(label + ':').ljust(label_width)}  {value}" for label, value in rows),
+    ]
+    width = max(len(line) for line in body) + 4
+    print()
+    print(color("╭" + "─" * (width - 2) + "╮", Colors.GREEN))
+    for line in body:
+        print(
+            color("│ ", Colors.GREEN)
+            + color(line.ljust(width - 4), Colors.GREEN, Colors.BOLD)
+            + color(" │", Colors.GREEN)
+        )
+    print(color("╰" + "─" * (width - 2) + "╯", Colors.GREEN))
+
+
 def _running_gateway_pids() -> tuple[int, ...]:
     """Return the PIDs of every gateway process visible for this profile.
 
@@ -1758,8 +1786,13 @@ def interactive_setup() -> None:
     # as a printed instruction.
     gateway_live = _offer_gateway_restart()
 
+    # A live gateway means setup finished the job, so close on that rather than
+    # a to-do list. Only when nothing is listening is there a next step left.
+    if gateway_live:
+        _print_ready_banner(identity.agent_handle)
+        return
+
     print()
     print("Next steps:")
     print("  hermes inkbox doctor")
-    if not gateway_live:
-        print("  hermes gateway run")
+    print("  hermes gateway run")

@@ -707,6 +707,7 @@ def test_gateway_launch_offered_when_service_installed(monkeypatch, capsys):
     monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
     monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, True))
     monkeypatch.setattr(setup_wizard, "_running_gateway_pids", lambda: (111,))
+    monkeypatch.setattr(setup_wizard, "_wait_for_gateway_running", lambda *_a, **_k: True)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
 
@@ -917,3 +918,73 @@ def test_start_confirms_liveness_before_claiming_success(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "hermes gateway status" in out
     assert "started with the new Inkbox config" not in out
+
+
+def _stub_setup_dependencies(monkeypatch, *, gateway_live):
+    """Short-circuit every step of interactive_setup except its closing lines."""
+    identity = types.SimpleNamespace(agent_handle="stub-agent", mailbox=None, phone_number=None)
+
+    monkeypatch.setattr(setup_wizard, "_ensure_inkbox_sdk", lambda: {
+        "Inkbox": object,
+        "InkboxAPIError": Exception,
+        "IdentityPhoneNumberCreateOptions": object,
+        "WhoamiApiKeyResponse": object,
+        "ADMIN_SCOPED": "admin",
+        "AGENT_CLAIMED": "claimed",
+        "AGENT_UNCLAIMED": "unclaimed",
+    })
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(setup_wizard, "_save", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        setup_wizard, "_self_signup_flow", lambda *_a, **_k: (identity, "ApiKey_stub", False)
+    )
+    monkeypatch.setattr(setup_wizard, "_configure_avatar", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "_configure_imessage", lambda *_a, **_k: False)
+    monkeypatch.setattr(setup_wizard, "_offer_dedicated_number", lambda *_a, **_k: (identity, False))
+    monkeypatch.setattr(setup_wizard, "_seed_identity_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "_print_agent_summary", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "_configure_realtime_calls", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "_setup_signing_key", lambda *_a, **_k: None)
+    monkeypatch.setattr(setup_wizard, "_offer_gateway_restart", lambda: gateway_live)
+    return identity
+
+
+def test_ready_banner_names_the_identity_and_the_health_command(capsys):
+    setup_wizard._print_ready_banner("dimas-clanker")
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    assert any("dimas-clanker" in line for line in lines)
+    assert any("hermes inkbox doctor" in line for line in lines)
+    # Every row is the same width, so the box closes cleanly.
+    assert len({len(line) for line in lines}) == 1
+
+
+def test_ready_banner_box_fits_a_long_handle(capsys):
+    setup_wizard._print_ready_banner("a-very-long-agent-handle-that-sets-the-width")
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    assert len({len(line) for line in lines}) == 1
+
+
+def test_live_gateway_closes_on_the_banner_not_a_todo_list(monkeypatch, capsys):
+    _stub_setup_dependencies(monkeypatch, gateway_live=True)
+
+    setup_wizard.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "Your Hermes agent is set up and running on Inkbox." in out
+    assert "stub-agent" in out
+    assert "Next steps:" not in out
+    assert "hermes gateway run" not in out
+
+
+def test_dead_gateway_still_gets_the_next_steps_list(monkeypatch, capsys):
+    _stub_setup_dependencies(monkeypatch, gateway_live=False)
+
+    setup_wizard.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "Next steps:" in out
+    assert "hermes gateway run" in out
+    assert "Your Hermes agent is set up and running" not in out
