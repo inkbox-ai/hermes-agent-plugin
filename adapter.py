@@ -506,6 +506,23 @@ def _imessage_conversation_target(raw: Any) -> Optional[str]:
     return None
 
 
+def _text_mode_from_thread_id(raw: Any) -> Optional[str]:
+    """Return the text channel encoded in an immutable gateway thread id."""
+    text = re.sub(
+        r"^(inkbox:)",
+        "",
+        str(raw or "").strip(),
+        flags=re.IGNORECASE,
+    ).lower()
+    if text.startswith("imessage:"):
+        return "imessage"
+    if text.startswith(("sms:", "text:")):
+        return "sms"
+    if text.startswith("email:"):
+        return "email"
+    return None
+
+
 def _public_http_media_url(value: Any) -> bool:
     """Return whether *value* is a hosted HTTP(S) media URL."""
     parsed = urlparse(str(value or "").strip())
@@ -2564,6 +2581,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
         meta = metadata or {}
         mode = (meta.get("mode") or "").lower().strip()
+        thread_mode = _text_mode_from_thread_id(meta.get("thread_id"))
 
         # End-of-call grace window: when a voice call ends, the agent's last
         # in-flight turn often finishes generating *after* the WS has closed.
@@ -2588,6 +2606,7 @@ class InkboxAdapter(BasePlatformAdapter):
             and (time.time() - closed_at) < VOICE_GRACE_SECONDS
             and chat_id not in self._active_call_ws
             and not self._last_inbound_modality.get(str(chat_id))
+            and not thread_mode
         ):
             logger.info(
                 "[Inkbox] Suppressed post-call voice-leakage for chat %s: %s…",
@@ -2600,15 +2619,18 @@ class InkboxAdapter(BasePlatformAdapter):
 
         # Resolve mode if the gateway didn't pass one explicitly.  Order of
         # preference:
-        #   1. An open live-call WebSocket on this chat — voice trumps
-        #      everything because dropping it would leave the caller hearing
-        #      silence while we send an email.
-        #   2. The modality of the most-recent inbound from this chat —
+        #   1. The immutable gateway thread id. Concurrent channels for one
+        #      contact must not hijack an in-flight turn's eventual reply.
+        #   2. An open live-call WebSocket on this chat when the turn has no
+        #      text-channel thread id.
+        #   3. The modality of the most-recent inbound from this chat —
         #      SMS-conversations on contact-UUID chat_ids land here (the
         #      chat_id shape doesn't reveal which channel inbound came in
         #      on).
-        #   3. SMS if the chat target itself looks like an E.164 number.
-        #   4. Email otherwise (contact UUIDs, raw email addresses).
+        #   4. SMS if the chat target itself looks like an E.164 number.
+        #   5. Email otherwise (contact UUIDs, raw email addresses).
+        if not mode and thread_mode:
+            mode = thread_mode
         if not mode and chat_id in self._active_call_ws:
             mode = "voice"
         if not mode:
