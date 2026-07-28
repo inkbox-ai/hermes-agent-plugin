@@ -65,6 +65,9 @@ _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.
 _RAW_AVATAR_BASE_URL_DEFAULT = "https://inkbox.ai"
 OPENAI_REALTIME_TEST_MODEL = "gpt-realtime-2"
 OPENAI_REALTIME_TEST_URL = "wss://api.openai.com/v1/realtime"
+# A restart drains in-flight agent runs before coming back up, so give it more
+# room than the CLI's own 90s service-restart timeout.
+GATEWAY_COMMAND_TIMEOUT = 180
 
 
 def print_header(title: str) -> None:
@@ -959,9 +962,10 @@ def _wait_for_imessage_first_message(client: Any, identity: Any, handle: str) ->
         identity.mark_imessage_conversation_read(conversation_id)
     except Exception:
         pass
-    print_info("  Start the gateway (`hermes gateway run`) and keep chatting there.")
-    print_info("  If the gateway is already running, restart it (`hermes gateway restart`)")
-    print_info("  so it picks up this new iMessage connection.")
+    # The wizard's closing step offers to start or restart the gateway, so
+    # point at that rather than handing out commands mid-flow.
+    print_info("  Keep chatting in that thread. Setup finishes by bringing the")
+    print_info("  gateway up so it picks up this new iMessage connection.")
 
 
 def _self_signup_flow(base_url: str, Inkbox: Any, InkboxAPIError: Any) -> tuple[Any | None, str, bool]:
@@ -1421,8 +1425,9 @@ def _print_agent_summary(identity: Any) -> None:
         print_info("  Phone:    (none - provision later in the Inkbox console)")
 
     print()
+    # The gateway (re)start is offered as the wizard's closing step, so don't
+    # tell the operator to run it here as well.
     print_info("  Wrote INKBOX_API_KEY and INKBOX_IDENTITY to .env.")
-    print_info("  Start the gateway with: hermes gateway run")
 
     if phone is not None and getattr(phone, "type", None) == "local":
         print()
@@ -1443,6 +1448,139 @@ def _print_agent_summary(identity: Any) -> None:
     print_info("  Open the Inkbox console to control who can reach this agent:")
     print_info("    https://inkbox.ai/console/contact-rules")
     print_info("  You can allow or block specific contacts, phone numbers, email addresses, and domains.")
+
+
+def _gateway_runtime_state() -> tuple[bool | None, bool]:
+    """Detect whether a Hermes gateway is live for the current profile.
+
+    Returns:
+        tuple[bool | None, bool]: ``(running, service_installed)``. ``running``
+        is None when neither liveness source is importable (plugin loaded
+        outside a Hermes install), in which case ``service_installed`` is False.
+    """
+    # Preferred: the CLI's unified snapshot — covers systemd/launchd/s6 service
+    # slots as well as a bare `hermes gateway run` process.
+    try:
+        from hermes_cli.gateway import get_gateway_runtime_snapshot
+
+        snapshot = get_gateway_runtime_snapshot()
+        return bool(snapshot.running), bool(snapshot.service_installed)
+    except Exception:
+        pass
+    # Fallback: the PID/lock file the gateway writes for itself. It knows
+    # nothing about installed services, so callers only get liveness here.
+    try:
+        from gateway.status import is_gateway_running
+
+        return bool(is_gateway_running()), False
+    except Exception:
+        return None, False
+
+
+def _run_gateway_command(action: str) -> bool:
+    """Run ``hermes gateway <action>`` in a subprocess.
+
+    Args:
+        action (str): Gateway subcommand to run - "restart", "start" or
+            "install".
+
+    Returns:
+        bool: True when the command exited 0. The Hermes profile carries over
+        via the inherited HERMES_HOME the CLI exported for this process.
+    """
+    hermes = shutil.which("hermes")
+    command = (
+        [hermes, "gateway", action]
+        if hermes
+        else [sys.executable, "-m", "hermes_cli.main", "gateway", action]
+    )
+    # `install` asks its own questions on this terminal — don't put a clock on
+    # the operator. The unattended actions keep the bound.
+    timeout = None if action == "install" else GATEWAY_COMMAND_TIMEOUT
+    try:
+        subprocess.check_call(command, timeout=timeout)
+        return True
+    except Exception as exc:
+        print_error(f"  `hermes gateway {action}` failed: {exc}")
+        return False
+
+
+def _offer_gateway_restart() -> bool:
+    """Offer to restart (or start) the gateway so the new config takes effect.
+
+    Returns:
+        bool: True when a gateway is running by the time this returns, so the
+        caller can drop `hermes gateway run` from the closing next-steps list.
+    """
+    print()
+    print(color("  --- Hermes gateway ---", Colors.CYAN))
+
+    # Hermes refuses a self-targeting restart (it would loop against the
+    # supervisor's KeepAlive), so don't offer one we can't actually run.
+    if os.getenv("_HERMES_GATEWAY") == "1":
+        print_info("  Setup is running inside the gateway process.")
+        print_info("  Restart it from a shell: hermes gateway restart")
+        return True
+
+    running, service_installed = _gateway_runtime_state()
+
+    if running is None:
+        print_info("  Could not tell whether a gateway is running.")
+        print_info("  Restart a running one with `hermes gateway restart` so it")
+        print_info("  picks up this config, or start one with `hermes gateway run`.")
+        return False
+
+    if running:
+        print_success("  Detected a running Hermes gateway.")
+        print_info("  It is still on the old config - Inkbox only takes effect")
+        print_info("  once the gateway restarts.")
+        if not prompt_yes_no("  Restart the gateway now?", True):
+            print_warning("  Skipped. Run `hermes gateway restart` before using Inkbox.")
+            return True
+        print_info("  Restarting...")
+        if _run_gateway_command("restart"):
+            print_success("  Gateway restarted with the new Inkbox config.")
+        else:
+            print_info("  Restart it manually: hermes gateway restart")
+        return True
+
+    print_warning("  Did not detect a running Hermes gateway - Inkbox is")
+    print_warning("  configured, but nothing is listening for it yet.")
+
+    if service_installed:
+        if not prompt_yes_no("  Launch the gateway now?", True):
+            print_info("  Skipped. Run `hermes gateway start` when you're ready.")
+            return False
+        print_info("  Starting...")
+        if _run_gateway_command("start"):
+            print_success("  Gateway started with the new Inkbox config.")
+            return True
+        print_info("  Start it manually: hermes gateway start")
+        return False
+
+    # No service slot yet: `install` sets one up under systemd/launchd/Windows
+    # and asks its own start-now question, so it covers install-and-launch in
+    # one step. It exits non-zero on platforms with no service manager (Termux,
+    # bare WSL) — fall back to the foreground command there.
+    print_info("  Installing the background service keeps it running across reboots.")
+    if not prompt_yes_no("  Install and launch the gateway service now?", True):
+        print_info("  Skipped. Run `hermes gateway install`, or `hermes gateway run`")
+        print_info("  to start one in the foreground.")
+        return False
+    print_info("  Installing...")
+    if not _run_gateway_command("install"):
+        print_info("  Start one in the foreground instead: hermes gateway run")
+        return False
+
+    # `install` only starts the gateway if the operator said yes to its own
+    # start-now prompt, so re-check rather than assuming it came up.
+    started, _ = _gateway_runtime_state()
+    if started:
+        print_success("  Gateway installed and running with the new Inkbox config.")
+        return True
+    print_success("  Gateway service installed.")
+    print_info("  Start it with: hermes gateway start")
+    return False
 
 
 def interactive_setup() -> None:
@@ -1536,7 +1674,13 @@ def interactive_setup() -> None:
 
     _setup_signing_key(api_key, base_url, Inkbox)
 
+    # Last, once every value is on disk: nothing above reaches the agent until
+    # the gateway reloads .env, so offer to do that here instead of leaving it
+    # as a printed instruction.
+    gateway_live = _offer_gateway_restart()
+
     print()
     print("Next steps:")
     print("  hermes inkbox doctor")
-    print("  hermes gateway run")
+    if not gateway_live:
+        print("  hermes gateway run")

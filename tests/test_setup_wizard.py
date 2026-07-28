@@ -671,6 +671,158 @@ def test_avatar_offered_and_uploaded_for_existing_agent_without_one(monkeypatch)
     assert uploaded["handle"] == "dev-agent"
 
 
+def test_gateway_restart_offered_when_running(monkeypatch, capsys):
+    ran = []
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (True, True))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
+
+    assert setup_wizard._offer_gateway_restart() is True
+
+    assert ran == ["restart"]
+    assert "Detected a running Hermes gateway" in capsys.readouterr().out
+
+
+def test_gateway_restart_declined_still_reports_live(monkeypatch, capsys):
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (True, True))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_run_gateway_command",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("declined should not run a gateway command")),
+    )
+
+    # A declining operator still has a gateway up, so the closing next-steps
+    # list must not tell them to start one.
+    assert setup_wizard._offer_gateway_restart() is True
+    assert "hermes gateway restart" in capsys.readouterr().out
+
+
+def test_gateway_launch_offered_when_service_installed(monkeypatch, capsys):
+    ran = []
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, True))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
+
+    assert setup_wizard._offer_gateway_restart() is True
+
+    assert ran == ["start"]
+    assert "Did not detect a running Hermes gateway" in capsys.readouterr().out
+
+
+def test_gateway_install_offered_when_no_service_slot(monkeypatch, capsys):
+    ran = []
+    states = iter([(False, False), (True, True)])
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: next(states))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda action: ran.append(action) or True)
+
+    assert setup_wizard._offer_gateway_restart() is True
+
+    assert ran == ["install"]
+    assert "Gateway installed and running" in capsys.readouterr().out
+
+
+def test_gateway_install_that_did_not_start_reports_not_live(monkeypatch, capsys):
+    # `hermes gateway install` asks its own start-now question; a "no" there
+    # leaves the service installed but down.
+    states = iter([(False, False), (False, True)])
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: next(states))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: True)
+
+    assert setup_wizard._offer_gateway_restart() is False
+    assert "hermes gateway start" in capsys.readouterr().out
+
+
+def test_gateway_install_declined_points_at_foreground_run(monkeypatch, capsys):
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        setup_wizard,
+        "_run_gateway_command",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("declined should not run a gateway command")),
+    )
+
+    assert setup_wizard._offer_gateway_restart() is False
+    assert "hermes gateway run" in capsys.readouterr().out
+
+
+def test_gateway_install_failure_falls_back_to_foreground_run(monkeypatch, capsys):
+    # Termux / bare WSL have no service manager and `install` exits non-zero.
+    monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+    monkeypatch.setattr(setup_wizard, "_gateway_runtime_state", lambda: (False, False))
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_wizard, "_run_gateway_command", lambda _action: False)
+
+    assert setup_wizard._offer_gateway_restart() is False
+    assert "hermes gateway run" in capsys.readouterr().out
+
+
+def test_gateway_restart_not_offered_from_inside_the_gateway(monkeypatch, capsys):
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setattr(
+        setup_wizard,
+        "_run_gateway_command",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("self-targeting restart must not run")),
+    )
+
+    assert setup_wizard._offer_gateway_restart() is True
+    assert "inside the gateway process" in capsys.readouterr().out
+
+
+def test_gateway_command_prefers_hermes_on_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda name: "/bin/hermes" if name == "hermes" else None)
+    monkeypatch.setattr(setup_wizard.subprocess, "check_call", lambda cmd, **_kwargs: calls.append(cmd))
+
+    assert setup_wizard._run_gateway_command("restart") is True
+    assert calls == [["/bin/hermes", "gateway", "restart"]]
+
+
+def test_gateway_command_falls_back_to_hermes_cli_module(monkeypatch):
+    calls = []
+    monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(setup_wizard.subprocess, "check_call", lambda cmd, **_kwargs: calls.append(cmd))
+
+    assert setup_wizard._run_gateway_command("start") is True
+    assert calls == [["/tmp/hermes/venv/bin/python", "-m", "hermes_cli.main", "gateway", "start"]]
+
+
+def test_gateway_install_runs_without_a_timeout(monkeypatch):
+    # `install` prompts on this terminal; a clock on it would kill the run
+    # while the operator is still answering.
+    seen = {}
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: "/bin/hermes")
+    monkeypatch.setattr(
+        setup_wizard.subprocess, "check_call", lambda _cmd, **kwargs: seen.update(kwargs)
+    )
+
+    assert setup_wizard._run_gateway_command("install") is True
+    assert seen["timeout"] is None
+
+    assert setup_wizard._run_gateway_command("restart") is True
+    assert seen["timeout"] == setup_wizard.GATEWAY_COMMAND_TIMEOUT
+
+
+def test_gateway_command_failure_is_reported_not_raised(monkeypatch, capsys):
+    def boom(_cmd, **_kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: "/bin/hermes")
+    monkeypatch.setattr(setup_wizard.subprocess, "check_call", boom)
+
+    assert setup_wizard._run_gateway_command("restart") is False
+    assert "no such file" in capsys.readouterr().out
+
+
 def test_avatar_declined_for_existing_agent(monkeypatch):
     monkeypatch.setattr(setup_wizard, "_identity_has_avatar", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_args, **_kwargs: False)
