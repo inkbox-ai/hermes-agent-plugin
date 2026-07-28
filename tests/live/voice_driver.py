@@ -55,6 +55,11 @@ NUDGE = os.environ.get("VOICE_DRIVER_NUDGE", "Take your time.")
 # greeting gives the realtime agent no clean caller turn, so it answers nothing and
 # the call idle-ends before it can act. This timer only covers the no-transcript case.
 SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "3"))
+# Answering-machine detection scores whoever answers, and a greeting longer than
+# the carrier's `greeting_duration_millis` (3.5s) reads as a voicemail
+# announcement -- the call is hung up before the agent ever speaks. Answer the
+# way a person does: one word, immediately, then silence.
+GREETING = os.environ.get("VOICE_DRIVER_GREETING", "Hello?")
 # Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
 # must send an explicit stop or the leg lingers until the server max-duration cap.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
@@ -96,6 +101,10 @@ async def phone_media_ws(ws: WebSocket) -> None:
         log.info("spoke: %s", text)
 
     async def _run_turn() -> None:
+        # Answer out loud first so detection scores a human (see GREETING); this
+        # is short and lands before the agent's greeting, so it does not eat the
+        # caller turn the question needs.
+        await _speak(GREETING)
         # Ask AFTER the agent's greeting so the question lands on a clean caller
         # turn. Asking over the greeting leaves the realtime agent with no turn to
         # answer, so it stalls and the call idle-ends. Fall back to a short timer
