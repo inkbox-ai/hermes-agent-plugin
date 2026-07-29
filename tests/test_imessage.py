@@ -33,9 +33,17 @@ class FakeIMessage:
 
 
 class FakeIdentity:
-    def __init__(self):
+    def __init__(self, *, can_start_imessage_conversations=False):
         self.sent_imessages = []
         self.calls = []
+        self.imessage_number = (
+            types.SimpleNamespace(
+                type="dedicated_outbound",
+                can_start_conversations=True,
+            )
+            if can_start_imessage_conversations
+            else None
+        )
 
     def send_imessage(self, **kwargs):
         self.sent_imessages.append(kwargs)
@@ -112,6 +120,69 @@ def test_send_imessage_tool_prefers_conversation_id(monkeypatch):
     assert identity.sent_imessages == [{"text": "hello", "conversation_id": "imconv-123"}]
 
 
+def test_send_imessage_tool_starts_group_on_dedicated_outbound_line(monkeypatch):
+    identity = FakeIdentity(can_start_imessage_conversations=True)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "to": ["+15555550101", "+15555550102"],
+        "text": "Dinner at 7?",
+    }))
+
+    assert out["ok"] is True
+    assert identity.sent_imessages == [{
+        "text": "Dinner at 7?",
+        "to": ["+15555550101", "+15555550102"],
+    }]
+
+
+def test_send_imessage_tool_keeps_recipient_first_one_to_one_send(monkeypatch):
+    identity = FakeIdentity()
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "to": "+15555550101",
+        "text": "hello",
+    }))
+
+    assert out["ok"] is True
+    assert identity.sent_imessages == [{
+        "text": "hello",
+        "to": "+15555550101",
+    }]
+
+
+def test_send_imessage_tool_rejects_group_without_dedicated_outbound_line(monkeypatch):
+    identity = FakeIdentity()
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_imessage({
+        "to": ["+15555550101", "+15555550102"],
+        "text": "Dinner at 7?",
+    }))
+
+    assert out["error_code"] == "imessage_group_requires_dedicated_outbound"
+    assert identity.sent_imessages == []
+
+
+def test_send_imessage_tool_rejects_duplicate_or_too_many_group_recipients(monkeypatch):
+    identity = FakeIdentity(can_start_imessage_conversations=True)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    duplicate = json.loads(tools.inkbox_send_imessage({
+        "to": ["+15555550101", "+15555550101"],
+        "text": "hello",
+    }))
+    too_many = json.loads(tools.inkbox_send_imessage({
+        "to": [f"+1555555010{index}" for index in range(9)],
+        "text": "hello",
+    }))
+
+    assert duplicate["error"] == "iMessage recipients must be distinct."
+    assert "at most 8 recipients" in too_many["error"]
+    assert identity.sent_imessages == []
+
+
 def test_send_imessage_tool_uploads_local_media_path(monkeypatch, tmp_path):
     identity = FakeIdentity()
     image = tmp_path / "chart.png"
@@ -175,6 +246,8 @@ def test_send_imessage_schema_distinguishes_urls_and_paths():
 
     assert properties["mediaUrls"]["items"]["format"] == "uri"
     assert "mediaPaths" in properties
+    assert properties["to"]["oneOf"][1]["maxItems"] == 8
+    assert properties["to"]["oneOf"][1]["uniqueItems"] is True
 
 
 def test_send_imessage_tool_rejects_text_over_limit(monkeypatch):
@@ -224,7 +297,11 @@ def test_imessage_conversation_tools_use_conversation_id(monkeypatch):
     assert marked["updated_count"] == 2
     assert reacted["ok"] is True
     assert identity.calls == [
-        ("list_imessage_conversations", {"limit": 25, "offset": 0}),
+        ("list_imessage_conversations", {
+            "limit": 25,
+            "offset": 0,
+            "include_groups": True,
+        }),
         ("list_imessages", {"conversation_id": "imconv-123", "limit": 50, "offset": 0}),
         ("mark_imessage_conversation_read", "imconv-123"),
         ("send_imessage_reaction", {"message_id": "im-1", "reaction": "like", "part_index": 0}),
@@ -462,6 +539,88 @@ def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
     assert adapter._last_inbound_modality["contact-123"] == "imessage"
     assert adapter._last_inbound_imessage["contact-123"]["conversation_id"] == "imconv-123"
     assert adapter._last_inbound_imessage["contact-123|imessage:imconv-123"]["remote_number"] == "+15555550101"
+
+
+def test_inbound_group_imessage_injects_silence_policy_without_typing(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _resolve_contact_full(**_kwargs):
+        return {"id": "contact-123", "name": "Alex"}
+
+    events = []
+    typing_conversations = []
+
+    async def _enqueue_sms_text_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = _new_test_adapter()
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue_sms_text_event = _enqueue_sms_text_event
+    adapter._start_imessage_typing = typing_conversations.append
+
+    response = asyncio.run(adapter._on_imessage_received({
+        "event_type": "imessage.received",
+        "data": {
+            "contacts": [
+                {"id": "contact-123", "memories": ["Prefers short replies."]},
+                {"id": "contact-456", "memories": ["Wrong contact memory."]},
+            ],
+            "message": {
+                "id": "im-group-in",
+                "direction": "inbound",
+                "remote_number": None,
+                "sender_number": "+15555550101",
+                "participants": ["+15555550101", "+15555550102"],
+                "is_group": True,
+                "conversation_id": "imconv-group",
+                "content": "Dinner moved to 7.",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert len(events) == 1
+    assert events[0].text.startswith(
+        "[inkbox:group_imessage conversation_id=imconv-group "
+        "from=+15555550101 participants=+15555550101,+15555550102 "
+        "reply_mode=conversation_id"
+    )
+    assert "Group iMessage response policy" in events[0].text
+    assert "return exactly [SILENT]" in events[0].text
+    assert '"Prefers short replies."' in events[0].text
+    assert "Wrong contact memory." not in events[0].text
+    assert events[0].text.index("[inkbox:contact_memories]") < events[0].text.index(
+        "Group iMessage response policy"
+    )
+    assert events[0].text.index("[/inkbox:contact_memories]") < events[0].text.index(
+        "Dinner moved to 7."
+    )
+    assert events[0].source.chat_id == "imessage:imconv-group"
+    assert events[0].source.chat_type == "group"
+    assert events[0].source.user_id == "contact-123"
+    assert events[0].source.thread_id == "imessage:imconv-group"
+    assert events[0].source.chat_name == "Inkbox iMessage group imconv-group"
+    assert (
+        adapter._last_inbound_imessage["imessage:imconv-group"]["conversation_kind"]
+        == "group"
+    )
+    assert (
+        adapter._last_inbound_imessage[
+            "imessage:imconv-group|imessage:imconv-group"
+        ]["conversation_id"]
+        == "imconv-group"
+    )
+    assert typing_conversations == []
 
 
 def test_unknown_inbound_imessage_uses_conversation_session_key(monkeypatch):
@@ -785,6 +944,76 @@ def test_inbound_reaction_enqueues_turn_with_silent_policy(monkeypatch):
     # Reply target is stashed so a follow-up send lands in the right thread.
     assert adapter._last_inbound_imessage["contact-123"]["conversation_id"] == "imconv-123"
     assert adapter._last_inbound_modality["contact-123"] == "imessage"
+
+
+def test_inbound_group_reaction_stays_in_group_without_typing(monkeypatch):
+    identity = FakeIdentity()
+    identity.get_imessage_conversation = lambda conversation_id: (
+        identity.calls.append(("get_imessage_conversation", conversation_id))
+        or types.SimpleNamespace(
+            id=conversation_id,
+            is_group=True,
+            participants=["+15555550101", "+15555550102"],
+        )
+    )
+
+    async def _resolve_contact_full(**_kwargs):
+        return {"id": "contact-123", "name": "Alex"}
+
+    enqueued = []
+    typing_conversations = []
+
+    async def _enqueue(event):
+        enqueued.append(event)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "web",
+        types.SimpleNamespace(Response=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    )
+    adapter = _new_test_adapter()
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+    adapter._seen_request_ids = {}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {}
+    adapter._resolve_contact_full = _resolve_contact_full
+    adapter._enqueue = _enqueue
+    adapter._start_imessage_typing = typing_conversations.append
+
+    response = asyncio.run(adapter._on_imessage_reaction({
+        "event_type": "imessage.reaction_received",
+        "data": {
+            "reaction": {
+                "id": "react-group-1",
+                "direction": "inbound",
+                "remote_number": "+15555550101",
+                "conversation_id": "imconv-group",
+                "target_message_id": "im-target-9",
+                "reaction": "question",
+            },
+        },
+    }))
+
+    assert response.status == 200
+    assert len(enqueued) == 1
+    assert enqueued[0].text.startswith(
+        "[inkbox:group_imessage_reaction from=+15555550101 reaction=question"
+    )
+    assert "participants=+15555550101,+15555550102" in enqueued[0].text
+    assert enqueued[0].source.chat_id == "imessage:imconv-group"
+    assert enqueued[0].source.chat_type == "group"
+    assert enqueued[0].source.user_id == "contact-123"
+    assert (
+        adapter._last_inbound_imessage["imessage:imconv-group"][
+            "conversation_kind"
+        ]
+        == "group"
+    )
+    assert typing_conversations == []
+    assert identity.calls == [
+        ("get_imessage_conversation", "imconv-group"),
+    ]
 
 
 def test_unknown_imessage_reaction_uses_conversation_session_key(monkeypatch):

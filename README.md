@@ -17,7 +17,7 @@
 
 ---
 
-Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS conversations, inbound email/SMS/iMessage/voice, OpenAI Realtime phone calls, post-call actions, SMS and iMessage conversation tools, and package-included skills are implemented.
+Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching, 1:1 and group SMS/iMessage conversations, inbound email/SMS/iMessage/voice, OpenAI Realtime phone calls, post-call actions, conversation tools, and package-included skills are implemented.
 
 ## Prerequisites
 
@@ -182,16 +182,18 @@ Inbound answering is configured once per identity (`auto_accept` → open the ca
 
 ## iMessage
 
-iMessage works differently from SMS: the agent does not get its own iMessage number. People connect to the agent through the Inkbox iMessage router, and each connected person gets a dedicated thread with the agent.
+iMessage supports shared, dedicated inbound, and dedicated outbound lines. Shared and dedicated inbound lines are recipient-first. A dedicated outbound line can initiate 1:1 conversations and groups of 2–8 distinct recipients.
 
 1. Enable iMessage for the agent during `hermes inkbox setup` (or later by rerunning it). Enablement is stored on the Inkbox identity, not in local config.
 2. From an iPhone, text the connect command (for example `connect @my-agent-handle`) to the Inkbox iMessage router number. The wizard prints both, and the agent can also share them via the `inkbox_imessage_triage_number` tool.
-3. Inkbox texts back from the number assigned to that conversation. Send any first message there — the agent can only reply after you message it first (recipient-first; there is no cold outreach over iMessage).
-4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, the gateway routes the thread into the same contact-keyed Hermes session as email/SMS/voice, and the agent replies over iMessage by default to whoever last reached it there.
+3. On shared service, Inkbox texts back from the number assigned to that conversation. Send any first message there. Dedicated inbound lines likewise require the recipient to message first; dedicated outbound lines may initiate conversations.
+4. The setup wizard waits for that first message and replies with a welcome confirming the channel. From then on, a 1:1 thread joins the same contact-keyed Hermes session as email/SMS/voice, while each group gets its own shared conversation session. The agent replies over iMessage by default to the thread that woke it.
 
 If a person disconnects the agent, outbound sends to that conversation fail until they reconnect through the router and message the agent again. Conversation rows expose `assignment_status` (`active`/`released`) so the agent can see this, and `inkbox_list_imessage_assignments` lists who is currently connected. Outbound delivery transitions (`imessage.sent`, `imessage.delivered`) arrive as webhooks and are logged by the gateway without waking the agent; `imessage.delivery_failed` wakes the agent to fix and resend, matching the SMS lifecycle handling — where `text.delivery_unconfirmed` (carrier uncertainty, not a failure) is likewise logged without a wake.
 
 Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. For explicit `inkbox_send_imessage` calls, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
+
+Group iMessage uses the same conversation-first behavior as group SMS. `inkbox_list_imessage_conversations` includes groups by default, `inkbox_get_imessage_conversation` returns their history, and `inkbox_send_imessage` replies with `conversationId`. To start a group, pass 2–8 distinct E.164 recipients in `to`; the plugin verifies that the identity has a dedicated outbound iMessage line first. Inbound group messages share a conversation session, include sender and participant context, and only trigger a visible reply when the agent is addressed or expected to act. Typing indicators and read receipts remain 1:1-only.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -230,7 +232,7 @@ After the gateway starts:
 3. Send the agent an SMS and verify it replies in the same SMS thread.
 4. Add the agent to a group SMS/MMS conversation and verify it stays silent for unrelated chatter, then replies in the same conversation when addressed.
 5. Send the agent an email and verify it replies from its Inkbox mailbox.
-6. If iMessage is enabled, connect via the iMessage router, message the agent, and verify it replies in the same iMessage thread.
+6. If iMessage is enabled, connect via the iMessage router, message the agent, and verify it replies in the same iMessage thread. For a dedicated outbound line, also start a group and verify addressed replies stay in that conversation while unrelated chatter receives no response.
 7. Call the agent phone number and ask for its handle, email, and phone.
 8. Ask during a call for a post-call SMS or email follow-up, then verify it sends after hangup.
 
