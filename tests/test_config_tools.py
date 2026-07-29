@@ -9,6 +9,7 @@ pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin.config import InkboxPluginConfig, read_config, public_call_ws_url
+from inkbox_plugin.adapter import _bool_setting
 from inkbox_plugin.tools import _append_query_param
 
 
@@ -40,3 +41,15 @@ def test_append_query_param_preserves_existing_query():
     out = _append_query_param("wss://agent.example.com/ws?x=1", "context_token", "abc")
 
     assert out == "wss://agent.example.com/ws?x=1&context_token=abc"
+
+
+def test_contact_memories_platform_config_overrides_environment(monkeypatch):
+    monkeypatch.setenv("INKBOX_CONTACT_MEMORIES_ENABLED", "true")
+
+    assert _bool_setting(
+        {"contact_memories_enabled": False},
+        "contact_memories_enabled",
+        "INKBOX_CONTACT_MEMORIES_ENABLED",
+        True,
+    ) is False
+    assert read_config().contact_memories_enabled is True

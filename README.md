@@ -127,9 +127,18 @@ INKBOX_TUNNEL_NAME=my-agent-handle
 INKBOX_HOME_CHANNEL=contact-or-phone
 INKBOX_ALLOWED_USERS=contact-or-phone,another-contact
 INKBOX_REQUIRE_SIGNATURE=true
+INKBOX_CONTACT_MEMORIES_ENABLED=true
 ```
 
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
+
+Verified inbound events include generated memories for the matched sender or caller by default. They are added as background context and are never treated as instructions. Disable them with `INKBOX_CONTACT_MEMORIES_ENABLED=false`, or override the environment setting in Hermes config:
+
+```yaml
+platforms:
+  inkbox:
+    contact_memories_enabled: false
+```
 
 ## Realtime Calls
 
@@ -240,6 +249,7 @@ After the gateway starts:
 | `INKBOX_HOME_CHANNEL` | no | - | Default Inkbox chat/contact id for cron or notification delivery. |
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
+| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
 | `INKBOX_REALTIME_ENABLED` | no | `auto` | Use raw phone media with OpenAI Realtime when credentials exist. Set `false` to force Inkbox STT/TTS. |
 | `INKBOX_REALTIME_API_KEY` | no | - | OpenAI API key used only for realtime calls. `OPENAI_API_KEY` is also accepted. |
 | `OPENAI_API_KEY` | no | - | OpenAI API key used for realtime calls when `INKBOX_REALTIME_API_KEY` is absent. |

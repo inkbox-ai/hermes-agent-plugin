@@ -99,6 +99,7 @@ def _env_enablement() -> dict | None:
             "chat_id": cfg.home_channel,
             "name": os.getenv("INKBOX_HOME_CHANNEL_NAME", "Inkbox Home"),
         }
+    seed["contact_memories_enabled"] = cfg.contact_memories_enabled
     if cfg.realtime_api_key or os.getenv("INKBOX_REALTIME_ENABLED"):
         seed["realtime"] = {
             "enabled": os.getenv("INKBOX_REALTIME_ENABLED", "auto"),
@@ -128,6 +129,8 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "tunnelName": "tunnel_name",
         "require_signature": "require_signature",
         "requireSignature": "require_signature",
+        "contact_memories_enabled": "contact_memories_enabled",
+        "contactMemoriesEnabled": "contact_memories_enabled",
         "sms_text_batch_delay_seconds": "sms_text_batch_delay_seconds",
         "smsTextBatchDelaySeconds": "sms_text_batch_delay_seconds",
     }

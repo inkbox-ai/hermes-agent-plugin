@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.6
+version: 0.2.7
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
@@ -49,6 +49,10 @@ optional_env:
   - name: INKBOX_REALTIME_ENABLED
     description: "Use raw phone media with OpenAI Realtime when credentials exist. Set false to force Inkbox STT/TTS."
     prompt: "Enable Realtime"
+    secret: false
+  - name: INKBOX_CONTACT_MEMORIES_ENABLED
+    description: "Include generated contact memories as background context for inbound conversations. Defaults to true."
+    prompt: "Enable contact memories"
     secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."

@@ -67,6 +67,14 @@ def _manifest_provides_tools() -> set[str]:
     return tools
 
 
+def test_yaml_contact_memories_config_is_forwarded():
+    module = _load_entry_module()
+
+    assert module._apply_yaml_config({}, {"contact_memories_enabled": False}) == {
+        "contact_memories_enabled": False
+    }
+
+
 def test_registers_inkbox_platform_tools_commands_and_skills():
     entry = _load_entry_module()
     ctx = DummyContext()
