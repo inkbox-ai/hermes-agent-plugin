@@ -11,7 +11,7 @@ on:
         description: "Seconds to wait for each A2A transition"
         required: false
         type: string
-        default: "300"
+        default: "90"
       orchestrated:
         description: "True when the full-stack workflow owns the shared live lock"
         required: false
@@ -22,7 +22,7 @@ on:
       timeout_s:
         description: "Seconds to wait for each A2A transition"
         required: false
-        default: "300"
+        default: "90"
 
 permissions:
   contents: read
@@ -125,7 +125,7 @@ jobs:
       - name: Run ${{ matrix.scenario }}
         env:
           A2A_SCENARIO: ${{ matrix.scenario }}
-          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '300' }}
+          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '90' }}
           AUT_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
@@ -133,7 +133,9 @@ jobs:
 
       - name: Dump gateway log on failure
         if: failure()
-        run: tail -n 300 "$GATEWAY_LOG" 2>/dev/null || true
+        run: |
+          tail -n 300 "$GATEWAY_LOG" 2>/dev/null || true
+          cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
 
       - name: Stop gateway
         if: always()

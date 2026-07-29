@@ -233,7 +233,12 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             req = {}
-        response = _model_response(req)
+        try:
+            response = _model_response(req)
+        except Exception as exc:
+            print(f"Mock response failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            self._send_json(500, {"error": {"message": str(exc), "type": "mock_error"}})
+            return
         text = str(response.get("text") or "")
         tool_call = _tool_call(response)
         model = req.get("model", "mock-model")
