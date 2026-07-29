@@ -571,6 +571,10 @@ def test_inbound_group_imessage_injects_silence_policy_without_typing(monkeypatc
     response = asyncio.run(adapter._on_imessage_received({
         "event_type": "imessage.received",
         "data": {
+            "contacts": [
+                {"id": "contact-123", "memories": ["Prefers short replies."]},
+                {"id": "contact-456", "memories": ["Wrong contact memory."]},
+            ],
             "message": {
                 "id": "im-group-in",
                 "direction": "inbound",
@@ -593,6 +597,14 @@ def test_inbound_group_imessage_injects_silence_policy_without_typing(monkeypatc
     )
     assert "Group iMessage response policy" in events[0].text
     assert "return exactly [SILENT]" in events[0].text
+    assert '"Prefers short replies."' in events[0].text
+    assert "Wrong contact memory." not in events[0].text
+    assert events[0].text.index("[inkbox:contact_memories]") < events[0].text.index(
+        "Group iMessage response policy"
+    )
+    assert events[0].text.index("[/inkbox:contact_memories]") < events[0].text.index(
+        "Dinner moved to 7."
+    )
     assert events[0].source.chat_id == "imessage:imconv-group"
     assert events[0].source.chat_type == "group"
     assert events[0].source.user_id == "contact-123"

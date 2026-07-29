@@ -152,6 +152,8 @@ try:
         RealtimeConfig,
         RealtimeBridgeConnectError,
         RealtimeConsultResult,
+        format_contact_memories,
+        normalize_contact_memories,
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -171,6 +173,8 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         RealtimeConfig,
         RealtimeBridgeConnectError,
         RealtimeConsultResult,
+        format_contact_memories,
+        normalize_contact_memories,
         open_inkbox_realtime_bridge,
     )
 
@@ -641,6 +645,65 @@ def _webhook_list(data: Dict[str, Any], *names: str) -> list[Any]:
     return []
 
 
+def _webhook_contacts(envelope: Dict[str, Any]) -> list[Any]:
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+    return _webhook_list(data, "contacts", "contact_list") or _webhook_list(
+        envelope, "contacts", "contact_list"
+    )
+
+
+def _escape_contact_memory_tokens(text: str) -> str:
+    return (
+        text.replace(
+            "[inkbox:contact_memories]",
+            "\\u005binkbox:contact_memories\\u005d",
+        ).replace(
+            "[/inkbox:contact_memories]",
+            "\\u005b/inkbox:contact_memories\\u005d",
+        )
+    )
+
+
+def _matched_webhook_contact(
+    envelope: Dict[str, Any],
+    resolved_contact: Optional[Dict[str, Any]],
+    *,
+    channel: str,
+    sender: str,
+    is_group: bool = False,
+) -> Optional[Any]:
+    contacts = _webhook_contacts(envelope)
+    resolved_id = str((resolved_contact or {}).get("id") or "")
+    if resolved_id:
+        matches = [contact for contact in contacts if str(_field(contact, "id") or "") == resolved_id]
+        if len(matches) == 1:
+            return matches[0]
+
+    if channel == "email":
+        sender_address = _normalize_email_address(sender)
+        matches = [
+            contact
+            for contact in contacts
+            if str(_field(contact, "bucket") or "").lower() == "from"
+            and _normalize_email_address(_field(contact, "address")) == sender_address
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    if not is_group and len(contacts) == 1:
+        return contacts[0]
+    return None
+
+
+def _split_routing_context(text: str) -> tuple[str, str, str]:
+    marker, body = text.split("\n", 1) if "\n" in text else ("[inkbox:sms]", text)
+    opening = "[inkbox:contact_memories]\n"
+    closing = "\n[/inkbox:contact_memories]"
+    if body.startswith(opening) and closing in body:
+        memory_body, body = body.split(closing, 1)
+        return marker, f"{memory_body}{closing}", body.lstrip("\n")
+    return marker, "", body
+
+
 def _conversation_summary_is_group(summary: Any) -> bool:
     return bool(_field(summary, "isGroup", "is_group", "is_group_conversation"))
 
@@ -1097,6 +1160,11 @@ def _int_setting(extra: Dict[str, Any], key: str, env_name: str, default: int) -
     except (TypeError, ValueError):
         value = default
     return max(1, value)
+
+
+def _bool_setting(extra: Dict[str, Any], key: str, env_name: str, default: bool) -> bool:
+    raw = extra[key] if key in extra else os.getenv(env_name)
+    return _realtime_bool(raw, default)
 
 
 def _parse_inkbox_timestamp(value: Any) -> datetime:
@@ -1657,6 +1725,12 @@ class InkboxAdapter(BasePlatformAdapter):
         else:
             raw_external_events = os.getenv("INKBOX_EXTERNAL_EVENTS_ENABLED", "false")
         self._external_events_enabled = str(raw_external_events).lower() in ("true", "1", "yes", "on")
+        self._contact_memories_enabled = _bool_setting(
+            extra,
+            "contact_memories_enabled",
+            "INKBOX_CONTACT_MEMORIES_ENABLED",
+            True,
+        )
 
         # Realtime voice bridge. When an OpenAI API key is present, inbound
         # voice calls are bridged to OpenAI's Realtime API instead of relying
@@ -3693,16 +3767,24 @@ class InkboxAdapter(BasePlatformAdapter):
             # actually threads the reply.
             message_id=rfc_message_id or message.get("id"),
         )
-        body_text = _inbound_mail_body(message) or subject or ""
+        body_text = _escape_contact_memory_tokens(
+            _inbound_mail_body(message) or subject or ""
+        )
         # Modality marker — every inbound is prefixed with one line that
         # tells the agent which modality + which Inkbox Contact (if any)
         # this message belongs to.  PLATFORM_HINTS["inkbox"] explains how
         # the agent should use this and tells it never to echo the line.
         contact_block = self._contact_marker(contact, sender_identity)
-        tagged = (
+        marker = _escape_contact_memory_tokens(
             f"[inkbox:email from={from_address}"
             f"{f' subject={subject!r}' if subject else ''}"
-            f" | {contact_block}]\n{body_text}"
+            f" | {contact_block}]"
+        )
+        memories = self._contact_memories(
+            envelope, contact, channel="email", sender=from_address
+        )
+        tagged = "\n".join(
+            part for part in [marker, format_contact_memories(memories), body_text] if part
         )
         # Built-in default plus any operator-configured email overrides
         # (system prompt and/or extra skills) for this contact.
@@ -4172,6 +4254,7 @@ class InkboxAdapter(BasePlatformAdapter):
         local_phone: Optional[str] = None,
         participants: Optional[list[str]] = None,
         agent_identity: Optional[Dict[str, str]] = None,
+        contact_memories: Optional[list[str]] = None,
     ) -> MessageEvent:
         thread_id = f"sms:{conversation_id}" if conversation_id else None
         chat_name = (
@@ -4190,6 +4273,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=text_id,
         )
         if text is None:
+            body = _escape_contact_memory_tokens(body)
             contact_block = self._contact_marker(contact, agent_identity)
             if is_group:
                 marker_parts = [
@@ -4200,17 +4284,28 @@ class InkboxAdapter(BasePlatformAdapter):
                     "reply_mode=conversation_id",
                     f"| {contact_block}]",
                 ]
-                marker = " ".join(part for part in marker_parts if part)
+                marker = _escape_contact_memory_tokens(
+                    " ".join(part for part in marker_parts if part)
+                )
                 group_policy = "\n".join([
                     "Group SMS response policy: you receive every message in this group so you can track context.",
                     "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
                     "Treat ordinary group chatter as context only.",
                     "If no visible reply is warranted, return exactly [SILENT].",
                 ])
-                text = "\n".join(part for part in [marker, group_policy, body] if part)
+                text = "\n".join(
+                    part
+                    for part in [marker, format_contact_memories(contact_memories), group_policy, body]
+                    if part
+                )
             else:
                 conversation_part = f" conversation_id={conversation_id}" if conversation_id else ""
-                text = f"[inkbox:sms from={remote}{conversation_part} | {contact_block}]\n{body}"
+                marker = _escape_contact_memory_tokens(
+                    f"[inkbox:sms from={remote}{conversation_part} | {contact_block}]"
+                )
+                text = "\n".join(
+                    part for part in [marker, format_contact_memories(contact_memories), body] if part
+                )
         default_skills = (
             "inkbox:inkbox-troubleshooting"
             if message_type == MessageType.TEXT else None
@@ -4253,7 +4348,7 @@ class InkboxAdapter(BasePlatformAdapter):
     async def _enqueue_sms_text_event(self, event: MessageEvent) -> None:
         key = self._sms_text_batch_key(event)
         text = event.text or ""
-        marker, body = text.split("\n", 1) if "\n" in text else ("[inkbox:sms]", text)
+        marker, context_block, body = _split_routing_context(text)
         batch = self._pending_sms_text_batches.get(key)
         if batch is not None:
             next_count = len(batch["fragments"]) + 1
@@ -4268,6 +4363,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if batch is None:
             batch = {
                 "marker": marker,
+                "context_block": context_block,
                 "fragments": [],
                 "raw_messages": [],
             }
@@ -4330,7 +4426,9 @@ class InkboxAdapter(BasePlatformAdapter):
         ]
         if len(fragments) == 1:
             body = fragments[0]["text"]
-            event.text = f"{batch['marker']}\n{body}"
+            event.text = "\n".join(
+                part for part in [batch["marker"], batch["context_block"], body] if part
+            )
         else:
             first_at = fragments[0]["timestamp"]
             last_at = fragments[-1]["timestamp"]
@@ -4375,6 +4473,8 @@ class InkboxAdapter(BasePlatformAdapter):
                     1,
                 )
             lines = [burst_marker]
+            if batch["context_block"]:
+                lines.append(batch["context_block"])
             for fragment in fragments:
                 delta = _format_sms_delta(first_at, fragment["timestamp"])
                 lines.append(f"[{delta}] {fragment['text']}")
@@ -4465,6 +4565,13 @@ class InkboxAdapter(BasePlatformAdapter):
         if media_markers:
             body = "\n".join(part for part in [body, *media_markers] if part)
         timestamp = _parse_inkbox_timestamp(text_msg.get("created_at"))
+        contact_memories = self._contact_memories(
+            envelope,
+            contact,
+            channel="sms",
+            sender=remote,
+            is_group=is_group,
+        )
 
         control_word = _normalized_sms_control_word(raw_body)
         if control_word:
@@ -4508,6 +4615,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 local_phone=local_phone,
                 participants=participants,
                 agent_identity=sender_identity,
+                contact_memories=contact_memories,
             )
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
@@ -4528,6 +4636,7 @@ class InkboxAdapter(BasePlatformAdapter):
             local_phone=local_phone,
             participants=participants,
             agent_identity=sender_identity,
+            contact_memories=contact_memories,
         )
         await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
@@ -4957,6 +5066,7 @@ class InkboxAdapter(BasePlatformAdapter):
         is_group: bool = False,
         participants: Optional[list[str]] = None,
         agent_identity: Optional[Dict[str, str]] = None,
+        contact_memories: Optional[list[str]] = None,
     ) -> MessageEvent:
         thread_id = f"imessage:{conversation_id}" if conversation_id else None
         chat_name = (
@@ -4980,6 +5090,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=message_id,
         )
         if text is None:
+            body = _escape_contact_memory_tokens(body)
             contact_block = self._contact_marker(contact, agent_identity)
             if is_group:
                 marker_parts = [
@@ -4989,19 +5100,37 @@ class InkboxAdapter(BasePlatformAdapter):
                     "reply_mode=conversation_id",
                     f"| {contact_block}]",
                 ]
-                marker = " ".join(part for part in marker_parts if part)
+                marker = _escape_contact_memory_tokens(
+                    " ".join(part for part in marker_parts if part)
+                )
                 group_policy = "\n".join([
                     "Group iMessage response policy: you receive every message in this group so you can track context.",
                     "Reply only when the latest message clearly addresses this Inkbox agent, asks it to act, or a visible answer would be expected from the agent.",
                     "Treat ordinary group chatter as context only.",
                     "If no visible reply is warranted, return exactly [SILENT].",
                 ])
-                text = "\n".join(part for part in [marker, group_policy, body] if part)
+                text = "\n".join(
+                    part
+                    for part in [
+                        marker,
+                        format_contact_memories(contact_memories),
+                        group_policy,
+                        body,
+                    ]
+                    if part
+                )
             else:
                 conversation_part = (
                     f" conversation_id={conversation_id}" if conversation_id else ""
                 )
-                text = f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]\n{body}"
+                marker = _escape_contact_memory_tokens(
+                    f"[inkbox:imessage from={remote}{conversation_part} | {contact_block}]"
+                )
+                text = "\n".join(
+                    part
+                    for part in [marker, format_contact_memories(contact_memories), body]
+                    if part
+                )
         # iMessage always carries the responder playbook alongside the general
         # guide; operator overrides for this channel layer on top.
         default_skills = (
@@ -5093,6 +5222,13 @@ class InkboxAdapter(BasePlatformAdapter):
         if media_markers:
             body = "\n".join(part for part in [body, *media_markers] if part)
         timestamp = _parse_inkbox_timestamp(message.get("created_at"))
+        contact_memories = self._contact_memories(
+            envelope,
+            contact,
+            channel="imessage",
+            sender=remote,
+            is_group=is_group,
+        )
 
         self._last_inbound_modality[str(chat_id)] = "imessage"
         imessage_state = {
@@ -5130,6 +5266,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 is_group=is_group,
                 participants=participants,
                 agent_identity=sender_identity,
+                contact_memories=contact_memories,
             )
             await self._enqueue(event)
             return web.Response(status=200, text="ok")
@@ -5149,6 +5286,7 @@ class InkboxAdapter(BasePlatformAdapter):
             is_group=is_group,
             participants=participants,
             agent_identity=sender_identity,
+            contact_memories=contact_memories,
         )
         # Group iMessage does not support typing indicators.
         if not is_group:
@@ -5431,6 +5569,13 @@ class InkboxAdapter(BasePlatformAdapter):
         if contact_name is None and sender_identity:
             contact_name = sender_identity["name"] or sender_identity["handle"] or None
         contact_block = self._contact_marker(contact, sender_identity)
+        contact_memories = self._contact_memories(
+            envelope,
+            contact,
+            channel="imessage",
+            sender=remote,
+            is_group=is_group,
+        )
 
         # Keep the reply target fresh so a follow-up send() lands in the right
         # iMessage conversation, exactly like an inbound message would.
@@ -5459,12 +5604,13 @@ class InkboxAdapter(BasePlatformAdapter):
         participants_part = (
             f" participants={','.join(participants)}" if participants else ""
         )
-        marker = (
+        marker = _escape_contact_memory_tokens(
             f"[inkbox:{marker_kind} from={remote} reaction={reaction_label}"
             f"{conversation_part}{target_part}{participants_part} | {contact_block}]"
         )
         policy = "\n".join([
-            f"{contact_name or remote} reacted with a '{reaction_label}' tapback to your message.",
+            f"{_escape_contact_memory_tokens(contact_name or remote)} reacted with a "
+            f"'{reaction_label}' tapback to your message.",
             "A reaction is a lightweight signal, not always a request for a reply.",
             "Reply only when the reaction plausibly warrants one — e.g. a 'question' "
             "tapback usually asks for clarification or a follow-up, 'emphasize' may "
@@ -5472,7 +5618,9 @@ class InkboxAdapter(BasePlatformAdapter):
             "acknowledgements that need no response.",
             "If no visible reply is warranted, return exactly [SILENT].",
         ])
-        text = f"{marker}\n{policy}"
+        text = "\n".join(
+            part for part in [marker, format_contact_memories(contact_memories), policy] if part
+        )
 
         source = self.build_source(
             chat_id=str(chat_id),
@@ -5533,11 +5681,15 @@ class InkboxAdapter(BasePlatformAdapter):
         # can pick it up via the ``client_websocket_url`` query string.
         call_id = envelope.get("id")
         if call_id:
+            contact_memories = self._contact_memories(
+                envelope, contact, channel="call", sender=remote
+            )
             self._call_ws_meta[hash(str(call_id))] = {
                 "call_id": str(call_id),
                 "contact_id": str(contact_id or remote),
                 "contact_name": contact_name or remote,
                 "contact": contact,
+                "contact_memories": contact_memories,
                 "remote_phone_number": remote,
             }
 
@@ -5640,6 +5792,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 await self._resolve_contact_full(kind="phone", value=remote)
                 if remote else None
             )
+            contact_memories = self._contact_memories(
+                ctx, contact, channel="call", sender=remote
+            )
             meta = {
                 "call_id": call_id,
                 "contact_id": (contact["id"] if contact else (remote or call_id or "unknown")),
@@ -5647,6 +5802,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     contact["name"] if contact and contact.get("name") else (remote or "unknown")
                 ),
                 "contact": contact,
+                "contact_memories": contact_memories,
                 "remote_phone_number": remote,
                 "direction": direction or "inbound",
             }
@@ -5741,6 +5897,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     contact_phones=list(rt_contact.get("phones") or []),
                     contact_company=rt_contact.get("company") or None,
                     contact_notes=rt_contact.get("notes") or None,
+                    contact_memories=list(meta.get("contact_memories") or []),
                     outbound_purpose=str(call_context.get("purpose") or "").strip() or None,
                     outbound_opening=str(
                         call_context.get("opening_message")
@@ -5937,7 +6094,9 @@ class InkboxAdapter(BasePlatformAdapter):
                         asyncio.create_task(_send_static_greeting())
                     continue
                 if ev == "transcript" and payload.get("is_final"):
-                    text = (payload.get("text") or "").strip()
+                    text = _escape_contact_memory_tokens(
+                        (payload.get("text") or "").strip()
+                    )
                     if not text:
                         continue
                     source = self.build_source(
@@ -5952,10 +6111,18 @@ class InkboxAdapter(BasePlatformAdapter):
                         message_id=payload.get("turn_id"),
                     )
                     contact_block = self._contact_marker(meta.get("contact"))
+                    memories_block = format_contact_memories(
+                        meta.get("contact_memories") or []
+                    )
 
-                    tagged = (
-                        f"[inkbox:voice_call call_id={call_id} | {contact_block}]\n"
-                        f"{text}"
+                    tagged = "\n".join(
+                        part
+                        for part in [
+                            f"[inkbox:voice_call call_id={call_id} | {contact_block}]",
+                            memories_block,
+                            text,
+                        ]
+                        if part
                     )
                     channel_prompt, auto_skill = self._resolve_channel_overrides(
                         "voice", contact_id, "inkbox:inkbox-troubleshooting"
@@ -6060,8 +6227,12 @@ class InkboxAdapter(BasePlatformAdapter):
     def _format_realtime_post_call_actions(actions: List[Dict[str, str]]) -> str:
         lines = []
         for i, action in enumerate(actions, start=1):
-            text = f"{i}. {action.get('action', '')}".strip()
-            details = (action.get("details") or "").strip()
+            text = _escape_contact_memory_tokens(
+                f"{i}. {action.get('action', '')}".strip()
+            )
+            details = _escape_contact_memory_tokens(
+                (action.get("details") or "").strip()
+            )
             if details:
                 text += f"\n   Details: {details}"
             lines.append(text)
@@ -6071,8 +6242,8 @@ class InkboxAdapter(BasePlatformAdapter):
     def _format_realtime_consult_results(results: List[RealtimeConsultResult]) -> str:
         lines = []
         for i, result in enumerate(results, start=1):
-            request = getattr(result, "request", "")
-            answer = getattr(result, "result", "")
+            request = _escape_contact_memory_tokens(getattr(result, "request", ""))
+            answer = _escape_contact_memory_tokens(getattr(result, "result", ""))
             lines.append(f"{i}. Request: {request}\nResult: {answer}")
         return "\n\n".join(lines)
 
@@ -6098,12 +6269,16 @@ class InkboxAdapter(BasePlatformAdapter):
         "let me look that up" interjection — the realtime model says "one
         moment" while it runs (see ``inkbox_realtime._dispatch_tool_call``).
         """
-        prompt_lines = [
+        prompt_lines = [f"[inkbox:voice_call call_id={meta.call_id}]"]
+        memories_block = format_contact_memories(meta.contact_memories)
+        if memories_block:
+            prompt_lines.append(memories_block)
+        prompt_lines.extend([
             "You are answering a question on behalf of an in-progress phone call.",
-            f"Caller: {meta.contact_name}"
+            f"Caller: {_escape_contact_memory_tokens(meta.contact_name)}"
             + (f" ({meta.remote_phone_number})" if meta.remote_phone_number else ""),
             f"Call direction: {meta.direction}",
-        ]
+        ])
         # Trust context: the voice model relays whatever we return straight to
         # the caller, so the disclosure policy has to be enforced here.
         if meta.contact_known:
@@ -6121,7 +6296,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "Recent transcript:",
         ])
         for role, text in transcript[-10:]:
-            prompt_lines.append(f"  {role}: {text}")
+            prompt_lines.append(f"  {role}: {_escape_contact_memory_tokens(text)}")
         post_call_actions = post_call_actions or []
         consult_results = consult_results or []
         if post_call_actions:
@@ -6147,7 +6322,7 @@ class InkboxAdapter(BasePlatformAdapter):
             ])
         prompt_lines.extend([
             "",
-            f"The realtime voice agent asked: {query}",
+            f"The realtime voice agent asked: {_escape_contact_memory_tokens(query)}",
             "",
             "Answer concisely and naturally; your reply will be read aloud to "
             "the caller. Skip preamble; deliver the answer directly.",
@@ -6183,10 +6358,14 @@ class InkboxAdapter(BasePlatformAdapter):
     ) -> None:
         """Enqueue the legacy [call_ended] reflection for realtime calls."""
         transcript_block = "\n".join(
-            f"  - {role}: {text}" for role, text in transcript[-30:]
+            f"  - {role}: {_escape_contact_memory_tokens(text)}"
+            for role, text in transcript[-30:]
         )
-        body_parts = [
-            f"[inkbox:voice_call call_id={meta.call_id}]",
+        body_parts = [f"[inkbox:voice_call call_id={meta.call_id}]"]
+        memories_block = format_contact_memories(meta.contact_memories)
+        if memories_block:
+            body_parts.append(memories_block)
+        body_parts.extend([
             "[call_ended] The realtime voice call has ended. Reflect on what just "
             "happened and decide if any follow-up actions are needed:",
             "  - if you committed to anything during the call (send an email, "
@@ -6195,7 +6374,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "  - if there's nothing to do, reply with exactly [SILENT] and no other text.",
             "Note: any plain-text reply you produce here will be suppressed. "
             "Side effects must come from tool calls.",
-        ]
+        ])
         if transcript_block:
             body_parts.extend(["", "Recent realtime-call transcript:", transcript_block])
         body = "\n".join(body_parts)
@@ -6253,10 +6432,13 @@ class InkboxAdapter(BasePlatformAdapter):
         consult_results = consult_results or []
         consult_block = self._format_realtime_consult_results(consult_results)
         transcript_block = "\n".join(
-            f"{role}: {text}" for role, text in transcript
+            f"{role}: {_escape_contact_memory_tokens(text)}" for role, text in transcript
         )
-        body = "\n".join([
-            f"[inkbox:voice_post_call_actions call_id={meta.call_id}]",
+        body_parts = [f"[inkbox:voice_post_call_actions call_id={meta.call_id}]"]
+        memories_block = format_contact_memories(meta.contact_memories)
+        if memories_block:
+            body_parts.append(memories_block)
+        body_parts.extend([
             "The realtime voice call ended. Review these queued post-call actions "
             "and execute only the actions that are still needed.",
             "These actions were registered during the live call and may be stale. "
@@ -6285,6 +6467,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "Full live-call transcript:" if transcript_block else "",
             transcript_block,
         ])
+        body = "\n".join(body_parts)
         source = self.build_source(
             chat_id=meta.contact_id,
             chat_name=meta.contact_name,
@@ -6327,13 +6510,33 @@ class InkboxAdapter(BasePlatformAdapter):
 
     # ------------------------------------------------------------------
 
+    def _contact_memories(
+        self,
+        envelope: Dict[str, Any],
+        resolved_contact: Optional[Dict[str, Any]],
+        *,
+        channel: str,
+        sender: str,
+        is_group: bool = False,
+    ) -> list[str]:
+        if not getattr(self, "_contact_memories_enabled", True):
+            return []
+        matched = _matched_webhook_contact(
+            envelope,
+            resolved_contact,
+            channel=channel,
+            sender=sender,
+            is_group=is_group,
+        )
+        return normalize_contact_memories(_field(matched, "memories"))
+
     async def _resolve_contact(
         self, *, kind: str, value: str,
     ) -> Tuple[Optional[str], Optional[str]]:
         """Thin wrapper that returns just ``(contact_id, display_name)``.
 
         Kept for the call-sites that only need the chat-routing pair.  New
-        code that wants emails / phones / company / notes should use
+        code that wants the full contact card should use
         :meth:`_resolve_contact_full` instead.
         """
         details = await self._resolve_contact_full(kind=kind, value=value)

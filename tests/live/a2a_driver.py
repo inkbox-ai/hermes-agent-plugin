@@ -180,10 +180,9 @@ def _inbound_multi(a2a: Any, target: Any, timeout: float, run: str) -> None:
     task = _send_task(
         a2a,
         target,
-        "First call inkbox_a2a_ask_caller to request the access code. "
-        "Do not complete or fail the task before the caller responds. "
-        "After the caller replies, call inkbox_a2a_complete and include both "
-        f"the supplied code and `{completion}` in the final answer.",
+        "First request the access code from the caller. After the caller replies, "
+        "complete the task and include both the supplied code and "
+        f"`{completion}` in the final answer.",
     )
     try:
         waiting = _wait_protocol_task(

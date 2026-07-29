@@ -50,6 +50,10 @@ optional_env:
     description: "Use raw phone media with OpenAI Realtime when credentials exist. Set false to force Inkbox STT/TTS."
     prompt: "Enable Realtime"
     secret: false
+  - name: INKBOX_CONTACT_MEMORIES_ENABLED
+    description: "Include generated contact memories as background context for inbound conversations. Defaults to true."
+    prompt: "Enable contact memories"
+    secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."
     prompt: "Realtime model"

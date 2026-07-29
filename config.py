@@ -29,6 +29,7 @@ class InkboxPluginConfig:
     realtime_api_key: str = ""
     realtime_model: str = "gpt-realtime-2"
     realtime_voice: str = "cedar"
+    contact_memories_enabled: bool = True
 
 
 def inkbox_base_url_kwargs(base_url: str | None = None) -> Dict[str, str]:
@@ -80,6 +81,11 @@ def read_config(extra: Dict[str, Any] | None = None) -> InkboxPluginConfig:
         ).strip(),
         realtime_model=str(realtime.get("model") or os.getenv("INKBOX_REALTIME_MODEL") or "gpt-realtime-2").strip(),
         realtime_voice=str(realtime.get("voice") or os.getenv("INKBOX_REALTIME_VOICE") or "cedar").strip(),
+        contact_memories_enabled=(
+            env_flag("INKBOX_CONTACT_MEMORIES_ENABLED", True)
+            if "contact_memories_enabled" not in extra
+            else str(extra["contact_memories_enabled"]).strip().lower() in {"1", "true", "yes", "on"}
+        ),
     )
 
 
