@@ -61,7 +61,13 @@ jobs:
 
       - name: Install Hermes
         run: |
-          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          mkdir -p "$RUNNER_TEMP/hermes-ci-bin"
+          printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/hermes-ci-bin/rg"
+          printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
+          chmod +x "$RUNNER_TEMP/hermes-ci-bin/rg" "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
+          export PATH="$RUNNER_TEMP/hermes-ci-bin:$PATH"
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | \
+            bash -s -- --non-interactive --skip-browser --no-skills
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin and protocol driver
