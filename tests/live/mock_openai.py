@@ -187,7 +187,12 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
 
 def _model_response(req: dict[str, Any]) -> dict[str, Any]:
     scenario = os.environ.get("MOCK_A2A_SCENARIO", "").strip()
-    response = _a2a_response(req, scenario) if scenario else {"text": _reply_text(req)}
+    is_a2a_turn = "[inkbox:a2a_task" in _request_text(req)
+    response = (
+        _a2a_response(req, scenario)
+        if scenario and is_a2a_turn
+        else {"text": _reply_text(req)}
+    )
     if response.get("name"):
         response["id"] = f"call-{len(_tool_names(req)) + 1}-{response['name']}"
     return response

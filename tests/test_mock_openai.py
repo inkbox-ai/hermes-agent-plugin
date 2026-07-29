@@ -54,13 +54,19 @@ def _task_result(task_id: str, state: str) -> dict[str, Any]:
     }
 
 
-def test_inbound_a2a_sequences() -> None:
-    single = _request("Finish with `a2a-ci-inbound-single-012345abcdef`.")
+def test_inbound_a2a_sequences(monkeypatch) -> None:
+    single = _request(
+        "[inkbox:a2a_task caller=@remote] Finish with "
+        "`a2a-ci-inbound-single-012345abcdef`."
+    )
     response = mock._a2a_response(single, "inbound-single")
     assert response == {
         "name": "inkbox_a2a_complete",
         "arguments": {"text": "a2a-ci-inbound-single-012345abcdef"},
     }
+    monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-single")
+    assert mock._model_response(_request("auxiliary request"))["text"].startswith("REPLY_OK")
+    assert mock._model_response(single)["name"] == "inkbox_a2a_complete"
 
     multi = _request("Finish with `a2a-ci-inbound-multi-012345abcdef`.")
     response = mock._a2a_response(multi, "inbound-multi")

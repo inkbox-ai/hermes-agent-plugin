@@ -17,12 +17,21 @@ on:
         required: false
         type: boolean
         default: false
+      scenario:
+        description: "Optional single scenario"
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       timeout_s:
         description: "Seconds to wait for each A2A transition"
         required: false
         default: "90"
+      scenario:
+        description: "Optional single scenario"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -40,11 +49,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        scenario:
-          - inbound-single
-          - inbound-multi
-          - outbound-single
-          - outbound-multi
+        scenario: ${{ fromJSON(inputs.scenario != '' && format('["{0}"]', inputs.scenario) || '["inbound-single","inbound-multi","outbound-single","outbound-multi"]') }}
 
     steps:
       - uses: actions/checkout@v7
