@@ -22,6 +22,14 @@ def _request(text: str) -> dict[str, Any]:
     return {"messages": [{"role": "user", "content": text}]}
 
 
+def _with_a2a_tools(req: dict[str, Any]) -> dict[str, Any]:
+    req["tools"] = [{
+        "type": "function",
+        "function": {"name": "inkbox_a2a_complete", "parameters": {"type": "object"}},
+    }]
+    return req
+
+
 def _record_tool(
     req: dict[str, Any],
     response: dict[str, Any],
@@ -66,7 +74,7 @@ def test_inbound_a2a_sequences(monkeypatch) -> None:
     }
     monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-single")
     assert mock._model_response(_request("auxiliary request"))["text"].startswith("REPLY_OK")
-    assert mock._model_response(single)["name"] == "inkbox_a2a_complete"
+    assert mock._model_response(_with_a2a_tools(single))["name"] == "inkbox_a2a_complete"
 
     multi = _request("Finish with `a2a-ci-inbound-multi-012345abcdef`.")
     response = mock._a2a_response(multi, "inbound-multi")

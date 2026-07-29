@@ -48,6 +48,15 @@ def _tool_names(req: dict[str, Any]) -> list[str]:
     return names
 
 
+def _available_tool_names(req: dict[str, Any]) -> set[str]:
+    names = set()
+    for tool in req.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and function.get("name"):
+            names.add(str(function["name"]))
+    return names
+
+
 def _request_text(req: dict[str, Any]) -> str:
     return json.dumps(req, ensure_ascii=False)
 
@@ -187,7 +196,7 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
 
 def _model_response(req: dict[str, Any]) -> dict[str, Any]:
     scenario = os.environ.get("MOCK_A2A_SCENARIO", "").strip()
-    is_a2a_turn = "[inkbox:a2a_task" in _request_text(req)
+    is_a2a_turn = "inkbox_a2a_complete" in _available_tool_names(req)
     response = (
         _a2a_response(req, scenario)
         if scenario and is_a2a_turn
