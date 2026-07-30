@@ -75,16 +75,24 @@ def _reconcile(client, url, events, previous=None):
     )
 
 
-def test_a2a_and_imessage_share_the_canonical_url():
+def test_identity_event_channels_share_the_canonical_url():
     client, subscriptions = _client()
     base = "https://agent.example/webhook"
 
     _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
     _reconcile(client, base, adapter._DESIRED_IMESSAGE_EVENTS)
+    adapter._reconcile_call_subscription(
+        client,
+        "identity-1",
+        desired_url=base,
+        previous_webhook_url=None,
+        desired_events=adapter._DESIRED_CALL_EVENTS,
+    )
 
     assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
         (base, adapter._DESIRED_A2A_EVENTS),
         (base, adapter._DESIRED_IMESSAGE_EVENTS),
+        (base, adapter._DESIRED_CALL_EVENTS),
     ]
 
 
@@ -138,6 +146,7 @@ def _patchable_adapter(monkeypatch, voice_stack):
     monkeypatch.setattr(adapter, "_read_previous_webhook_url", lambda: None)
     monkeypatch.setattr(adapter, "_reconcile_text_subscription", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(adapter, "_reconcile_imessage_subscription", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(adapter, "_reconcile_call_subscription", lambda *_args, **_kwargs: None)
     return instance, incoming_updates
 
 
@@ -189,16 +198,55 @@ def test_identity_subscribes_to_call_ended_without_imessage(monkeypatch):
     reconciled = []
     monkeypatch.setattr(
         adapter,
-        "_reconcile_imessage_subscription",
+        "_reconcile_call_subscription",
         lambda *_args, **kwargs: reconciled.append(kwargs),
     )
 
     instance._patch_identity_objects()
 
-    base_rows = [
+    call_rows = [
         row for row in reconciled
         if row["desired_url"] == "https://voice-agent.inkboxwire.com/webhook"
         and row["desired_events"] == adapter._DESIRED_CALL_EVENTS
     ]
-    assert len(base_rows) == 1
-    assert base_rows[0]["desired_events"] == ("call.ended",)
+    assert len(call_rows) == 1
+    assert call_rows[0]["desired_events"] == ("call.ended",)
+
+
+def test_imessage_enabled_identity_keeps_call_events_separate(monkeypatch):
+    instance, _incoming_updates = _patchable_adapter(
+        monkeypatch,
+        VoiceStack.INKBOX_VOICE_AI,
+    )
+    instance._inkbox.get_identity("voice-agent").imessage_enabled = True
+    reconciled = []
+    monkeypatch.setattr(
+        adapter,
+        "_reconcile_imessage_subscription",
+        lambda *_args, **kwargs: reconciled.append(("imessage", kwargs)),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_reconcile_call_subscription",
+        lambda *_args, **kwargs: reconciled.append(("call", kwargs)),
+    )
+
+    instance._patch_identity_objects()
+
+    channel_rows = [
+        (channel, row["desired_url"], row["desired_events"])
+        for channel, row in reconciled
+        if row["desired_events"] != adapter._DESIRED_A2A_EVENTS
+    ]
+    assert channel_rows == [
+        (
+            "imessage",
+            "https://voice-agent.inkboxwire.com/webhook",
+            adapter._DESIRED_IMESSAGE_EVENTS,
+        ),
+        (
+            "call",
+            "https://voice-agent.inkboxwire.com/webhook",
+            adapter._DESIRED_CALL_EVENTS,
+        ),
+    ]

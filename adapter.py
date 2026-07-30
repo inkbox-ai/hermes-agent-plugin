@@ -21,12 +21,12 @@ On ``connect()`` the adapter:
   2. Registers webhook subscriptions for the configured identity's
      mailbox (``message.*`` events), phone number (``text.*``
      events), and — when the identity is iMessage-enabled — the
-     identity itself (``imessage.*`` events; shared and dedicated iMessage
-     lines are all owned by the agent identity at the webhook layer) pointing
-     at the tunnel, and
-     patches the phone number's incoming-call webhook URL + WebSocket
-     URL on the resource itself (the call channel is a synchronous
-     control-plane callback and is not a fan-out subscription).
+     identity itself (``imessage.*`` and ``call.*`` events use separate
+     subscriptions because each subscription belongs to one event channel;
+     shared and dedicated iMessage lines are all owned by the agent identity)
+     pointing at the tunnel, and configures the identity's incoming-call
+     routing. Incoming call control remains synchronous, while completed-call
+     lifecycle events arrive through the ``call.*`` subscription.
   3. Starts an aiohttp server with two routes:
         - ``POST /webhook`` — verifies the ``X-Inkbox-Signature`` HMAC
           via the SDK, parses the body into one of three event shapes
@@ -1021,6 +1021,25 @@ def _reconcile_imessage_subscription(
         previous_webhook_url=previous_webhook_url,
         desired_events=desired_events,
     )
+
+
+def _reconcile_call_subscription(
+    client,
+    agent_identity_id,
+    desired_url: str,
+    previous_webhook_url: Optional[str],
+    desired_events: tuple[str, ...] = _DESIRED_CALL_EVENTS,
+):
+    """Reconcile the identity-owned call lifecycle subscription."""
+    return _reconcile_subscription(
+        client,
+        owner_kwarg="agent_identity_id",
+        owner_id=agent_identity_id,
+        desired_url=desired_url,
+        previous_webhook_url=previous_webhook_url,
+        desired_events=desired_events,
+    )
+
 
 SMS_CONTROL_WORDS = frozenset({
     "start",
@@ -2319,19 +2338,22 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
-            identity_events = _DESIRED_CALL_EVENTS
             if getattr(identity, "imessage_enabled", False):
-                identity_events = (
-                    *_DESIRED_IMESSAGE_EVENTS,
-                    *_DESIRED_CALL_EVENTS,
+                _reconcile_imessage_subscription(
+                    self._inkbox,
+                    self._identity_id,
+                    desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url,
+                    desired_events=_DESIRED_IMESSAGE_EVENTS,
                 )
-            _reconcile_imessage_subscription(
-                self._inkbox,
-                self._identity_id,
-                desired_url=webhook_url,
-                previous_webhook_url=previous_webhook_url,
-                desired_events=identity_events,
-            )
+            if can_receive_calls:
+                _reconcile_call_subscription(
+                    self._inkbox,
+                    self._identity_id,
+                    desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url,
+                    desired_events=_DESIRED_CALL_EVENTS,
+                )
             logger.info(
                 "[Inkbox] Patched identity events for %s → %s",
                 self._identity_handle, webhook_url,
