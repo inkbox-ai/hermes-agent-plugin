@@ -2658,10 +2658,19 @@ class InkboxAdapter(BasePlatformAdapter):
         # post-call send_message tool call is exactly the case that bit us
         # (the agent's "reflect on the call" reply leaked out as an email).
         VOICE_GRACE_SECONDS = 60
+        now = time.time()
+        # Garbage-collect all stale entries across chats so the dictionary doesn't grow unbounded.
+        stale_chats = [
+            cid for cid, ts in list(self._voice_recently_closed.items())
+            if (now - ts) > VOICE_GRACE_SECONDS
+        ]
+        for cid in stale_chats:
+            self._voice_recently_closed.pop(cid, None)
+
         closed_at = self._voice_recently_closed.get(str(chat_id))
         if (
             closed_at is not None
-            and (time.time() - closed_at) < VOICE_GRACE_SECONDS
+            and (now - closed_at) < VOICE_GRACE_SECONDS
             and chat_id not in self._active_call_ws
             and not self._last_inbound_modality.get(str(chat_id))
         ):
@@ -2670,9 +2679,6 @@ class InkboxAdapter(BasePlatformAdapter):
                 chat_id, (content or "")[:60].replace("\n", " "),
             )
             return SendResult(success=True, message_id="suppressed-post-call-leak")
-        # Garbage-collect stale entries so the dict doesn't grow unbounded.
-        if closed_at is not None and (time.time() - closed_at) > VOICE_GRACE_SECONDS:
-            self._voice_recently_closed.pop(str(chat_id), None)
 
         # Resolve mode if the gateway didn't pass one explicitly.  Order of
         # preference:
