@@ -91,6 +91,7 @@ jobs:
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "INKBOX_VOICEMAIL_DETECTION=disabled"
           } >> "$HERMES_HOME/.env"
           if [ "${{ matrix.mode }}" = "real" ]; then
             # Real OpenAI: set OPENAI_BASE_URL explicitly so Hermes uses the openai-api

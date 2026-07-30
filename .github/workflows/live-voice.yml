@@ -1,8 +1,10 @@
-name: Live — voice calls (Inkbox TTS/STT + realtime)
+name: Live — voice calls (Inkbox Voice AI + TTS/STT + realtime)
 
 # Boots the agent-under-test (AUT) gateway plus a driver process that bridges the
-# other side of a real phone call over its own Inkbox tunnel. Three matrix legs:
+# other side of a real phone call over its own Inkbox tunnel. Four matrix legs:
 #   inbound_inkbox    — driver calls the agent; agent answers with Inkbox STT/TTS.
+#   outbound_hosted   — driver texts "call me"; Inkbox Voice AI calls back and
+#                       Hermes receives the signed completion event.
 #   outbound_realtime — driver texts "call me"; agent calls back via the realtime API.
 #   outbound_realtime_contact — same call-back, but the driver asks for a seeded
 #                       contact's email; the agent must answer via a direct
@@ -55,7 +57,7 @@ jobs:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → one at a time
       matrix:
-        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_realtime","outbound_realtime_contact"]' || '["outbound_realtime","outbound_realtime_contact"]') }}
+        scenario: ${{ fromJSON(inputs.include_inbound && '["inbound_inkbox","outbound_hosted","outbound_realtime","outbound_realtime_contact"]' || '["outbound_hosted","outbound_realtime","outbound_realtime_contact"]') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -101,6 +103,7 @@ jobs:
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
+            echo "INKBOX_VOICEMAIL_DETECTION=disabled"
             echo "OPENAI_API_KEY=$OPENAI_API_KEY"
             echo "OPENAI_BASE_URL=https://api.openai.com/v1"
           } >> "$HERMES_HOME/.env"
@@ -109,9 +112,14 @@ jobs:
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true
           hermes config set model.default gpt-5.6-terra || true
-          if [ "${{ matrix.scenario }}" = "inbound_inkbox" ]; then
+          if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            echo "INKBOX_VOICE_STACK=inkbox_voice_ai" >> "$HERMES_HOME/.env"
+            echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
+          elif [ "${{ matrix.scenario }}" = "inbound_inkbox" ]; then
+            echo "INKBOX_VOICE_STACK=inkbox_tts_stt" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
           else
+            echo "INKBOX_VOICE_STACK=openai_realtime" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
           fi
 
@@ -133,7 +141,12 @@ jobs:
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          if [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
+          if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
+            HOSTED_MARKER="hosted-post-call-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly: $HOSTED_MARKER. Do not send it during the call."
+            export VOICE_DRIVER_LISTEN=45
+          elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
             export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email

@@ -5,8 +5,10 @@ workflow sets that up and selects the scenario via VOICE_SCENARIO):
 
   * inbound_inkbox   — the driver calls the agent; the agent answers with Inkbox
                        STT/TTS and holds a turn.
-  * outbound_realtime — the driver texts "call me"; the agent places a call back,
-                       powered by the realtime API, and holds a turn.
+  * outbound_hosted  — the driver texts "call me"; Inkbox Voice AI calls back
+                       and Hermes receives the hosted completion event.
+  * outbound_realtime — the driver texts "call me"; the agent places a call
+                       back, powered by the realtime API, and holds a turn.
 
 A companion driver process (voice_driver.py) bridges the driver's side of the call
 over an Inkbox tunnel and speaks one line. We then read the stored call transcript
@@ -46,6 +48,7 @@ AUT_KEY = os.environ.get("HERMES_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
 REAL = os.environ.get("LIVE_REAL_MODEL") == "1"
 SCENARIO = os.environ.get("VOICE_SCENARIO", "")
+HOSTED_POST_CALL_MARKER = os.environ.get("HOSTED_POST_CALL_MARKER", "")
 STATE_FILE = os.environ.get("VOICE_DRIVER_STATE", "/tmp/voice_driver_state.json")
 TIMEOUT_S = float(os.environ.get("LIVE_VOICE_TIMEOUT", "220"))
 POLL_EVERY_S = 6.0
@@ -228,6 +231,142 @@ def test_inbound_call_inkbox_tts_stt():
         assert tts and stt, f"inbound call should run Inkbox STT/TTS, got tts={tts} stt={stt}"
     finally:
         _hangup_call(remote, call.id)
+
+
+@pytest.mark.skipif(SCENARIO != "outbound_hosted", reason="outbound Voice AI leg only")
+def test_outbound_call_inkbox_voice_ai_and_completion():
+    """Voice AI calls back, then Hermes executes one post-call commitment."""
+    st = _driver_state()
+    remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
+    aut_phone = _aut_phone(aut)
+    aut_tail = _digits(aut_phone)[-10:]
+    driver_tail = _digits(st["number"])[-10:]
+
+    def _driver_inbound():
+        return [
+            call for call in remote.calls.list(limit=30)
+            if (getattr(call, "direction", "") or "").lower() == "inbound"
+            and _digits(
+                getattr(call, "remote_phone_number", "") or ""
+            )[-10:] == aut_tail
+        ]
+
+    def _aut_outbound():
+        return [
+            call for call in aut.calls.list(limit=30)
+            if (getattr(call, "direction", "") or "").lower() == "outbound"
+            and _digits(
+                getattr(call, "remote_phone_number", "") or ""
+            )[-10:] == driver_tail
+        ]
+
+    def _driver_inbound_sms():
+        return [
+            message
+            for message in remote.texts.list(st["number_id"], limit=30)
+            if (getattr(message, "direction", "") or "").lower() == "inbound"
+            and _digits(
+                getattr(message, "remote_phone_number", "") or ""
+            )[-10:] == aut_tail
+        ]
+
+    assert HOSTED_POST_CALL_MARKER, (
+        "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
+    )
+    before_driver = {call.id for call in _driver_inbound()}
+    before_aut = {call.id for call in _aut_outbound()}
+    before_postcall_sms = {
+        message.id for message in _driver_inbound_sms()
+    }
+    remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
+
+    driver_call_id = None
+    aut_call = None
+    try:
+        deadline = time.monotonic() + TIMEOUT_S
+        while time.monotonic() < deadline:
+            fresh_driver = [
+                call for call in _driver_inbound()
+                if call.id not in before_driver
+            ]
+            fresh_aut = [
+                call for call in _aut_outbound()
+                if call.id not in before_aut
+            ]
+            if fresh_driver:
+                driver_call_id = fresh_driver[0].id
+            if fresh_aut:
+                aut_call = fresh_aut[0]
+            if driver_call_id and aut_call is not None:
+                break
+            time.sleep(POLL_EVERY_S)
+
+        assert driver_call_id, "Inkbox Voice AI never reached the driver"
+        assert aut_call is not None, "AUT hosted outbound call record was not created"
+        mode = getattr(aut_call, "mode", "")
+        voicemail = getattr(aut_call, "voicemail_detection", "")
+        assert str(getattr(mode, "value", mode)) == "hosted_agent"
+        assert str(getattr(voicemail, "value", voicemail)) == "disabled"
+        assert getattr(aut_call, "reason", None), "hosted call must persist a task reason"
+        assert getattr(
+            aut_call, "hosted_agent_authority_mode", None,
+        ) is not None
+
+        agent_said = _wait_for_two_way_call(
+            remote, st["number_id"], driver_call_id,
+        )
+        assert agent_said, "Inkbox Voice AI produced no speech"
+    finally:
+        _hangup_call(remote, driver_call_id)
+
+    completion_deadline = time.monotonic() + 90
+    enqueue_marker = (
+        f"Enqueued hosted call completion for call_id={aut_call.id}"
+    )
+    completed_marker = (
+        f"Completed hosted call reconciliation for call_id={aut_call.id}"
+    )
+    delivered = []
+    while time.monotonic() < completion_deadline:
+        logs = _gateway_log_text()
+        delivered = [
+            message
+            for message in _driver_inbound_sms()
+            if (
+                message.id not in before_postcall_sms
+                and HOSTED_POST_CALL_MARKER
+                in (getattr(message, "text", "") or "")
+            )
+        ]
+        if completed_marker in logs and delivered:
+            break
+        time.sleep(3)
+    logs = _gateway_log_text()
+    assert enqueue_marker in logs, (
+        "Hermes did not receive the hosted call.ended completion"
+    )
+    assert completed_marker in logs, (
+        "Hermes did not finish the hosted post-call reconciliation"
+    )
+    assert delivered, (
+        "Hermes did not execute the hosted post-call SMS commitment"
+    )
+
+    # Give any accidental model-text delivery time to land, then prove the one
+    # explicit tool side effect is the only post-call SMS.
+    time.sleep(2 * POLL_EVERY_S)
+    new_postcall_sms = [
+        message
+        for message in _driver_inbound_sms()
+        if message.id not in before_postcall_sms
+    ]
+    assert len(new_postcall_sms) == 1, (
+        "Hosted post-call processing leaked plain model text or duplicated "
+        f"the commitment: {[getattr(m, 'text', '') for m in new_postcall_sms]}"
+    )
+    assert HOSTED_POST_CALL_MARKER in (
+        getattr(new_postcall_sms[0], "text", "") or ""
+    )
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the

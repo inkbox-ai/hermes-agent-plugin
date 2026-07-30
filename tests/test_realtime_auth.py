@@ -18,6 +18,7 @@ from inkbox_plugin.realtime import (
 
 
 def _clear_realtime_env(monkeypatch):
+    monkeypatch.delenv("INKBOX_VOICE_STACK", raising=False)
     monkeypatch.delenv("INKBOX_REALTIME_ENABLED", raising=False)
     monkeypatch.delenv("INKBOX_REALTIME_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -45,6 +46,20 @@ def test_realtime_api_key_enables_realtime(monkeypatch):
 
     assert cfg.enabled is True
     assert cfg.api_key == "sk-wins"
+
+
+def test_explicit_voice_stack_controls_realtime_enablement(monkeypatch):
+    _clear_realtime_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-existing")
+    monkeypatch.setenv("INKBOX_VOICE_STACK", "inkbox_tts_stt")
+
+    assert adapter_mod._resolve_realtime_config({}).enabled is False
+
+    monkeypatch.setenv("INKBOX_VOICE_STACK", "inkbox_voice_ai")
+    assert adapter_mod._resolve_realtime_config({}).enabled is False
+
+    monkeypatch.setenv("INKBOX_VOICE_STACK", "openai_realtime")
+    assert adapter_mod._resolve_realtime_config({}).enabled is True
 
 
 def test_realtime_explicit_enable_without_any_credential_stays_off(monkeypatch):

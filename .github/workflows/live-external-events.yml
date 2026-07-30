@@ -95,6 +95,7 @@ jobs:
             echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET"
             # No realtime needed — the driver auto-rejects, so no media leg runs.
             echo "INKBOX_REALTIME_ENABLED=false"
+            echo "INKBOX_VOICEMAIL_DETECTION=disabled"
           } >> "$HERMES_HOME/.env"
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true

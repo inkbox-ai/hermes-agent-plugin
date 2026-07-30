@@ -17,10 +17,24 @@ try:
         mark_a2a_reply_committed,
         read_a2a_turn_context,
     )
-    from .config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
+    from .config import (
+        VoiceStack,
+        inkbox_client_kwargs,
+        object_summary,
+        public_call_ws_url,
+        read_config,
+        read_runtime_config,
+    )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
-    from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
+    from config import (
+        VoiceStack,
+        inkbox_client_kwargs,
+        object_summary,
+        public_call_ws_url,
+        read_config,
+        read_runtime_config,
+    )
 
 SMS_MAX_LENGTH = 1600
 IMESSAGE_MAX_LENGTH = 18995
@@ -1252,10 +1266,63 @@ def _resolve_call_origination(identity, explicit: str) -> str | None:
     return None
 
 
-def inkbox_place_call(args: dict, **kwargs) -> str:
+def _hosted_call_reason(args: dict) -> str:
+    """Build the bounded Voice AI task brief from the public tool fields."""
+    parts = [
+        str(args.get("purpose") or "").strip(),
+        str(args.get("opening_message") or args.get("openingMessage") or "").strip(),
+        str(args.get("context") or "").strip(),
+    ]
+    labels = ("Purpose", "Opening message", "Context")
+    reason = "\n".join(
+        f"{label}: {value}"
+        for label, value in zip(labels, parts)
+        if value
+    )
+    if len(reason) <= 2_000:
+        return reason
+    return reason[:1_999].rstrip() + "…"
+
+
+def inkbox_place_call(
+    args: dict,
+    *,
+    _registered_voice_stack: VoiceStack | None = None,
+    **kwargs,
+) -> str:
     del kwargs
     try:
         cfg, _client, identity = _client_and_identity()
+        runtime_cfg = read_runtime_config()
+        # The API credential/identity come from _client_and_identity; phone
+        # stack controls may also come from Hermes YAML config.
+        cfg.voice_stack = runtime_cfg.voice_stack
+        cfg.voice_stack_invalid_value = runtime_cfg.voice_stack_invalid_value
+        cfg.voicemail_detection = runtime_cfg.voicemail_detection
+        if cfg.voice_stack_invalid_value:
+            return _json({
+                "error": (
+                    f"Invalid INKBOX_VOICE_STACK={cfg.voice_stack_invalid_value!r}. "
+                    "Run `hermes inkbox setup` and restart the gateway."
+                ),
+            })
+        if (
+            _registered_voice_stack is not None
+            and cfg.voice_stack is not _registered_voice_stack
+        ):
+            return _json({
+                "error": (
+                    "The phone call voice stack changed after tools were registered. "
+                    "Restart the Hermes gateway before placing a call."
+                ),
+            })
+        if cfg.voicemail_detection not in {"enabled", "disabled"}:
+            return _json({
+                "error": (
+                    "INKBOX_VOICEMAIL_DETECTION must be `enabled` or `disabled`; "
+                    "run `hermes inkbox setup` after correcting it."
+                ),
+            })
         to_number = str(args.get("to_number") or args.get("toNumber") or "").strip()
         purpose = str(args.get("purpose") or "").strip()
         if not to_number:
@@ -1279,42 +1346,59 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
         if origination is None:
             return _json({"error": "This identity can't place calls: it has no dedicated phone number and iMessage is not enabled. Provision a number or enable iMessage first."})
 
-        ws_url = str(args.get("client_websocket_url") or args.get("clientWebsocketUrl") or "").strip()
-        if not ws_url:
-            ws_url = public_call_ws_url(cfg, identity)
-        if not ws_url:
-            return _json({"error": "No call WebSocket URL available. Run `hermes inkbox setup` and start the gateway, or pass client_websocket_url."})
-
-        token = _write_outbound_call_context({
-            "to_number": to_number,
-            "purpose": purpose,
-            "opening_message": args.get("opening_message") or args.get("openingMessage") or "",
-            "context": args.get("context") or "",
-        })
-        decorated_ws_url = _append_query_param(ws_url, "context_token", token)
+        hosted = cfg.voice_stack is VoiceStack.INKBOX_VOICE_AI
+        token = ""
+        decorated_ws_url = ""
+        if not hosted:
+            ws_url = str(
+                args.get("client_websocket_url")
+                or args.get("clientWebsocketUrl")
+                or ""
+            ).strip()
+            if not ws_url:
+                ws_url = public_call_ws_url(cfg, identity)
+            if not ws_url:
+                return _json({
+                    "error": (
+                        "No call WebSocket URL available. Run `hermes inkbox setup` "
+                        "and start the gateway, or pass client_websocket_url."
+                    ),
+                })
+            token = _write_outbound_call_context({
+                "to_number": to_number,
+                "purpose": purpose,
+                "opening_message": (
+                    args.get("opening_message")
+                    or args.get("openingMessage")
+                    or ""
+                ),
+                "context": args.get("context") or "",
+            })
+            decorated_ws_url = _append_query_param(
+                ws_url, "context_token", token,
+            )
 
         def _place():
             if not hasattr(identity, "place_call"):
-                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.8)")
-            call_kwargs = {
-                "to_number": to_number,
-                "origination": origination,
-                "client_websocket_url": decorated_ws_url,
-            }
-            if voicemail_detection:
-                call_kwargs["voicemail_detection"] = voicemail_detection
-            try:
-                return identity.place_call(**call_kwargs)
-            except TypeError:
-                if voicemail_detection:
-                    raise RuntimeError(
-                        "voicemail_detection requires inkbox SDK 0.5.8 or newer"
-                    )
-                # Older SDK without ``origination`` support → dedicated only.
+                raise RuntimeError(
+                    "Inkbox SDK identity has no place_call method "
+                    "(upgrade inkbox to >=0.5.8)"
+                )
+            if hosted:
                 return identity.place_call(
                     to_number=to_number,
-                    client_websocket_url=decorated_ws_url,
+                    origination=origination,
+                    mode="hosted_agent",
+                    reason=_hosted_call_reason(args),
+                    voicemail_detection=cfg.voicemail_detection,
                 )
+            return identity.place_call(
+                to_number=to_number,
+                origination=origination,
+                client_websocket_url=decorated_ws_url,
+                mode="client_websocket",
+                voicemail_detection=cfg.voicemail_detection,
+            )
 
         try:
             call = _place()
@@ -1328,15 +1412,29 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
             return _json({"error": msg})
 
         rate = object_summary(getattr(call, "rate_limit", None) or getattr(call, "rateLimit", None))
-        return _json({
+        call_record = getattr(call, "call", None) or call
+        result = {
             "ok": True,
-            "call_id": str(getattr(call, "id", "")),
-            "status": object_summary(getattr(call, "status", None)),
+            "call_id": str(getattr(call_record, "id", "")),
+            "status": object_summary(getattr(call_record, "status", None)),
             "to_number": to_number,
             "origination": origination,
-            "context_token": token,
+            "mode": object_summary(
+                getattr(call_record, "mode", None)
+                or ("hosted_agent" if hosted else "client_websocket")
+            ),
+            "hosted_agent_authority_mode": object_summary(
+                getattr(call_record, "hosted_agent_authority_mode", None)
+            ),
+            "voicemail_detection": object_summary(
+                getattr(call_record, "voicemail_detection", None)
+                or cfg.voicemail_detection
+            ),
             "rate_limit": rate,
-        })
+        }
+        if token:
+            result["context_token"] = token
+        return _json(result)
     except Exception as exc:
         return _json({"error": str(exc)})
 
@@ -1692,48 +1790,79 @@ MARK_IMESSAGE_CONVERSATION_READ_SCHEMA = {
     },
 }
 
-PLACE_CALL_SCHEMA = {
-    "name": "inkbox_place_call",
-    "description": (
-        "Place an outbound voice call. Calls can go out over two lines: your "
-        "own dedicated phone number, or the shared Inkbox iMessage line you are "
-        "already messaging the recipient on. Match the channel you're talking on "
-        "— call SMS/phone contacts from your dedicated number, and call an "
-        "iMessage contact over the shared iMessage line (set `origination` "
-        "accordingly). Always include purpose."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "to_number": {"type": "string", "description": "Recipient phone number in E.164 format."},
-            "purpose": {"type": "string", "description": "Why the call is being placed; loaded into the live call before greeting."},
-            "origination": {
-                "type": "string",
-                "enum": ["dedicated_number", "shared_imessage_number"],
-                "description": (
-                    "Which line to call from. Use \"dedicated_number\" to call from your own "
-                    "phone number (the same line SMS/voice conversations use). Use "
-                    "\"shared_imessage_number\" to call someone over the shared iMessage line you "
-                    "are already messaging them on — this only works if they are connected to you "
-                    "over iMessage (otherwise the call is rejected). If omitted, it is resolved "
-                    "automatically when only one path is available."
-                ),
-            },
-            "opening_message": {"type": "string", "description": "Optional first thing to say when the call connects."},
-            "context": {"type": "string", "description": "Optional concise background for the voice agent."},
-            "client_websocket_url": {"type": "string", "description": "Optional explicit call media WebSocket URL."},
-            "voicemail_detection": {
-                "type": "string",
-                "enum": ["enabled", "disabled"],
-                "description": (
-                    "Whether the call should end when voicemail is detected. "
-                    "Omit to keep detection enabled."
-                ),
-            },
+def place_call_schema(voice_stack: VoiceStack | None) -> dict[str, Any]:
+    """Return the call tool contract for the stack active at registration."""
+    hosted = voice_stack is VoiceStack.INKBOX_VOICE_AI
+    unresolved = voice_stack is None
+    properties: dict[str, Any] = {
+        "to_number": {
+            "type": "string",
+            "description": "Recipient phone number in E.164 format.",
         },
-        "required": ["to_number", "purpose"],
-    },
-}
+        "purpose": {
+            "type": "string",
+            "description": (
+                "Why the call is being placed; becomes Inkbox Voice AI's task "
+                "brief." if hosted else
+                "Why the call is being placed; loaded before the live greeting."
+            ),
+        },
+        "origination": {
+            "type": "string",
+            "enum": ["dedicated_number", "shared_imessage_number"],
+            "description": (
+                "Which line to call from. Use \"dedicated_number\" to call from "
+                "your own phone number. Use \"shared_imessage_number\" only for "
+                "a recipient already connected over iMessage. If omitted, Hermes "
+                "chooses from the current channel and available lines."
+            ),
+        },
+        "opening_message": {
+            "type": "string",
+            "description": (
+                "Optional opening guidance included in the Voice AI task brief."
+                if hosted else
+                "Optional first thing to say when the call connects."
+            ),
+        },
+        "context": {
+            "type": "string",
+            "description": (
+                "Optional concise background included in the Voice AI task brief."
+                if hosted else
+                "Optional concise background for the local voice agent."
+            ),
+        },
+    }
+    if not hosted and not unresolved:
+        properties["client_websocket_url"] = {
+            "type": "string",
+            "description": "Optional explicit call media WebSocket URL.",
+        }
+    return {
+        "name": "inkbox_place_call",
+        "description": (
+            "Ask Inkbox Voice AI to place an outbound call and complete the "
+            "stated task. Hermes is notified after the call ends."
+            if hosted
+            else (
+                "Place an outbound call through the configured phone call "
+                "voice stack."
+                if unresolved
+                else
+                "Place an outbound voice call handled by this Hermes agent "
+                "through the configured local voice stack."
+            )
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": ["to_number", "purpose"],
+        },
+    }
+
+
+PLACE_CALL_SCHEMA = place_call_schema(VoiceStack.INKBOX_TTS_STT)
 
 A2A_COMPLETE_SCHEMA = {
     "name": "inkbox_a2a_complete",
@@ -2066,7 +2195,26 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_get_imessage_conversation", "inkbox", GET_IMESSAGE_CONVERSATION_SCHEMA, inkbox_get_imessage_conversation, check_fn=_configured)
     ctx.register_tool("inkbox_send_imessage_reaction", "inkbox", SEND_IMESSAGE_REACTION_SCHEMA, inkbox_send_imessage_reaction, check_fn=_configured)
     ctx.register_tool("inkbox_mark_imessage_conversation_read", "inkbox", MARK_IMESSAGE_CONVERSATION_READ_SCHEMA, inkbox_mark_imessage_conversation_read, check_fn=_configured)
-    ctx.register_tool("inkbox_place_call", "inkbox", PLACE_CALL_SCHEMA, inkbox_place_call, check_fn=_configured)
+    registered_voice_stack = (
+        read_config().voice_stack
+        if os.getenv("INKBOX_VOICE_STACK", "").strip()
+        else None
+    )
+
+    def _place_call(args: dict, **kwargs) -> str:
+        return inkbox_place_call(
+            args,
+            _registered_voice_stack=registered_voice_stack,
+            **kwargs,
+        )
+
+    ctx.register_tool(
+        "inkbox_place_call",
+        "inkbox",
+        place_call_schema(registered_voice_stack),
+        _place_call,
+        check_fn=_configured,
+    )
     ctx.register_tool("inkbox_a2a_call", "inkbox", A2A_CALL_SCHEMA, inkbox_a2a_call, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_check", "inkbox", A2A_CHECK_SCHEMA, inkbox_a2a_check, check_fn=_configured)
     ctx.register_tool("inkbox_a2a_reply", "inkbox", A2A_REPLY_SCHEMA, inkbox_a2a_reply, check_fn=_configured)

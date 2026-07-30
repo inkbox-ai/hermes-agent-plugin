@@ -11,12 +11,17 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
 ## Hermes tool availability
 
 - Hermes exposes `inkbox_place_call` for outbound calls.
-- Hermes Realtime calls provide live transcript and post-call context to the agent during call wrap-up.
+- OpenAI Realtime and Inkbox Voice AI calls provide transcript and post-call
+  context to Hermes during call wrap-up.
 - Hermes does not register historical call-read tools such as `inkbox_list_calls` or `inkbox_list_call_transcripts`.
 
 ## Workflow
 
-1. **Current call wrap-up.** If the current Realtime call just ended and transcript/context is present in the turn, use that supplied context. Do not claim to have fetched historical call data.
+1. **Current call wrap-up.** If the current call just ended and transcript,
+   outcome, reason, or open action context is present in the turn, use that
+   supplied context. Reconcile actions against the transcript before executing
+   them, and do not duplicate completed, canceled, or superseded work. Do not
+   claim to have fetched unrelated historical call data.
 2. **Past call requests.** If the user asks to inspect old calls, missed calls, or transcripts, explain that this Hermes installation does not expose historical call-read tools.
 3. **Prepare follow-ups from supplied context.** If the user gives the transcript or call summary in the conversation, use that text and the available Inkbox send tools for follow-up.
 4. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.
