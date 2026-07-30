@@ -16,6 +16,38 @@ def test_avatar_base_url_defaults_to_public_api():
     assert setup_wizard._avatar_base_url("https://proxy.example/") == "https://proxy.example"
 
 
+def test_choice_prompt_uses_hermes_radio_picker(monkeypatch):
+    calls = []
+
+    def fake_radiolist(title, choices, **kwargs):
+        calls.append((title, choices, kwargs))
+        return 2
+
+    fake_curses_ui = types.ModuleType("hermes_cli.curses_ui")
+    fake_curses_ui.curses_radiolist = fake_radiolist
+    monkeypatch.setitem(sys.modules, "hermes_cli.curses_ui", fake_curses_ui)
+
+    selected = setup_wizard.prompt_choice(
+        "Choose a voice stack",
+        ["Voice AI", "Realtime", "TTS/STT"],
+        1,
+        description="Use the arrow keys.",
+    )
+
+    assert selected == 2
+    assert calls == [
+        (
+            "Choose a voice stack",
+            ["Voice AI", "Realtime", "TTS/STT"],
+            {
+                "selected": 1,
+                "cancel_returns": 1,
+                "description": "Use the arrow keys.",
+            },
+        )
+    ]
+
+
 def test_install_command_prefers_uv_when_available(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)

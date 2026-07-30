@@ -274,7 +274,7 @@ docker run --detach \
   --name hermes-inkbox-dev \
   --volume hermes-inkbox-dev-data:/opt/data \
   hermes-inkbox-dev
-docker exec --interactive --tty hermes-inkbox-dev bash
+docker exec --interactive --tty --user hermes hermes-inkbox-dev bash
 ```
 
 Then, inside the container:

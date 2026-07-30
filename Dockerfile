@@ -26,7 +26,8 @@ RUN git -C /opt/inkbox-plugin-src init --initial-branch=main && \
     git -C /opt/inkbox-plugin-src config user.name "Inkbox Plugin Build" && \
     git -C /opt/inkbox-plugin-src config user.email "build@localhost" && \
     git -C /opt/inkbox-plugin-src add --all && \
-    git -C /opt/inkbox-plugin-src commit --message "Stage plugin source"
+    git -C /opt/inkbox-plugin-src commit --message "Stage plugin source" && \
+    chown -R hermes:hermes /opt/inkbox-plugin-src
 
 ENV INKBOX_PLUGIN_SOURCE="/opt/inkbox-plugin-src"
 

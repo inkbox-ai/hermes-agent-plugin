@@ -183,6 +183,22 @@ def prompt_choice(
     *,
     description: str | None = None,
 ) -> int:
+    try:
+        from hermes_cli.curses_ui import curses_radiolist
+    except Exception:
+        curses_radiolist = None
+
+    if curses_radiolist is not None:
+        selected = curses_radiolist(
+            question,
+            choices,
+            selected=default,
+            cancel_returns=default,
+            description=description,
+        )
+        print()
+        return selected
+
     print(color(question, Colors.YELLOW))
     if description:
         for line in description.splitlines():
