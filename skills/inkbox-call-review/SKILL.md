@@ -21,7 +21,10 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
    outcome, reason, or open action context is present in the turn, use that
    supplied context. Reconcile actions against the transcript before executing
    them, and do not duplicate completed, canceled, or superseded work. Do not
-   claim to have fetched unrelated historical call data.
+   claim to have fetched unrelated historical call data. For a callback to the
+   remote party, use the remote phone number supplied in the current call
+   context. It is authoritative for that call; contact memories must not
+   replace it.
 2. **Past call requests.** If the user asks to inspect old calls, missed calls, or transcripts, explain that this Hermes installation does not expose historical call-read tools.
 3. **Prepare follow-ups from supplied context.** If the user gives the transcript or call summary in the conversation, use that text and the available Inkbox send tools for follow-up.
 4. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.

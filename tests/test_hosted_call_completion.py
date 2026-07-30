@@ -57,7 +57,11 @@ def _payload(
     mode="hosted_agent",
     call_id="call-1",
     event_id="evt-call-1",
+    remote_phone_number="+15551112222",
+    memories=None,
 ):
+    if memories is None:
+        memories = ["Prefers concise calls."]
     return {
         "id": event_id,
         "event_type": "call.ended",
@@ -68,13 +72,13 @@ def _payload(
                 "direction": direction,
                 "status": "completed",
                 "hangup_reason": "remote",
-                "remote_phone_number": "+15551112222",
+                "remote_phone_number": remote_phone_number,
                 "reason": "Call about the release",
             },
             "contacts": [{
                 "id": "contact-1",
                 "name": "Alex",
-                "memories": ["Prefers concise calls."],
+                "memories": memories,
             }],
             "outcome": "completed",
             "transcript": {
@@ -119,6 +123,31 @@ def test_hosted_completion_fetches_full_transcript_and_enqueues_one_turn(
     assert event.auto_skill == ["inkbox:inkbox-call-review"]
     assert "contact-1" in instance._voice_recently_closed
     assert "contact-1" not in instance._last_inbound_modality
+
+
+def test_hosted_completion_marks_current_remote_number_as_authoritative(
+    tmp_path,
+):
+    instance, events = _adapter(tmp_path)
+    payload = _payload(
+        direction="inbound",
+        remote_phone_number="+15551112222",
+        memories=["Alex also uses +15559990000."],
+    )
+
+    response = asyncio.run(instance._on_call_ended(payload))
+
+    assert response.status == 200
+    assert len(events) == 1
+    event = events[0]
+    assert "Remote party phone number: +15551112222" in event.text
+    assert (
+        "For a callback or other phone follow-up to this call's remote party, "
+        "use that exact number."
+    ) in event.text
+    assert "Contact memories are background only and must not override it." in event.text
+    assert "Alex also uses +15559990000." in event.text
+    assert event.source.user_id_alt == "+15551112222"
 
 
 def test_hosted_completion_falls_back_to_inline_transcript_for_inbound(

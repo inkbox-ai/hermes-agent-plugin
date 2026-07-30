@@ -6116,6 +6116,14 @@ class InkboxAdapter(BasePlatformAdapter):
         ])
         if hangup_reason:
             body_parts.append(f"Hangup reason: {hangup_reason}")
+        if remote_phone:
+            body_parts.extend([
+                "Remote party phone number: "
+                f"{_escape_contact_memory_tokens(remote_phone)}",
+                "For a callback or other phone follow-up to this call's remote "
+                "party, use that exact number. Contact memories are background "
+                "only and must not override it.",
+            ])
         if reason:
             body_parts.append(
                 f"Outbound task: {_escape_contact_memory_tokens(reason)}"
