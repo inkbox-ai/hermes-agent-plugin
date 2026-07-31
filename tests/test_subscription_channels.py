@@ -20,7 +20,18 @@ class _Subscriptions:
         return list(self.rows)
 
     def create(self, **kwargs):
-        assert all(row.url != kwargs["url"] for row in self.rows)
+        desired_families = {
+            event_type.split(".", 1)[0] for event_type in kwargs["event_types"]
+        }
+        assert all(
+            row.url != kwargs["url"]
+            or not desired_families
+            & {
+                event_type.split(".", 1)[0]
+                for event_type in row.event_types
+            }
+            for row in self.rows
+        )
         row = SimpleNamespace(
             id=f"sub-{len(self.rows) + 1}",
             url=kwargs["url"],
@@ -29,9 +40,11 @@ class _Subscriptions:
         self.rows.append(row)
         return row
 
-    def update(self, sub_id, **kwargs):
+    def update(self, sub_id, *, event_types, url=None):
         row = next(row for row in self.rows if row.id == sub_id)
-        row.event_types = list(kwargs["event_types"])
+        if url is not None:
+            row.url = url
+        row.event_types = list(event_types)
         return row
 
     def delete(self, sub_id):
@@ -59,34 +72,37 @@ def _reconcile(client, url, events, previous=None):
     )
 
 
-def test_a2a_and_imessage_use_separate_owner_urls():
+def test_a2a_and_imessage_share_the_canonical_url():
     client, subscriptions = _client()
     base = "https://agent.example/webhook"
 
-    _reconcile(client, f"{base}?channel=a2a", adapter._DESIRED_A2A_EVENTS)
+    _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
     _reconcile(client, base, adapter._DESIRED_IMESSAGE_EVENTS)
 
     assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
-        (f"{base}?channel=a2a", adapter._DESIRED_A2A_EVENTS),
+        (base, adapter._DESIRED_A2A_EVENTS),
         (base, adapter._DESIRED_IMESSAGE_EVENTS),
     ]
 
 
-def test_a2a_migration_preserves_imessage_subscription_at_base_url():
+def test_reconcile_keeps_one_row_per_channel_and_receiver():
     base = "https://agent.example/webhook"
+    extra_a2a = SimpleNamespace(
+        id="sub-a2a-extra",
+        url=f"{base}?unused=true",
+        event_types=list(adapter._DESIRED_A2A_EVENTS),
+    )
     imessage = SimpleNamespace(
         id="sub-imessage",
         url=base,
         event_types=list(adapter._DESIRED_IMESSAGE_EVENTS),
     )
-    client, subscriptions = _client([imessage])
+    client, subscriptions = _client([extra_a2a, imessage])
 
-    _reconcile(
-        client,
-        f"{base}?channel=a2a",
-        adapter._DESIRED_A2A_EVENTS,
-        previous=base,
-    )
+    _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
 
-    assert "sub-imessage" not in subscriptions.deleted
-    assert any(row.id == "sub-imessage" for row in subscriptions.rows)
+    assert subscriptions.deleted == []
+    assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
+        (base, adapter._DESIRED_A2A_EVENTS),
+        (base, adapter._DESIRED_IMESSAGE_EVENTS),
+    ]

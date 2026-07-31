@@ -48,6 +48,28 @@ def _tool_names(req: dict[str, Any]) -> list[str]:
     return names
 
 
+def _effective_tool_names(req: dict[str, Any]) -> list[str]:
+    names = []
+    for message in _messages(req):
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "")
+            if name != "tool_call":
+                if name:
+                    names.append(name)
+                continue
+            try:
+                arguments = json.loads(str(function.get("arguments") or "{}"))
+            except ValueError:
+                arguments = {}
+            underlying = str(arguments.get("name") or "")
+            if underlying:
+                names.append(underlying)
+    return names
+
+
 def _available_tool_names(req: dict[str, Any]) -> set[str]:
     names = set()
     for tool in req.get("tools") or []:
@@ -110,7 +132,7 @@ def _a2a_token(tokens: list[str], fragment: str) -> str:
 
 
 def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
-    names = _tool_names(req)
+    names = _effective_tool_names(req)
     tokens = _A2A_TOKEN.findall(_request_text(req))
 
     if scenario == "inbound-single":
@@ -196,14 +218,59 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
 
 def _model_response(req: dict[str, Any]) -> dict[str, Any]:
     scenario = os.environ.get("MOCK_A2A_SCENARIO", "").strip()
-    is_a2a_turn = "inkbox_a2a_complete" in _available_tool_names(req)
+    available = _available_tool_names(req)
+    is_a2a_turn = (
+        "inkbox_a2a_complete" in available
+        or "tool_call" in available
+    )
     response = (
         _a2a_response(req, scenario)
         if scenario and is_a2a_turn
         else {"text": _reply_text(req)}
     )
+    if (
+        response.get("name", "").startswith("inkbox_")
+        and response["name"] not in available
+        and "tool_call" in available
+    ):
+        response = {
+            "name": "tool_call",
+            "arguments": {
+                "name": response["name"],
+                "arguments": response.get("arguments") or {},
+            },
+        }
     if response.get("name"):
         response["id"] = f"call-{len(_tool_names(req)) + 1}-{response['name']}"
+    if scenario:
+        tool_result = "none"
+        for message in reversed(_messages(req)):
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            try:
+                payload = json.loads(content) if isinstance(content, str) else content
+            except ValueError:
+                payload = None
+            tool_result = (
+                "error"
+                if isinstance(payload, dict) and payload.get("error")
+                else "ok"
+            )
+            break
+        print(
+            json.dumps({
+                "scenario": scenario,
+                "prior_tools": _effective_tool_names(req),
+                "last_tool_result": tool_result,
+                "response": (
+                    response.get("arguments", {}).get("name")
+                    if response.get("name") == "tool_call"
+                    else response.get("name") or "text"
+                ),
+            }),
+            flush=True,
+        )
     return response
 
 

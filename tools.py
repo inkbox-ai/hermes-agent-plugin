@@ -1262,6 +1262,15 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
             return _json({"error": "`to_number` is required"})
         if not purpose:
             return _json({"error": "`purpose` is required so the live call starts with the right context"})
+        voicemail_detection = str(
+            args.get("voicemail_detection")
+            or args.get("voicemailDetection")
+            or ""
+        ).strip().lower()
+        if voicemail_detection not in {"", "enabled", "disabled"}:
+            return _json({
+                "error": "`voicemail_detection` must be enabled or disabled"
+            })
 
         # Resolve the outbound line (dedicated number vs shared iMessage line).
         origination = _resolve_call_origination(
@@ -1286,14 +1295,21 @@ def inkbox_place_call(args: dict, **kwargs) -> str:
 
         def _place():
             if not hasattr(identity, "place_call"):
-                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.6)")
+                raise RuntimeError("Inkbox SDK identity has no place_call method (upgrade inkbox to >=0.5.8)")
+            call_kwargs = {
+                "to_number": to_number,
+                "origination": origination,
+                "client_websocket_url": decorated_ws_url,
+            }
+            if voicemail_detection:
+                call_kwargs["voicemail_detection"] = voicemail_detection
             try:
-                return identity.place_call(
-                    to_number=to_number,
-                    origination=origination,
-                    client_websocket_url=decorated_ws_url,
-                )
+                return identity.place_call(**call_kwargs)
             except TypeError:
+                if voicemail_detection:
+                    raise RuntimeError(
+                        "voicemail_detection requires inkbox SDK 0.5.8 or newer"
+                    )
                 # Older SDK without ``origination`` support → dedicated only.
                 return identity.place_call(
                     to_number=to_number,
@@ -1706,6 +1722,14 @@ PLACE_CALL_SCHEMA = {
             "opening_message": {"type": "string", "description": "Optional first thing to say when the call connects."},
             "context": {"type": "string", "description": "Optional concise background for the voice agent."},
             "client_websocket_url": {"type": "string", "description": "Optional explicit call media WebSocket URL."},
+            "voicemail_detection": {
+                "type": "string",
+                "enum": ["enabled", "disabled"],
+                "description": (
+                    "Whether the call should end when voicemail is detected. "
+                    "Omit to keep detection enabled."
+                ),
+            },
         },
         "required": ["to_number", "purpose"],
     },

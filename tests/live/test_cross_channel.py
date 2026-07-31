@@ -191,7 +191,10 @@ def test_email_request_gets_call(xc):
     before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
-        body_text="Please place a phone call to my number now — I'd rather talk than type.",
+        body_text=(
+            "Please place a phone call to my number now with "
+            "voicemail_detection disabled — I'd rather talk than type."
+        ),
     )
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
 
@@ -203,5 +206,12 @@ def test_sms_request_gets_call(xc):
     # Fresh body each send: the agent replies by calling, not texting, so this
     # SMS never gets an SMS reply to reset the conversation cadence — two
     # identical no-reply sends would trip the duplicate_body rule (422).
-    remote.texts.send(remote_pid, to=aut_phone, text=f"Call me please — give me a ring now. (ref {_token()})")
+    remote.texts.send(
+        remote_pid,
+        to=aut_phone,
+        text=(
+            "Call me please with voicemail_detection disabled — "
+            f"give me a ring now. (ref {_token()})"
+        ),
+    )
     _wait_for_new_call(remote, remote_pid, aut_phone, before)
