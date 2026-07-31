@@ -212,6 +212,24 @@ def test_running_hosted_completion_recovers_after_adapter_restart(tmp_path):
     assert len(restarted_events) == 1
 
 
+def test_recovery_waits_when_authoritative_transcript_fetch_fails(tmp_path):
+    first, first_events = _adapter(tmp_path)
+    asyncio.run(first._on_call_ended(_payload()))
+    asyncio.run(first.on_processing_start(first_events[0]))
+
+    unsettled, unsettled_events = _adapter(
+        tmp_path,
+        transcript_error=RuntimeError("transcript endpoint not settled"),
+    )
+    asyncio.run(unsettled._catch_up_hosted_call_completions())
+    assert unsettled_events == []
+    assert unsettled._read_hosted_call_registry()["call-1"]["state"] == "running"
+
+    settled, settled_events = _adapter(tmp_path)
+    asyncio.run(settled._catch_up_hosted_call_completions())
+    assert len(settled_events) == 1
+
+
 def test_completed_hosted_completion_stays_duplicate_after_restart(tmp_path):
     first, first_events = _adapter(tmp_path)
     asyncio.run(first._on_call_ended(_payload()))

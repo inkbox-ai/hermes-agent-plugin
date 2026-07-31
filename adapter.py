@@ -6178,6 +6178,7 @@ class InkboxAdapter(BasePlatformAdapter):
         )
 
         transcript: list[tuple[str, str]] = []
+        transcript_fetch_failed = False
         try:
             identity = self._inkbox.get_identity(self._identity_handle)
             list_transcripts = getattr(identity, "list_transcripts", None)
@@ -6199,6 +6200,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     if str(getattr(row, "text", "") or "").strip()
                 ]
         except Exception as exc:
+            transcript_fetch_failed = True
             logger.warning(
                 "[Inkbox] Could not fetch full transcript for hosted call %s: %s",
                 call_id,
@@ -6222,6 +6224,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 and "marker" not in entry
                 and str(entry.get("text") or "").strip()
             ]
+            if transcript_fetch_failed and not isinstance(inline, dict):
+                raise RuntimeError(
+                    "authoritative transcript unavailable for recovered hosted call"
+                )
 
         actions = [
             action
