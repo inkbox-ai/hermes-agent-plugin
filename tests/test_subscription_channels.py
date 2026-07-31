@@ -81,3 +81,26 @@ def test_a2a_and_imessage_share_the_canonical_url():
         (base, adapter._DESIRED_A2A_EVENTS),
         (base, adapter._DESIRED_IMESSAGE_EVENTS),
     ]
+
+
+def test_reconcile_keeps_one_row_per_channel_and_receiver():
+    base = "https://agent.example/webhook"
+    extra_a2a = SimpleNamespace(
+        id="sub-a2a-extra",
+        url=f"{base}?unused=true",
+        event_types=list(adapter._DESIRED_A2A_EVENTS),
+    )
+    imessage = SimpleNamespace(
+        id="sub-imessage",
+        url=base,
+        event_types=list(adapter._DESIRED_IMESSAGE_EVENTS),
+    )
+    client, subscriptions = _client([extra_a2a, imessage])
+
+    _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
+
+    assert subscriptions.deleted == ["sub-a2a-extra"]
+    assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
+        (base, adapter._DESIRED_IMESSAGE_EVENTS),
+        (base, adapter._DESIRED_A2A_EVENTS),
+    ]

@@ -789,6 +789,12 @@ def _reconcile_subscription(
     desired_families = {
         event_type.split(".", 1)[0] for event_type in desired_events
     }
+    desired_endpoint = urlparse(desired_url)
+    desired_route = (
+        desired_endpoint.scheme,
+        desired_endpoint.netloc,
+        desired_endpoint.path.rstrip("/"),
+    )
     list_kwargs = {owner_kwarg: owner_id}
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
@@ -827,27 +833,36 @@ def _reconcile_subscription(
                 desired_events=desired_events,
             )
 
-    # Previous-URL cleanup runs after the new row is in place so a failure
-    # mid-reconcile can never leave the owner with zero receivers.
-    if previous_webhook_url and previous_webhook_url != desired_url:
-        # Re-list rather than reusing ``existing`` because a create/update
-        # may have shifted the visible rows.
-        for row in client.webhooks.subscriptions.list(**list_kwargs):
-            row_families = {
-                event_type.split(".", 1)[0] for event_type in row.event_types
-            }
-            if (
-                row.id != active_id
-                and row.url == previous_webhook_url
-                and desired_families & row_families
-            ):
-                try:
-                    client.webhooks.subscriptions.delete(row.id)
-                except InkboxAPIError as exc:
-                    if exc.status_code == 404:
-                        pass  # already gone; fine
-                    else:
-                        raise
+    # Cleanup runs after the active row is in place so a failure mid-reconcile
+    # can never leave the owner with zero receivers.
+    for row in client.webhooks.subscriptions.list(**list_kwargs):
+        if row.id == active_id:
+            continue
+        row_families = {
+            event_type.split(".", 1)[0] for event_type in row.event_types
+        }
+        row_endpoint = urlparse(row.url)
+        row_route = (
+            row_endpoint.scheme,
+            row_endpoint.netloc,
+            row_endpoint.path.rstrip("/"),
+        )
+        same_receiver = row_route == desired_route
+        previous_receiver = (
+            previous_webhook_url
+            and previous_webhook_url != desired_url
+            and row.url == previous_webhook_url
+        )
+        if desired_families & row_families and (
+            same_receiver or previous_receiver
+        ):
+            try:
+                client.webhooks.subscriptions.delete(row.id)
+            except InkboxAPIError as exc:
+                if exc.status_code == 404:
+                    pass  # already gone; fine
+                else:
+                    raise
 
     return active_id
 
