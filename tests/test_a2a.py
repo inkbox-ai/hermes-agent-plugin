@@ -562,7 +562,7 @@ def test_a2a_context_activates_in_hermes_turn_order(monkeypatch, tmp_path):
     assert read_a2a_turn_context("session-1")["task_id"] == "task-2"
 
 
-def test_a2a_turn_context_uses_host_session_store_and_gateway_tool_task_key(
+def test_a2a_turn_context_uses_host_store_and_raw_session_tool_task_id(
     monkeypatch,
     tmp_path,
 ):
@@ -589,7 +589,7 @@ def test_a2a_turn_context_uses_host_session_store_and_gateway_tool_task_key(
         adapter._a2a_session_key_by_chat[source.chat_id]
         == "gateway-session-key"
     )
-    activated = activate_next_a2a_turn_context("gateway-session-key")
+    activated = activate_next_a2a_turn_context("raw-session-id")
     assert activated["task_id"] == "task-1"
 
 

@@ -133,8 +133,8 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.hooks[0][0][0] == "pre_llm_call"
     activated = []
     entry.activate_next_a2a_turn_context = activated.append
-    ctx.hooks[0][0][1](task_id="gateway-session-key", session_id="raw-session-id")
-    assert activated == ["gateway-session-key"]
+    ctx.hooks[0][0][1](task_id="raw-session-id", session_id="raw-session-id")
+    assert activated == ["raw-session-id"]
 
 
 def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):
