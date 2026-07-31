@@ -203,8 +203,8 @@ def register(ctx) -> None:
     register_tools(ctx)
     ctx.register_hook(
         "pre_llm_call",
-        lambda session_id="", **_kwargs: activate_next_a2a_turn_context(
-            str(session_id)
+        lambda task_id="", session_id="", **_kwargs: activate_next_a2a_turn_context(
+            str(task_id or session_id)
         ),
     )
     ctx.register_cli_command(

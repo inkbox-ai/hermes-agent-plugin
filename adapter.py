@@ -3450,9 +3450,10 @@ class InkboxAdapter(BasePlatformAdapter):
             session_id = str(entry.session_id)
             chat_id = str(source.chat_id)
             self._a2a_session_by_chat[chat_id] = session_id
-            self._a2a_session_key_by_chat[chat_id] = str(entry.session_key)
+            session_key = str(entry.session_key)
+            self._a2a_session_key_by_chat[chat_id] = session_key
             enqueue_a2a_turn_context(
-                session_id,
+                session_key,
                 {
                     "task_id": task_id,
                     "context_id": context_id,
@@ -3477,8 +3478,9 @@ class InkboxAdapter(BasePlatformAdapter):
             was_active = bool(queue and queue[0] == task_id)
             session_key = self._a2a_session_key_by_chat.get(chat_id)
             session_id = self._a2a_session_by_chat.get(chat_id)
-            if session_id:
-                remove_queued_a2a_turn_context(session_id, task_id)
+            context_key = session_key or session_id
+            if context_key:
+                remove_queued_a2a_turn_context(context_key, task_id)
             if was_active and session_key:
                 await self.cancel_session_processing(
                     session_key,
@@ -3701,10 +3703,13 @@ class InkboxAdapter(BasePlatformAdapter):
         queue = self._a2a_tasks_by_chat.get(chat_id) or []
         if not queue or not content.strip() or content.strip().upper() == "[SILENT]":
             return SendResult(success=True, message_id="a2a-no-reply")
-        session_id = self._a2a_session_by_chat.get(chat_id)
+        context_key = (
+            self._a2a_session_key_by_chat.get(chat_id)
+            or self._a2a_session_by_chat.get(chat_id)
+        )
         turn_context = (
-            read_a2a_turn_context(session_id)
-            if session_id
+            read_a2a_turn_context(context_key)
+            if context_key
             else None
         )
         task_id = (

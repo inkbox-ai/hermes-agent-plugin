@@ -562,6 +562,40 @@ def test_a2a_context_activates_in_hermes_turn_order(monkeypatch, tmp_path):
     assert read_a2a_turn_context("session-1")["task_id"] == "task-2"
 
 
+def test_a2a_turn_context_uses_the_gateway_tool_task_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _adapter(tmp_path)
+
+    class HandlerOwner:
+        session_store = types.SimpleNamespace(
+            get_or_create_session=lambda _source: types.SimpleNamespace(
+                session_id="raw-session-id",
+                session_key="gateway-session-key",
+            )
+        )
+
+        def handle(self, _event):
+            return None
+
+    adapter._message_handler = HandlerOwner().handle
+    source = types.SimpleNamespace(chat_id="a2a:identity-1:context-1")
+
+    adapter._bind_a2a_turn_context(
+        source,
+        task_id="task-1",
+        context_id="context-1",
+        message_id="message-1",
+    )
+
+    assert adapter._a2a_session_by_chat[source.chat_id] == "raw-session-id"
+    assert (
+        adapter._a2a_session_key_by_chat[source.chat_id]
+        == "gateway-session-key"
+    )
+    activated = activate_next_a2a_turn_context("gateway-session-key")
+    assert activated["task_id"] == "task-1"
+
+
 def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     monkeypatch,
     tmp_path,
