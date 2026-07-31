@@ -3437,12 +3437,14 @@ class InkboxAdapter(BasePlatformAdapter):
         message_id: str,
     ) -> None:
         """Bind verified webhook data to the host session used by tool calls."""
-        handler_owner = getattr(
-            getattr(self, "_message_handler", None),
-            "__self__",
-            None,
-        )
-        session_store = getattr(handler_owner, "session_store", None)
+        session_store = getattr(self, "_session_store", None)
+        if session_store is None:
+            handler_owner = getattr(
+                getattr(self, "_message_handler", None),
+                "__self__",
+                None,
+            )
+            session_store = getattr(handler_owner, "session_store", None)
         if session_store is None:
             return
         try:

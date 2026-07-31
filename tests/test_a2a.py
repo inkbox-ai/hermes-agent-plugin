@@ -562,22 +562,19 @@ def test_a2a_context_activates_in_hermes_turn_order(monkeypatch, tmp_path):
     assert read_a2a_turn_context("session-1")["task_id"] == "task-2"
 
 
-def test_a2a_turn_context_uses_the_gateway_tool_task_key(monkeypatch, tmp_path):
+def test_a2a_turn_context_uses_host_session_store_and_gateway_tool_task_key(
+    monkeypatch,
+    tmp_path,
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _adapter(tmp_path)
-
-    class HandlerOwner:
-        session_store = types.SimpleNamespace(
-            get_or_create_session=lambda _source: types.SimpleNamespace(
-                session_id="raw-session-id",
-                session_key="gateway-session-key",
-            )
+    adapter._session_store = types.SimpleNamespace(
+        get_or_create_session=lambda _source: types.SimpleNamespace(
+            session_id="raw-session-id",
+            session_key="gateway-session-key",
         )
-
-        def handle(self, _event):
-            return None
-
-    adapter._message_handler = HandlerOwner().handle
+    )
+    adapter._message_handler = lambda _event: None
     source = types.SimpleNamespace(chat_id="a2a:identity-1:context-1")
 
     adapter._bind_a2a_turn_context(
