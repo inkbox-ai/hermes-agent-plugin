@@ -10,6 +10,10 @@ ARG INKBOX_SDK_COMMIT="73f18a2b8c0e9dc6887c5663e6e904d54869927e"
 
 USER root
 
+# Login shells rebuild PATH and can omit Hermes's image-specific bin folders.
+# Expose the launcher from a standard system path so interactive shells work.
+RUN ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
+
 # Install plugin dependencies into Hermes's application environment while
 # building so the setup wizard is ready immediately after container startup.
 RUN /usr/local/bin/uv pip install \
