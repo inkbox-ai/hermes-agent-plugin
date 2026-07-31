@@ -2064,6 +2064,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return False
 
         self._mark_connected()
+        await self._catch_up_hosted_call_completions()
         await self._catch_up_a2a_tasks()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
@@ -3546,6 +3547,7 @@ class InkboxAdapter(BasePlatformAdapter):
         event_id: str,
         state: str,
         outcome: str = "",
+        envelope: Dict[str, Any] | None = None,
     ) -> None:
         """Persist a hosted completion before acknowledging its webhook."""
         try:
@@ -3562,13 +3564,28 @@ class InkboxAdapter(BasePlatformAdapter):
                     < 30 * 24 * 60 * 60
                 )
             }
-            current[call_id] = {
+            previous = current.get(call_id)
+            replay_envelope = (
+                self._hosted_call_replay_envelope(envelope)
+                if envelope is not None
+                else (
+                    previous.get("envelope")
+                    if isinstance(previous, dict)
+                    else None
+                )
+            )
+            entry = {
                 "event_id": event_id,
                 "state": state,
                 "outcome": outcome,
                 "owner_id": self._hosted_call_registry_owner,
                 "updated_at": now,
             }
+            # Keep only the bounded data required to rebuild an unfinished
+            # synthetic turn. Completed receipts need no call content at all.
+            if state in {"queued", "running"} and replay_envelope is not None:
+                entry["envelope"] = replay_envelope
+            current[call_id] = entry
             if len(current) > 1_000:
                 newest = sorted(
                     current.items(),
@@ -3586,6 +3603,126 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Could not persist hosted-call completion registry"
             )
             raise
+
+    @staticmethod
+    def _hosted_call_replay_envelope(
+        envelope: Dict[str, Any] | None,
+    ) -> Dict[str, Any] | None:
+        """Return the bounded minimum needed to replay a completed call.
+
+        The authenticated webhook can contain a full transcript and contact
+        memories. Those are intentionally not copied to disk: replay fetches
+        the authoritative transcript through the SDK, while this snapshot
+        retains only routing, outcome, and open-action context. The registry is
+        also mode 0600 and discards this snapshot once processing completes.
+        """
+        if not isinstance(envelope, dict):
+            return None
+        data = envelope.get("data")
+        call = data.get("call") if isinstance(data, dict) else None
+        if not isinstance(call, dict):
+            return None
+
+        def bounded(value: Any, limit: int) -> str:
+            return str(value or "")[:limit]
+
+        call_snapshot = {
+            key: bounded(call.get(key), limit)
+            for key, limit in (
+                ("id", 128),
+                ("mode", 64),
+                ("direction", 32),
+                ("status", 64),
+                ("hangup_reason", 512),
+                ("remote_phone_number", 128),
+                ("reason", 4_000),
+            )
+            if call.get(key) is not None
+        }
+        contacts = data.get("contacts") if isinstance(data, dict) else None
+        contact_snapshot: list[Dict[str, str]] = []
+        if isinstance(contacts, list) and contacts and isinstance(contacts[0], dict):
+            contact = contacts[0]
+            contact_snapshot.append({
+                key: bounded(contact.get(key), limit)
+                for key, limit in (
+                    ("id", 128),
+                    ("name", 1_000),
+                    ("preferred_name", 1_000),
+                )
+                if contact.get(key) is not None
+            })
+
+        action_snapshot = []
+        raw_actions = (
+            data.get("post_call_action_items")
+            if isinstance(data, dict)
+            else None
+        )
+        for action in raw_actions[:100] if isinstance(raw_actions, list) else []:
+            if not isinstance(action, dict):
+                continue
+            action_snapshot.append({
+                key: bounded(action.get(key), limit)
+                for key, limit in (
+                    ("id", 128),
+                    ("seq", 32),
+                    ("action", 4_000),
+                    ("details", 8_000),
+                    ("status", 64),
+                )
+                if action.get(key) is not None
+            })
+
+        return {
+            "id": bounded(envelope.get("id"), 128),
+            "event_type": "call.ended",
+            "data": {
+                "call": call_snapshot,
+                "contacts": contact_snapshot,
+                "outcome": bounded(data.get("outcome"), 128),
+                "post_call_action_items": action_snapshot,
+            },
+        }
+
+    async def _catch_up_hosted_call_completions(self) -> None:
+        """Replay unfinished hosted-call turns owned by an earlier process."""
+        try:
+            entries = list(self._read_hosted_call_registry().items())
+        except Exception:
+            logger.exception(
+                "[Inkbox] Could not read hosted-call completion registry"
+            )
+            return
+        for call_id, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("state") or "") not in {"queued", "running"}:
+                continue
+            if entry.get("owner_id") == self._hosted_call_registry_owner:
+                continue
+            envelope = entry.get("envelope")
+            data = envelope.get("data") if isinstance(envelope, dict) else None
+            call = data.get("call") if isinstance(data, dict) else None
+            if (
+                not isinstance(call, dict)
+                or str(call.get("id") or "").strip() != str(call_id)
+            ):
+                logger.warning(
+                    "[Inkbox] Cannot replay unfinished hosted call %s: "
+                    "receipt has no valid event snapshot",
+                    call_id,
+                )
+                continue
+            try:
+                await self._on_call_ended(envelope)
+            except Exception:
+                # Startup must remain available so Inkbox can retry fresh
+                # events. Keep the old receipt for the next restart.
+                logger.exception(
+                    "[Inkbox] Failed to replay hosted call completion %s",
+                    call_id,
+                )
 
     def _forget_hosted_call_registry(self, call_id: str) -> None:
         """Allow webhook retry when enqueueing the synthetic turn failed."""
@@ -6185,6 +6322,7 @@ class InkboxAdapter(BasePlatformAdapter):
             call_id,
             event_id=event_id,
             state="queued",
+            envelope=envelope,
         )
         try:
             await self._enqueue(event)

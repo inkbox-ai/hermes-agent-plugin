@@ -3,6 +3,7 @@ import sys
 import types
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -184,16 +185,18 @@ def test_queued_hosted_completion_recovers_once_after_adapter_restart(tmp_path):
     first, first_events = _adapter(tmp_path)
     assert asyncio.run(first._on_call_ended(_payload())).status == 200
     assert len(first_events) == 1
+    receipt = first._read_hosted_call_registry()["call-1"]
+    assert receipt["envelope"]["data"]["call"]["id"] == "call-1"
+    assert "transcript" not in receipt["envelope"]["data"]
+    assert "memories" not in receipt["envelope"]["data"]["contacts"][0]
 
     restarted, restarted_events = _adapter(tmp_path)
-    replay = asyncio.run(restarted._on_call_ended(_payload()))
+    asyncio.run(restarted._catch_up_hosted_call_completions())
 
-    assert replay.status == 200
-    assert replay.text == "ok"
     assert len(restarted_events) == 1
+    assert "Email the release details" in restarted_events[0].text
 
-    same_process_replay = asyncio.run(restarted._on_call_ended(_payload()))
-    assert same_process_replay.text == "duplicate"
+    asyncio.run(restarted._catch_up_hosted_call_completions())
     assert len(restarted_events) == 1
 
 
@@ -204,9 +207,8 @@ def test_running_hosted_completion_recovers_after_adapter_restart(tmp_path):
     assert first._read_hosted_call_registry()["call-1"]["state"] == "running"
 
     restarted, restarted_events = _adapter(tmp_path)
-    replay = asyncio.run(restarted._on_call_ended(_payload()))
+    asyncio.run(restarted._catch_up_hosted_call_completions())
 
-    assert replay.text == "ok"
     assert len(restarted_events) == 1
 
 
@@ -217,10 +219,77 @@ def test_completed_hosted_completion_stays_duplicate_after_restart(tmp_path):
     asyncio.run(first.on_processing_complete(first_events[0], "success"))
 
     restarted, restarted_events = _adapter(tmp_path)
-    replay = asyncio.run(restarted._on_call_ended(_payload()))
+    asyncio.run(restarted._catch_up_hosted_call_completions())
 
-    assert replay.text == "duplicate"
     assert restarted_events == []
+    assert "envelope" not in restarted._read_hosted_call_registry()["call-1"]
+
+
+def test_hosted_completion_catch_up_ignores_invalid_snapshot(tmp_path):
+    instance, events = _adapter(tmp_path)
+    instance._hosted_call_registry_path.write_text(
+        '{"call-1":{"state":"queued","owner_id":"old","envelope":{}}}'
+    )
+
+    asyncio.run(instance._catch_up_hosted_call_completions())
+
+    assert events == []
+
+
+def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
+    instance = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    instance._api_key = "agent-key"
+    instance._identity_handle = "agent-one"
+    instance._voice_stack_invalid_value = ""
+    instance._require_signature = False
+    instance._signing_key = ""
+    instance._host = "127.0.0.1"
+    instance._port = 9_876
+    instance._webhook_path = "/webhook"
+    instance._ws_path = "/phone/media/ws"
+    instance._public_url_override = "https://agent.example"
+    instance._base_url = ""
+    instance._acquire_platform_lock = lambda **_kwargs: True
+    instance._release_platform_lock = lambda: None
+    instance._cleanup = AsyncMock()
+    instance._patch_identity_objects = lambda: None
+    instance._mark_connected = lambda: None
+    order = []
+
+    async def _catch_up_hosted():
+        order.append("hosted")
+
+    async def _catch_up_a2a():
+        order.append("a2a")
+
+    instance._catch_up_hosted_call_completions = _catch_up_hosted
+    instance._catch_up_a2a_tasks = _catch_up_a2a
+
+    class FakeRunner:
+        async def setup(self):
+            pass
+
+    class FakeSite:
+        async def start(self):
+            pass
+
+    monkeypatch.setattr(adapter_mod, "check_inkbox_requirements", lambda: True)
+    monkeypatch.setattr(adapter_mod, "Inkbox", lambda **_kwargs: object())
+    monkeypatch.setattr(adapter_mod.web, "Application", lambda: types.SimpleNamespace(
+        router=types.SimpleNamespace(
+            add_get=lambda *_args: None,
+            add_post=lambda *_args: None,
+        ),
+    ))
+    monkeypatch.setattr(adapter_mod.web, "AppRunner", lambda _app: FakeRunner())
+    monkeypatch.setattr(
+        adapter_mod.web,
+        "TCPSite",
+        lambda _runner, _host, _port: FakeSite(),
+    )
+
+    assert asyncio.run(instance.connect()) is True
+    assert order == ["hosted", "a2a"]
 
 
 def test_hosted_processing_suppresses_text_for_entire_turn(tmp_path):
