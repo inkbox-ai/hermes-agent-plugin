@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import mimetypes
 import os
 import secrets
@@ -14,17 +15,23 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
     from .a2a_context import (
+        activate_next_a2a_turn_context,
         mark_a2a_reply_committed,
         read_a2a_turn_context,
     )
     from .config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
+    from a2a_context import (
+        activate_next_a2a_turn_context,
+        mark_a2a_reply_committed,
+        read_a2a_turn_context,
+    )
     from config import inkbox_client_kwargs, object_summary, public_call_ws_url, read_config
 
 SMS_MAX_LENGTH = 1600
 IMESSAGE_MAX_LENGTH = 18995
 IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def _json(data: Dict[str, Any]) -> str:
@@ -34,6 +41,9 @@ def _json(data: Dict[str, Any]) -> str:
 def _a2a_intent(intent: str, text: str, session_id: str) -> str:
     context = read_a2a_turn_context(session_id)
     if context is None:
+        context = activate_next_a2a_turn_context(session_id)
+    if context is None:
+        logger.warning("[Inkbox] A2A intent had no verified turn context")
         return _json({
             "error": "This tool is only available during an inbound A2A task",
         })

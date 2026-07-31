@@ -204,6 +204,31 @@ def _model_response(req: dict[str, Any]) -> dict[str, Any]:
     )
     if response.get("name"):
         response["id"] = f"call-{len(_tool_names(req)) + 1}-{response['name']}"
+    if scenario:
+        tool_result = "none"
+        for message in reversed(_messages(req)):
+            if message.get("role") != "tool":
+                continue
+            content = message.get("content")
+            try:
+                payload = json.loads(content) if isinstance(content, str) else content
+            except ValueError:
+                payload = None
+            tool_result = (
+                "error"
+                if isinstance(payload, dict) and payload.get("error")
+                else "ok"
+            )
+            break
+        print(
+            json.dumps({
+                "scenario": scenario,
+                "prior_tools": _tool_names(req),
+                "last_tool_result": tool_result,
+                "response": response.get("name") or "text",
+            }),
+            flush=True,
+        )
     return response
 
 

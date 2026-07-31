@@ -17,7 +17,6 @@ from inkbox_plugin.a2a_context import (
     activate_next_a2a_turn_context,
     enqueue_a2a_turn_context,
     read_a2a_turn_context,
-    write_a2a_turn_context,
 )
 from inkbox_plugin.adapter import InkboxAdapter
 
@@ -236,7 +235,7 @@ def test_a2a_intent_tools_require_verified_turn_context(
         "_client_and_identity",
         lambda: (None, None, identity),
     )
-    write_a2a_turn_context(
+    enqueue_a2a_turn_context(
         "session-1",
         {
             "task_id": "task-1",

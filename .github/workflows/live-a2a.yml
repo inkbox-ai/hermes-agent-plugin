@@ -146,6 +146,7 @@ jobs:
         if: failure()
         run: |
           tail -n 300 "$GATEWAY_LOG" 2>/dev/null || true
+          tail -n 300 "$HERMES_HOME"/logs/gateway.log 2>/dev/null || true
           cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
 
       - name: Stop gateway
