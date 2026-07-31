@@ -52,6 +52,74 @@ def test_sms_delivery_failure_policy(error_code, error_detail, expected):
     )
 
 
+@pytest.mark.parametrize(
+    ("attempt", "error_code", "error_detail", "required", "forbidden"),
+    [
+        (
+            1,
+            "40002",
+            "Temporary spam filter rejection",
+            "FIRST SAFE RETRY REQUIRED",
+            "[SILENT]",
+        ),
+        (
+            2,
+            "40002",
+            "Temporary spam filter rejection",
+            "RETRY OPTIONAL",
+            "FIRST SAFE RETRY REQUIRED",
+        ),
+        (
+            1,
+            "recipient_opted_out",
+            "Recipient opted out",
+            "DO NOT RETRY",
+            "FIRST SAFE RETRY REQUIRED",
+        ),
+        (
+            2,
+            "invalid_phone_number",
+            "Destination unreachable",
+            "DO NOT RETRY",
+            "RETRY OPTIONAL",
+        ),
+        (
+            1,
+            "unknown",
+            "Provider rejected the message",
+            "REVIEW BEFORE RETRY",
+            "FIRST SAFE RETRY REQUIRED",
+        ),
+        (
+            2,
+            "unknown",
+            "Provider rejected the message",
+            "REVIEW BEFORE RETRY",
+            "RETRY OPTIONAL",
+        ),
+    ],
+)
+def test_delivery_failure_instruction_uses_attempt_and_classification(
+    attempt,
+    error_code,
+    error_detail,
+    required,
+    forbidden,
+):
+    instruction = adapter_mod._delivery_failure_reply_instruction(
+        mode="sms",
+        error_code=error_code,
+        error_detail=error_detail,
+        attempt=attempt,
+    )
+    assert required in instruction
+    assert forbidden not in instruction
+    if "DO NOT RETRY" in required or "REVIEW BEFORE RETRY" in required:
+        assert "[SILENT]" in instruction
+    if required == "RETRY OPTIONAL":
+        assert "[SILENT]" in instruction
+
+
 class SpamBlockError(Exception):
     """Shaped like the SDK error for the server's content-policy 422."""
 
@@ -234,9 +302,9 @@ def test_sms_spam_block_wakes_agent_with_rule():
     assert "message_blocked_spam_filter rule=markdown_artifacts" in event.text
     assert "reads as bot traffic in SMS" in event.text
     assert "«**Jane Doe** is on file.»" in event.text
-    assert "SMS failure classification: RETRY REQUIRED" in event.text
-    assert "MUST now send exactly one materially rephrased SMS" in event.text
-    assert "For a safe message, do NOT reply [SILENT]" in event.text
+    assert "SMS failure classification: FIRST SAFE RETRY REQUIRED" in event.text
+    assert "MUST now send exactly one safe, materially rephrased SMS" in event.text
+    assert "[SILENT]" not in event.text
     assert "If there is nothing sensible to send" not in event.text
     # The wake-up must land in the SMS conversation's session.
     assert event.source.chat_id == "contact-123"
@@ -253,6 +321,10 @@ def test_sms_retry_budget_caps_total_sends():
     assert len(adapter._enqueued) == MAX - 1
     assert f"attempt=1/{MAX}" in adapter._enqueued[0].text
     assert f"attempt=2/{MAX}" in adapter._enqueued[1].text
+    assert "FIRST SAFE RETRY REQUIRED" in adapter._enqueued[0].text
+    assert "[SILENT]" not in adapter._enqueued[0].text
+    assert "RETRY OPTIONAL" in adapter._enqueued[1].text
+    assert "[SILENT]" in adapter._enqueued[1].text
 
 
 def test_transient_sms_error_does_not_wake_agent():
@@ -286,7 +358,8 @@ def test_sms_too_long_wakes_agent():
     event = adapter._enqueued[0]
     assert "channel=sms stage=send_rejected" in event.text
     assert "sms_too_long" in event.text
-    assert "SMS failure classification: RETRY REQUIRED" in event.text
+    assert "SMS failure classification: FIRST SAFE RETRY REQUIRED" in event.text
+    assert "[SILENT]" not in event.text
 
 
 def test_imessage_opt_out_wakes_agent():
@@ -349,8 +422,8 @@ def test_carrier_delivery_failed_wakes_agent():
     assert "[40002]" in event.text
     assert "flagged by a SPAM filter" in event.text
     assert "Sorry Kim — the site isn't built yet." in event.text
-    assert "SMS failure classification: RETRY REQUIRED" in event.text
-    assert "For a safe message, do NOT reply [SILENT]" in event.text
+    assert "SMS failure classification: FIRST SAFE RETRY REQUIRED" in event.text
+    assert "[SILENT]" not in event.text
     # Routed into the contact's session, thread-scoped to the conversation.
     assert event.source.chat_id == "contact-123"
     assert event.source.thread_id == "sms:conv-123"
@@ -831,5 +904,3 @@ def test_email_send_to_webhook_correlation_flow():
 
     # Verify terminal cleanup
     assert msg_id not in adapter._outbound_context
-
-

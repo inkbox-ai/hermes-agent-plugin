@@ -462,6 +462,7 @@ def _delivery_failure_reply_instruction(
     mode: str,
     error_code: Optional[str],
     error_detail: Optional[str],
+    attempt: int,
 ) -> str:
     """Give the model one non-contradictory action for this failure class."""
     if mode != "sms":
@@ -471,14 +472,17 @@ def _delivery_failure_reply_instruction(
         )
     policy = _sms_delivery_failure_policy(error_code, error_detail)
     if policy == "retry":
+        if attempt == 1:
+            return (
+                "SMS failure classification: FIRST SAFE RETRY REQUIRED. This "
+                "is the first failure and it is retryable. You MUST now send "
+                "exactly one safe, materially rephrased SMS in plain "
+                "conversational prose; do not reuse the failed wording."
+            )
         return (
-            "SMS failure classification: RETRY REQUIRED. This is a retryable "
-            "spam, content, or temporary delivery failure. If the underlying "
-            "request and message are safe, you MUST now send exactly one "
-            "materially rephrased SMS in plain conversational prose; do not "
-            "reuse the failed wording. For a safe message, do NOT reply "
-            "[SILENT]. Use [SILENT] only if the underlying request or message "
-            "is unsafe or harmful."
+            "SMS failure classification: RETRY OPTIONAL. A safe, materially "
+            "rephrased SMS may use the remaining retry budget, but the first "
+            "retry has already failed. You may instead reply exactly [SILENT]."
         )
     if policy == "stop":
         return (
@@ -5355,6 +5359,7 @@ class InkboxAdapter(BasePlatformAdapter):
             mode=mode,
             error_code=error_code,
             error_detail=error_detail,
+            attempt=attempts,
         )
         target_part = f" to={target}" if target else ""
         conversation_part = (
