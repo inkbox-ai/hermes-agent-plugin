@@ -382,13 +382,23 @@ def test_phone_call_voice_stack_offers_required_choices_and_configures_tts(monke
     identity = _FakeVoiceIdentity()
     saved = []
     presented = []
+    timeline = []
 
     monkeypatch.setattr(setup_wizard, "_detect_openai_realtime_key", lambda: None)
     monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(setup_wizard, "_is_interactive_stdin", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda question: timeline.append(("continue", question)) or "",
+    )
     monkeypatch.setattr(
         setup_wizard,
         "prompt_choice",
-        lambda question, choices, default=0: presented.append((question, choices, default)) or 2,
+        lambda question, choices, default=0: (
+            timeline.append(("choice", question)),
+            presented.append((question, choices, default)),
+            2,
+        )[-1],
     )
     monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
 
@@ -398,6 +408,11 @@ def test_phone_call_voice_stack_offers_required_choices_and_configures_tts(monke
     assert presented[0][1][0].startswith("Inkbox Voice AI")
     assert presented[0][1][1].startswith("OpenAI Realtime API")
     assert presented[0][1][2].startswith("Inkbox TTS/STT")
+    assert timeline[0] == (
+        "continue",
+        "  Press Enter to continue and set up phone call handling... ",
+    )
+    assert timeline[1][0] == "choice"
     assert identity.incoming_updates == [
         {
             "incoming_call_action": "auto_accept",
@@ -666,6 +681,11 @@ def test_voice_ai_failure_restores_changed_authority(monkeypatch):
 def test_phone_call_voice_stack_without_calling_capability_skips(monkeypatch):
     saved = []
     monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+    monkeypatch.setattr(setup_wizard, "_is_interactive_stdin", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
     monkeypatch.setattr(
         setup_wizard,
         "prompt_choice",

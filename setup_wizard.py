@@ -176,6 +176,16 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
         print_error("Please enter 'y' or 'n'.")
 
 
+def prompt_enter_to_continue(message: str) -> None:
+    if not _is_interactive_stdin():
+        return
+    try:
+        input(color(f"{message}... ", Colors.YELLOW))
+    except (KeyboardInterrupt, EOFError):
+        print()
+        raise SystemExit(1)
+
+
 def prompt_choice(
     question: str,
     choices: list[str],
@@ -801,6 +811,7 @@ def _configure_phone_call_voice_stack(
     if phone is None and not imessage_enabled:
         return
 
+    prompt_enter_to_continue("  Press Enter to continue and set up phone call handling")
     print()
     print(color("  --- Phone call voice stack ---", Colors.CYAN))
     detected = _detect_openai_realtime_key()
