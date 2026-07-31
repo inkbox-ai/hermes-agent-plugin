@@ -30,6 +30,14 @@ def _with_a2a_tools(req: dict[str, Any]) -> dict[str, Any]:
     return req
 
 
+def _with_tool_bridge(req: dict[str, Any]) -> dict[str, Any]:
+    req["tools"] = [{
+        "type": "function",
+        "function": {"name": "tool_call", "parameters": {"type": "object"}},
+    }]
+    return req
+
+
 def _record_tool(
     req: dict[str, Any],
     response: dict[str, Any],
@@ -75,6 +83,15 @@ def test_inbound_a2a_sequences(monkeypatch) -> None:
     monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-single")
     assert mock._model_response(_request("auxiliary request"))["text"].startswith("REPLY_OK")
     assert mock._model_response(_with_a2a_tools(single))["name"] == "inkbox_a2a_complete"
+    bridged = mock._model_response(_with_tool_bridge(_request(
+        "[inkbox:a2a_task caller=@remote] Finish with "
+        "`a2a-ci-inbound-single-fedcba543210`."
+    )))
+    assert bridged["name"] == "tool_call"
+    assert bridged["arguments"]["name"] == "inkbox_a2a_complete"
+    assert bridged["arguments"]["arguments"] == {
+        "text": "a2a-ci-inbound-single-fedcba543210",
+    }
 
     multi = _request("Finish with `a2a-ci-inbound-multi-012345abcdef`.")
     response = mock._a2a_response(multi, "inbound-multi")

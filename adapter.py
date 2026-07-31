@@ -3437,14 +3437,12 @@ class InkboxAdapter(BasePlatformAdapter):
         message_id: str,
     ) -> None:
         """Bind verified webhook data to the host session used by tool calls."""
-        session_store = getattr(self, "_session_store", None)
-        if session_store is None:
-            handler_owner = getattr(
-                getattr(self, "_message_handler", None),
-                "__self__",
-                None,
-            )
-            session_store = getattr(handler_owner, "session_store", None)
+        handler_owner = getattr(
+            getattr(self, "_message_handler", None),
+            "__self__",
+            None,
+        )
+        session_store = getattr(handler_owner, "session_store", None)
         if session_store is None:
             return
         try:
@@ -3452,8 +3450,7 @@ class InkboxAdapter(BasePlatformAdapter):
             session_id = str(entry.session_id)
             chat_id = str(source.chat_id)
             self._a2a_session_by_chat[chat_id] = session_id
-            session_key = str(entry.session_key)
-            self._a2a_session_key_by_chat[chat_id] = session_key
+            self._a2a_session_key_by_chat[chat_id] = str(entry.session_key)
             enqueue_a2a_turn_context(
                 session_id,
                 {
@@ -3480,9 +3477,8 @@ class InkboxAdapter(BasePlatformAdapter):
             was_active = bool(queue and queue[0] == task_id)
             session_key = self._a2a_session_key_by_chat.get(chat_id)
             session_id = self._a2a_session_by_chat.get(chat_id)
-            context_key = session_id or session_key
-            if context_key:
-                remove_queued_a2a_turn_context(context_key, task_id)
+            if session_id:
+                remove_queued_a2a_turn_context(session_id, task_id)
             if was_active and session_key:
                 await self.cancel_session_processing(
                     session_key,
@@ -3705,13 +3701,10 @@ class InkboxAdapter(BasePlatformAdapter):
         queue = self._a2a_tasks_by_chat.get(chat_id) or []
         if not queue or not content.strip() or content.strip().upper() == "[SILENT]":
             return SendResult(success=True, message_id="a2a-no-reply")
-        context_key = (
-            self._a2a_session_by_chat.get(chat_id)
-            or self._a2a_session_key_by_chat.get(chat_id)
-        )
+        session_id = self._a2a_session_by_chat.get(chat_id)
         turn_context = (
-            read_a2a_turn_context(context_key)
-            if context_key
+            read_a2a_turn_context(session_id)
+            if session_id
             else None
         )
         task_id = (
