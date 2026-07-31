@@ -31,6 +31,27 @@ from inkbox_plugin.adapter import InkboxAdapter
 MAX = adapter_mod.OUTBOUND_FAILURE_MAX_ATTEMPTS
 
 
+@pytest.mark.parametrize(
+    ("error_code", "error_detail", "expected"),
+    [
+        ("40002", "Flagged by a SPAM filter; temporary condition", "retry"),
+        ("message_blocked_spam_filter", "Markdown content rejected", "retry"),
+        ("message_too_long", "Message content is too long", "retry"),
+        ("carrier_unavailable", "Service temporarily unavailable", "retry"),
+        ("recipient_opted_out", "Recipient opted out", "stop"),
+        ("invalid_phone_number", "Invalid destination", "stop"),
+        ("unknown", "Destination is unreachable", "stop"),
+        ("content_rejected", "Unsafe or harmful content", "stop"),
+        ("unknown", "Provider rejected the message", "conditional"),
+    ],
+)
+def test_sms_delivery_failure_policy(error_code, error_detail, expected):
+    assert (
+        adapter_mod._sms_delivery_failure_policy(error_code, error_detail)
+        == expected
+    )
+
+
 class SpamBlockError(Exception):
     """Shaped like the SDK error for the server's content-policy 422."""
 
@@ -213,7 +234,10 @@ def test_sms_spam_block_wakes_agent_with_rule():
     assert "message_blocked_spam_filter rule=markdown_artifacts" in event.text
     assert "reads as bot traffic in SMS" in event.text
     assert "«**Jane Doe** is on file.»" in event.text
-    assert "[SILENT]" in event.text
+    assert "SMS failure classification: RETRY REQUIRED" in event.text
+    assert "MUST now send exactly one materially rephrased SMS" in event.text
+    assert "For a safe message, do NOT reply [SILENT]" in event.text
+    assert "If there is nothing sensible to send" not in event.text
     # The wake-up must land in the SMS conversation's session.
     assert event.source.chat_id == "contact-123"
     assert event.source.user_id == "contact-123"
@@ -262,6 +286,7 @@ def test_sms_too_long_wakes_agent():
     event = adapter._enqueued[0]
     assert "channel=sms stage=send_rejected" in event.text
     assert "sms_too_long" in event.text
+    assert "SMS failure classification: RETRY REQUIRED" in event.text
 
 
 def test_imessage_opt_out_wakes_agent():
@@ -324,12 +349,31 @@ def test_carrier_delivery_failed_wakes_agent():
     assert "[40002]" in event.text
     assert "flagged by a SPAM filter" in event.text
     assert "Sorry Kim — the site isn't built yet." in event.text
+    assert "SMS failure classification: RETRY REQUIRED" in event.text
+    assert "For a safe message, do NOT reply [SILENT]" in event.text
     # Routed into the contact's session, thread-scoped to the conversation.
     assert event.source.chat_id == "contact-123"
     assert event.source.thread_id == "sms:conv-123"
     # Resend routing state is populated for a post-restart gateway.
     assert adapter._last_inbound_modality["contact-123"] == "sms"
     assert adapter._last_inbound_sms["contact-123"]["conversation_id"] == "conv-123"
+
+
+def test_terminal_sms_delivery_failure_requires_silent_and_no_resend():
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
+    envelope = _delivery_failed_envelope()
+    message = envelope["data"]["text_message"]
+    message["error_code"] = "invalid_phone_number"
+    message["error_detail"] = "The destination is invalid or unreachable."
+
+    response = asyncio.run(adapter._on_text_lifecycle(envelope))
+
+    assert response.status == 200
+    assert len(adapter._enqueued) == 1
+    event = adapter._enqueued[0]
+    assert "SMS failure classification: DO NOT RETRY" in event.text
+    assert "Do not resend this message; reply exactly [SILENT]" in event.text
+    assert "RETRY REQUIRED" not in event.text
 
 
 def test_carrier_delivery_failed_replay_is_deduped():
@@ -787,6 +831,5 @@ def test_email_send_to_webhook_correlation_flow():
 
     # Verify terminal cleanup
     assert msg_id not in adapter._outbound_context
-
 
 

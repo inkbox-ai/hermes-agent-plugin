@@ -247,7 +247,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
 
     def _driver_inbound():
         return [
-            call for call in remote.calls.list(limit=30)
+            call for call in remote.calls.list(limit=200)
             if (getattr(call, "direction", "") or "").lower() == "inbound"
             and _digits(
                 getattr(call, "remote_phone_number", "") or ""
@@ -256,7 +256,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
 
     def _aut_outbound():
         return [
-            call for call in aut.calls.list(limit=30)
+            call for call in aut.calls.list(limit=200)
             if (getattr(call, "direction", "") or "").lower() == "outbound"
             and _digits(
                 getattr(call, "remote_phone_number", "") or ""
@@ -266,7 +266,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     def _aut_outbound_sms():
         return [
             message
-            for message in aut.texts.list(aut_number_id, limit=30)
+            for message in aut.texts.list(aut_number_id, limit=200)
             if (getattr(message, "direction", "") or "").lower() == "outbound"
             and _digits(
                 getattr(message, "remote_phone_number", "") or ""
@@ -459,7 +459,7 @@ def test_outbound_call_realtime_direct_contact_lookup():
             # The driver's INBOUND leg (remote/penetrator identity). Used only to
             # confirm a call was placed — its transcript comes from the driver's
             # own relay, not the agent's, so it is NOT where the recite lands.
-            return [c for c in remote.calls.list(limit=30)
+            return [c for c in remote.calls.list(limit=200)
                     if (getattr(c, "direction", "") or "").lower() == "inbound"
                     and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
@@ -467,7 +467,7 @@ def test_outbound_call_realtime_direct_contact_lookup():
             # The agent's OWN outbound call to the driver — the record the Inkbox
             # console shows, and where the realtime relay persists the recite
             # (client_ws_agent → CLIENT_TRANSCRIPT_FINAL). Read THIS for the recite.
-            return [c for c in aut.calls.list(limit=30)
+            return [c for c in aut.calls.list(limit=200)
                     if (getattr(c, "direction", "") or "").lower() == "outbound"
                     and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
 
@@ -581,7 +581,7 @@ def test_outbound_call_realtime():
     tail = _digits(aut_phone)[-10:]
 
     def _inbound_from_aut():
-        return [c for c in remote.calls.list(limit=30)
+        return [c for c in remote.calls.list(limit=200)
                 if (getattr(c, "direction", "") or "").lower() == "inbound"
                 and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 

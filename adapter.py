@@ -380,7 +380,7 @@ _DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
         "Rewrite the message so it no longer trips the stated rule and it "
         "reads like a human text: plain conversational prose, no markdown "
         "(**bold**, # headers, ``` fences), at most one emoji, no profanity, "
-        "no test/probe phrasing. Then send the corrected reply now."
+        "no test/probe phrasing."
     ),
     "imessage": (
         "Rewrite the message so it no longer trips the stated rule and it "
@@ -396,6 +396,102 @@ _DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
         "only resend here if you have reason to think it will now deliver."
     ),
 }
+
+_DELIVERY_FAILURE_TERMINAL_CODES = frozenset({
+    "recipient_not_opted_in",
+    "recipient_opted_out",
+    "recipient_blocked",
+    "invalid_phone_number",
+    "carrier_rejected",
+    "sender_sms_pending",
+    "sender_sms_assignment_failed",
+    "sender_not_registered",
+    "sender_registration_required",
+    "messaging_profile_disabled",
+    "toll_free_sms_unsupported",
+})
+_DELIVERY_FAILURE_TERMINAL_MARKERS = (
+    "opted out",
+    "opt-out",
+    "not opted in",
+    "invalid number",
+    "invalid phone",
+    "unreachable",
+    "unknown subscriber",
+    "cannot receive",
+    "unsafe",
+    "harmful",
+    "abusive",
+    "harassment",
+    "threatening",
+    "illegal content",
+)
+_DELIVERY_FAILURE_RETRY_MARKERS = (
+    "40002",
+    "spam",
+    "content",
+    "too_long",
+    "too long",
+    "markdown",
+    "emoji",
+    "profanity",
+    "temporar",
+    "carrier_unavailable",
+)
+
+
+def _sms_delivery_failure_policy(
+    error_code: Optional[str],
+    error_detail: Optional[str],
+) -> str:
+    """Classify whether an SMS failure requires retry, stop, or judgment."""
+    code = str(error_code or "").strip().lower()
+    detail = str(error_detail or "").strip().lower()
+    combined = f"{code} {detail}"
+    if code in _DELIVERY_FAILURE_TERMINAL_CODES or any(
+        marker in combined for marker in _DELIVERY_FAILURE_TERMINAL_MARKERS
+    ):
+        return "stop"
+    if any(marker in combined for marker in _DELIVERY_FAILURE_RETRY_MARKERS):
+        return "retry"
+    return "conditional"
+
+
+def _delivery_failure_reply_instruction(
+    *,
+    mode: str,
+    error_code: Optional[str],
+    error_detail: Optional[str],
+) -> str:
+    """Give the model one non-contradictory action for this failure class."""
+    if mode != "sms":
+        return (
+            "Send a corrected message only when it is safe, permitted, and likely "
+            "to deliver. Otherwise reply exactly [SILENT]."
+        )
+    policy = _sms_delivery_failure_policy(error_code, error_detail)
+    if policy == "retry":
+        return (
+            "SMS failure classification: RETRY REQUIRED. This is a retryable "
+            "spam, content, or temporary delivery failure. If the underlying "
+            "request and message are safe, you MUST now send exactly one "
+            "materially rephrased SMS in plain conversational prose; do not "
+            "reuse the failed wording. For a safe message, do NOT reply "
+            "[SILENT]. Use [SILENT] only if the underlying request or message "
+            "is unsafe or harmful."
+        )
+    if policy == "stop":
+        return (
+            "SMS failure classification: DO NOT RETRY. The recipient has not "
+            "consented, the destination is invalid or unreachable, or the "
+            "content is unsafe or harmful. Do not resend this message; reply "
+            "exactly [SILENT]."
+        )
+    return (
+        "SMS failure classification: REVIEW BEFORE RETRY. Send one corrected "
+        "SMS only if it is safe, permitted, and likely to deliver. Otherwise "
+        "reply exactly [SILENT]."
+    )
 
 
 def _inkbox_platform() -> Platform:
@@ -5255,6 +5351,11 @@ class InkboxAdapter(BasePlatformAdapter):
         guidance = _DELIVERY_FAILURE_CHANNEL_GUIDANCE.get(
             mode, _DELIVERY_FAILURE_CHANNEL_GUIDANCE["sms"],
         )
+        reply_instruction = _delivery_failure_reply_instruction(
+            mode=mode,
+            error_code=error_code,
+            error_detail=error_detail,
+        )
         target_part = f" to={target}" if target else ""
         conversation_part = (
             f" conversation_id={conversation_id}" if conversation_id else ""
@@ -5269,10 +5370,11 @@ class InkboxAdapter(BasePlatformAdapter):
             f"Undelivered message:\n"
             f"«{snippet}»\n"
             f"{guidance}\n"
+            f"{reply_instruction}\n"
             f"This reply has now failed {attempts} of {OUTBOUND_FAILURE_MAX_ATTEMPTS} allowed sends; "
-            f"{remaining} left before the thread goes quiet. Send the corrected message as a normal "
-            f"reply in this conversation. Do not mention this delivery problem to the recipient. "
-            f"If there is nothing sensible to send, reply exactly [SILENT]."
+            f"{remaining} left before the thread goes quiet. If retrying, send the corrected message "
+            f"as a normal reply in this conversation and do not mention this delivery problem to "
+            f"the recipient."
         )
 
         default_skills = (
