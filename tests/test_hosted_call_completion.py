@@ -372,6 +372,9 @@ def test_failed_hosted_turn_suppresses_host_error_after_complete(tmp_path):
     asyncio.run(instance.on_processing_start(event))
     asyncio.run(instance.on_processing_complete(event, "failure"))
     assert "contact-1" not in instance._hosted_post_call_active_chats
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["envelope"]["data"]["call"]["id"] == "call-1"
 
     result = asyncio.run(instance.send(
         "contact-1",
@@ -380,6 +383,16 @@ def test_failed_hosted_turn_suppresses_host_error_after_complete(tmp_path):
 
     assert result.message_id == "suppressed-hosted-post-call-error"
     assert "contact-1" not in instance._hosted_post_call_failure_replies
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+    assert len(restarted_events) == 1
+
+    asyncio.run(restarted.on_processing_start(restarted_events[0]))
+    asyncio.run(restarted.on_processing_complete(restarted_events[0], "success"))
+    receipt = restarted._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "completed"
+    assert "envelope" not in receipt
 
 
 def test_hosted_completion_enqueue_failure_allows_webhook_retry(tmp_path):

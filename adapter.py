@@ -3583,7 +3583,7 @@ class InkboxAdapter(BasePlatformAdapter):
             }
             # Keep only the bounded data required to rebuild an unfinished
             # synthetic turn. Completed receipts need no call content at all.
-            if state in {"queued", "running"} and replay_envelope is not None:
+            if state in {"queued", "running", "failed"} and replay_envelope is not None:
                 entry["envelope"] = replay_envelope
             current[call_id] = entry
             if len(current) > 1_000:
@@ -3668,6 +3668,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     ("id", 128),
                     ("seq", 32),
                     ("action", 4_000),
+                    ("description", 4_000),
                     ("details", 8_000),
                     ("status", 64),
                 )
@@ -3697,7 +3698,7 @@ class InkboxAdapter(BasePlatformAdapter):
         for call_id, entry in entries:
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("state") or "") not in {"queued", "running"}:
+            if str(entry.get("state") or "") not in {"queued", "running", "failed"}:
                 continue
             if entry.get("owner_id") == self._hosted_call_registry_owner:
                 continue
@@ -3968,18 +3969,22 @@ class InkboxAdapter(BasePlatformAdapter):
             outcome_value = str(
                 getattr(outcome, "value", outcome)
             ).strip().lower()
+            receipt_state = (
+                "failed" if outcome_value == "failure" else "completed"
+            )
             try:
                 self._write_hosted_call_registry(
                     call_id,
                     event_id=event_id,
-                    state="completed",
+                    state=receipt_state,
                     outcome=outcome_value,
                 )
                 logger.info(
-                    "[Inkbox] Completed hosted call reconciliation for "
-                    "call_id=%s outcome=%s",
+                    "[Inkbox] Finished hosted call reconciliation for "
+                    "call_id=%s outcome=%s receipt_state=%s",
                     call_id,
                     outcome_value,
+                    receipt_state,
                 )
             finally:
                 remaining = (
