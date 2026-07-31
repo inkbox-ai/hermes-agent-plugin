@@ -805,23 +805,39 @@ def _reconcile_subscription(
             break
     else:
         # Patch only this event channel. Identity-owned channels may share one
-        # URL, so a same-URL row from another channel must remain untouched.
+        # URL, so a row from another channel must remain untouched. Match the
+        # receiver route without its query string so URL normalization keeps
+        # the existing subscription (and its signing key).
         drifted = next(
             (
                 row
                 for row in existing
-                if row.url == desired_url
-                and desired_families
+                if desired_families
                 & {
                     event_type.split(".", 1)[0]
                     for event_type in row.event_types
                 }
+                and (
+                    (
+                        urlparse(row.url).scheme,
+                        urlparse(row.url).netloc,
+                        urlparse(row.url).path.rstrip("/"),
+                    )
+                    == desired_route
+                    or (
+                        previous_webhook_url
+                        and previous_webhook_url != desired_url
+                        and row.url == previous_webhook_url
+                    )
+                )
             ),
             None,
         )
         if drifted is not None:
             updated = client.webhooks.subscriptions.update(
-                drifted.id, event_types=list(desired_events),
+                drifted.id,
+                url=desired_url,
+                event_types=list(desired_events),
             )
             active_id = updated.id
         else:

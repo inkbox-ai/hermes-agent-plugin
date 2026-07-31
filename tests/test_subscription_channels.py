@@ -40,8 +40,10 @@ class _Subscriptions:
         self.rows.append(row)
         return row
 
-    def update(self, sub_id, *, event_types):
+    def update(self, sub_id, *, event_types, url=None):
         row = next(row for row in self.rows if row.id == sub_id)
+        if url is not None:
+            row.url = url
         row.event_types = list(event_types)
         return row
 
@@ -99,8 +101,8 @@ def test_reconcile_keeps_one_row_per_channel_and_receiver():
 
     _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
 
-    assert subscriptions.deleted == ["sub-a2a-extra"]
+    assert subscriptions.deleted == []
     assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
-        (base, adapter._DESIRED_IMESSAGE_EVENTS),
         (base, adapter._DESIRED_A2A_EVENTS),
+        (base, adapter._DESIRED_IMESSAGE_EVENTS),
     ]
