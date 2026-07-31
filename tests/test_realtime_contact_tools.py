@@ -23,6 +23,7 @@ from inkbox_plugin.realtime import (
     RealtimeConfig,
     _BridgeState,
     _dispatch_tool_call,
+    _flush_pending_realtime_response,
     _send_session_update,
     build_realtime_instructions,
 )
@@ -54,16 +55,24 @@ async def _noop_consult(*_args, **_kwargs):
 
 def _dispatch(name: str, arguments: dict) -> _FakeWS:
     ws = _FakeWS()
-    asyncio.run(_dispatch_tool_call(
-        openai_ws=ws,
-        call_id="fn-1",
-        name=name,
-        arguments_json=json.dumps(arguments),
-        state=_BridgeState(),
-        config=RealtimeConfig(enabled=True, api_key="sk-test"),
-        meta=_meta(),
-        on_agent_consult=_noop_consult,
-    ))
+    state = _BridgeState()
+
+    async def _run():
+        await _dispatch_tool_call(
+            openai_ws=ws,
+            call_id="fn-1",
+            name=name,
+            arguments_json=json.dumps(arguments),
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+        )
+        if state.pending_response_create is not None:
+            state.response_active = False
+            await _flush_pending_realtime_response(ws, state)
+
+    asyncio.run(_run())
     return ws
 
 
@@ -152,6 +161,44 @@ def test_contact_lookup_dispatch_passes_errors_through(monkeypatch):
     ws = _dispatch(CONTACT_LOOKUP_TOOL_NAME, {})
     output = _submitted_output(ws)
     assert output["error"].startswith("Specify exactly one")
+
+
+def test_contact_read_waits_for_active_response_before_creating_another(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        tools_mod,
+        CONTACT_LIST_TOOL_NAME,
+        lambda *_args, **_kwargs: json.dumps({"ok": True, "contacts": []}),
+    )
+    ws = _FakeWS()
+    state = _BridgeState(response_active=True)
+
+    async def _run():
+        await _dispatch_tool_call(
+            openai_ws=ws,
+            call_id="fn-active",
+            name=CONTACT_LIST_TOOL_NAME,
+            arguments_json=json.dumps({"q": "alex"}),
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+        )
+        assert [frame["type"] for frame in ws.sent] == [
+            "conversation.item.create",
+        ]
+        assert state.pending_response_create == {}
+
+        state.response_active = False
+        await _flush_pending_realtime_response(ws, state)
+
+    asyncio.run(_run())
+
+    assert [frame["type"] for frame in ws.sent] == [
+        "conversation.item.create",
+        "response.create",
+    ]
 
 
 def test_consult_prompt_carries_caller_trust_context(monkeypatch):
