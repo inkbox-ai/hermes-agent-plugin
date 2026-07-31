@@ -1382,7 +1382,7 @@ def inkbox_place_call(
             if not hasattr(identity, "place_call"):
                 raise RuntimeError(
                     "Inkbox SDK identity has no place_call method "
-                    "(upgrade inkbox to >=0.5.8)"
+                    "(upgrade inkbox to >=0.5.9)"
                 )
             if hosted:
                 return identity.place_call(

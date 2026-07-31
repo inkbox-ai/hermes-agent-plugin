@@ -77,7 +77,7 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.8,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.5.9,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -98,13 +98,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.8,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.8,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -409,7 +409,7 @@ turn. Outbound delegation tools can create tasks, wait for worker state changes,
 and answer requests for more input. The history tools support direction,
 participant, lifecycle, context, keyword, timestamp, and cursor filters. The
 sent-task tools remain available as outbound-only compatibility aliases. The
-plugin requires Inkbox SDK 0.5.8 or newer.
+plugin requires Inkbox SDK 0.5.9 or newer.
 
 Realtime-only call tools:
 
@@ -449,8 +449,8 @@ python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.p
 
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
 - Tunnel-first inbound: with a signing key, the gateway opens an Inkbox tunnel,
-  creates mail/text subscriptions, and keeps an identity-owned `call.ended`
-  subscription; iMessage events share that identity subscription when enabled.
+  creates mail/text subscriptions, and keeps separate identity-owned iMessage
+  and `call.ended` subscriptions at the same canonical receiver URL.
 - Voice: Inkbox TTS/STT and OpenAI Realtime use the local media WebSocket.
   Inkbox Voice AI handles media remotely and reports completion by webhook.
 - Post-call actions: Realtime and Voice AI calls dispatch one reconciled
