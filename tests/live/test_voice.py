@@ -134,8 +134,8 @@ def _call_state(remote, call_id) -> tuple[str, str]:
     return status, " ".join(fields)
 
 
-def _wait_for_two_way_call(remote, number_id, call_id):
-    """Block until the call transcript shows BOTH the agent and the driver spoke."""
+def _wait_for_two_way_call(remote, number_id, call_id, *, agent_turns=1):
+    """Block until the driver spoke and the agent completed enough turns."""
     deadline = time.monotonic() + TIMEOUT_S
     last = ""
     ended_at = None
@@ -146,7 +146,7 @@ def _wait_for_two_way_call(remote, number_id, call_id):
         except Exception as exc:  # transcripts may 404 until the call is set up
             rem, loc = [], []
             transcript_state = f"transcripts not ready: {exc!r}"
-        if not transcript_state and rem and loc:
+        if not transcript_state and len(rem) >= agent_turns and loc:
             agent_said = " | ".join(s.text.strip() for s in rem)
             return agent_said  # the agent reached the caller out loud, in a two-way call
         try:
@@ -312,8 +312,10 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             aut_call, "hosted_agent_authority_mode", None,
         ) is not None
 
+        # The first hosted-agent turn is its greeting. Wait for a second turn so
+        # Voice AI has processed the caller's follow-up request before hangup.
         agent_said = _wait_for_two_way_call(
-            remote, st["number_id"], driver_call_id,
+            remote, st["number_id"], driver_call_id, agent_turns=2,
         )
         assert agent_said, "Inkbox Voice AI produced no speech"
     finally:
