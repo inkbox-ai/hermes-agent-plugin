@@ -501,7 +501,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
-    { name = "inkbox", specifier = ">=0.5.6,<1.0.0" },
+    { name = "inkbox", specifier = ">=0.5.8,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -574,7 +574,7 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.5.6"
+version = "0.5.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -584,9 +584,9 @@ dependencies = [
     { name = "h2" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ad/25/40ce6a1b74480cfbd747e27f658c93bb9b641c68b6de9c21c3a65a651ea0/inkbox-0.5.6.tar.gz", hash = "sha256:03abc18382deccd6ad8c9adba00fb9c77de11d740da46190cdc68ee46eff2720", size = 371398, upload-time = "2026-07-26T06:34:42.32Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/c1/59288203a6c0e165fcfa96b4c7a4c689542fcc529ba97bdb9f110e04ffa0/inkbox-0.5.8.tar.gz", hash = "sha256:74e592b76a04e04c21e108646c7618f0951959f6cdbb04ac767c037160be4ad2", size = 380853, upload-time = "2026-07-30T05:37:51.371Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e3/1c/4ec564d853d7f0419403d1fd3577dc3460e8641c13f7e2502081e40a93e3/inkbox-0.5.6-py3-none-any.whl", hash = "sha256:81b1baeab1a73aaf6b9a25dedd820d75f9218329743f5cbef758d4b08bf64c45", size = 255695, upload-time = "2026-07-26T06:34:41.035Z" },
+    { url = "https://files.pythonhosted.org/packages/af/1a/4438f98b2b85e4a9733df6f35f955bd181737a19bb0b10024814832aeae7/inkbox-0.5.8-py3-none-any.whl", hash = "sha256:9351246ae1266379c2574bb3c27dd19423714932ffccc0a1d319192f78706201", size = 261135, upload-time = "2026-07-30T05:37:50.102Z" },
 ]
 
 [[package]]

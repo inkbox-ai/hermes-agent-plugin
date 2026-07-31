@@ -786,6 +786,9 @@ def _reconcile_subscription(
     Returns the active subscription's id for DEBUG logging at the call site.
     """
     desired_set = set(desired_events)
+    desired_families = {
+        event_type.split(".", 1)[0] for event_type in desired_events
+    }
     list_kwargs = {owner_kwarg: owner_id}
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
@@ -795,9 +798,20 @@ def _reconcile_subscription(
             active_id = row.id
             break
     else:
-        # Same URL but drifted event set: patch in place, do not delete-recreate.
+        # Patch only this event channel. Identity-owned channels may share one
+        # URL, so a same-URL row from another channel must remain untouched.
         drifted = next(
-            (r for r in existing if r.url == desired_url), None,
+            (
+                row
+                for row in existing
+                if row.url == desired_url
+                and desired_families
+                & {
+                    event_type.split(".", 1)[0]
+                    for event_type in row.event_types
+                }
+            ),
+            None,
         )
         if drifted is not None:
             updated = client.webhooks.subscriptions.update(
@@ -816,19 +830,17 @@ def _reconcile_subscription(
     # Previous-URL cleanup runs after the new row is in place so a failure
     # mid-reconcile can never leave the owner with zero receivers.
     if previous_webhook_url and previous_webhook_url != desired_url:
-        previous_urls = {previous_webhook_url}
-        if "?channel=a2a" in desired_url:
-            previous_urls.add(f"{previous_webhook_url}?channel=a2a")
-        desired_families = {
-            event_type.split(".", 1)[0] for event_type in desired_events
-        }
         # Re-list rather than reusing ``existing`` because a create/update
         # may have shifted the visible rows.
         for row in client.webhooks.subscriptions.list(**list_kwargs):
             row_families = {
                 event_type.split(".", 1)[0] for event_type in row.event_types
             }
-            if row.url in previous_urls and desired_families & row_families:
+            if (
+                row.id != active_id
+                and row.url == previous_webhook_url
+                and desired_families & row_families
+            ):
                 try:
                     client.webhooks.subscriptions.delete(row.id)
                 except InkboxAPIError as exc:
@@ -848,11 +860,7 @@ def _create_with_409_repair(
     desired_url: str,
     desired_events: tuple[str, ...],
 ):
-    """POST a new subscription; on a 409 race, adopt or repair the existing row.
-
-    Server uniqueness is ``(owner, url)`` only — event set is not part of it.
-    So a 409 may surface a row with a different event set; check and patch.
-    """
+    """POST a new subscription; on a 409 race, adopt or repair its channel."""
     create_kwargs = {
         owner_kwarg: owner_id,
         "url": desired_url,
@@ -866,9 +874,17 @@ def _create_with_409_repair(
             raise
 
     desired_set = set(desired_events)
+    desired_families = {
+        event_type.split(".", 1)[0] for event_type in desired_events
+    }
     list_kwargs = {owner_kwarg: owner_id}
     for row in client.webhooks.subscriptions.list(**list_kwargs):
         if row.url != desired_url:
+            continue
+        row_families = {
+            event_type.split(".", 1)[0] for event_type in row.event_types
+        }
+        if not desired_families & row_families:
             continue
 
         if set(row.event_types) == desired_set:
@@ -2182,14 +2198,14 @@ class InkboxAdapter(BasePlatformAdapter):
                 self._identity_handle, webhook_url, ws_url,
             )
 
-        # A2A and iMessage are separate event channels. They need distinct
-        # owner URLs because active subscriptions are unique by owner + URL.
+        # Identity-owned event channels use independent subscription rows at
+        # the same canonical receiver URL.
         if self._identity_id:
             try:
                 _reconcile_imessage_subscription(
                     self._inkbox,
                     self._identity_id,
-                    desired_url=f"{webhook_url}?channel=a2a",
+                    desired_url=webhook_url,
                     previous_webhook_url=previous_webhook_url,
                     desired_events=_DESIRED_A2A_EVENTS,
                 )

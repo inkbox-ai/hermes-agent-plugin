@@ -7,6 +7,7 @@ to "call me" and the call went out over the dedicated number instead of the
 shared iMessage line.
 """
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -69,3 +70,40 @@ def test_channel_only_breaks_ties(monkeypatch):
     # An iMessage-only identity stays shared even on an SMS-looking thread.
     _set_channel(monkeypatch, "sms:conv")
     assert tools._resolve_call_origination(_identity(False, True), "") == "shared_imessage_number"
+
+
+class _CallingIdentity:
+    phone_number = types.SimpleNamespace(number="+15550001111")
+    imessage_enabled = False
+
+    def __init__(self):
+        self.place_call_kwargs = None
+
+    def place_call(self, **kwargs):
+        self.place_call_kwargs = kwargs
+        return types.SimpleNamespace(id="call-1", status="queued", rate_limit=None)
+
+
+def test_place_call_forwards_disabled_voicemail_detection(monkeypatch):
+    identity = _CallingIdentity()
+    config = types.SimpleNamespace(call_websocket_url="wss://bridge.example/audio")
+    monkeypatch.setattr(
+        tools,
+        "_client_and_identity",
+        lambda: (config, types.SimpleNamespace(), identity),
+    )
+    monkeypatch.setattr(
+        tools,
+        "_write_outbound_call_context",
+        lambda _context: "context-1",
+    )
+
+    result = json.loads(tools.inkbox_place_call({
+        "to_number": "+15550002222",
+        "purpose": "run the CI voice check",
+        "client_websocket_url": "wss://bridge.example/audio",
+        "voicemail_detection": "disabled",
+    }))
+
+    assert result["ok"] is True
+    assert identity.place_call_kwargs["voicemail_detection"] == "disabled"

@@ -29,10 +29,10 @@ import pytest
 # cadence. Two identical no-reply sends to the same number trip the
 # duplicate_body rule (422), so every call request must carry a fresh body.
 _CALL_ME_PHRASINGS = (
-    "Please call me right now by phone — give me a ring.",
-    "Can you ring me on the phone right now?",
-    "Give me a call on my number now, please.",
-    "Please phone me right away — I'd rather talk than text.",
+    "Please call me right now by phone and set voicemail_detection to disabled.",
+    "Can you ring me now with voicemail_detection disabled?",
+    "Give me a call now, using disabled voicemail_detection.",
+    "Please phone me right away and disable voicemail_detection.",
 )
 
 
@@ -215,7 +215,10 @@ def test_inbound_call_inkbox_tts_stt():
 
     # Place the call to the agent, handing Inkbox the driver's own media WS.
     call = remote.calls.place(
-        from_number=st["number"], to_number=aut_phone, client_websocket_url=st["ws_url"],
+        from_number=st["number"],
+        to_number=aut_phone,
+        client_websocket_url=st["ws_url"],
+        voicemail_detection="disabled",
     )
     try:
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
