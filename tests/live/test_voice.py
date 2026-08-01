@@ -44,6 +44,7 @@ def _call_me_text() -> str:
     phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
     return f"{phrasing} (ref {uuid.uuid4().hex[:6]})"
 
+
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")
 AUT_KEY = os.environ.get("HERMES_INKBOX_API_KEY")
 BASE_URL = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai")
@@ -83,11 +84,34 @@ def _hosted_request_persisted(transcript: str, marker: str) -> bool:
     expected_marker = _spoken_marker_key(marker)
     sms_intent = re.search(r"\bsend me (?:one|1|an) sms\b", text)
     return bool(
-        expected_marker
-        and "after we hang up" in text
-        and sms_intent
-        and expected_marker in _spoken_marker_key(text)
+        expected_marker and "after we hang up" in text and sms_intent and expected_marker in _spoken_marker_key(text)
     )
+
+
+def _hosted_action_persisted(call, marker: str) -> bool:
+    """Whether this call has an open SMS action for the current marker."""
+    expected_marker = _spoken_marker_key(marker)
+    if not expected_marker:
+        return False
+    for item in getattr(call, "post_call_action_items", None) or []:
+        if isinstance(item, dict):
+            status = item.get("status")
+            action = item.get("action")
+            details = item.get("details")
+        else:
+            status = getattr(item, "status", None)
+            action = getattr(item, "action", None)
+            details = getattr(item, "details", None)
+        text = _normalized_spoken_text(f"{action or ''} {details or ''}")
+        status_value = getattr(status, "value", status)
+        if (
+            str(status_value or "").casefold() == "open"
+            and re.search(r"\bsend\b", text)
+            and re.search(r"\b(?:sms|text(?: message)?)\b", text)
+            and expected_marker in _spoken_marker_key(text)
+        ):
+            return True
+    return False
 
 
 def _message_created_at(message) -> datetime | None:
@@ -108,8 +132,7 @@ def _sms_target_numbers(message) -> set[str]:
     """All authoritative targets represented by an outbound SMS row."""
     values = [getattr(message, "remote_phone_number", "") or ""]
     values.extend(
-        getattr(recipient, "recipient_phone_number", "") or ""
-        for recipient in (getattr(message, "recipients", None) or [])
+        getattr(recipient, "recipient_phone_number", "") or "" for recipient in (getattr(message, "recipients", None) or [])
     )
     return {digits for value in values if (digits := _digits(value))}
 
@@ -239,17 +262,34 @@ def _wait_for_hosted_request(
             transcript = " ".join(segment.text.strip() for segment in local)
             if _hosted_request_persisted(transcript, marker):
                 return
-            last = (
-                "local transcript so far: "
-                f"{_normalized_spoken_text(transcript)!r}"
-            )
+            last = f"local transcript so far: {_normalized_spoken_text(transcript)!r}"
         except Exception as exc:  # transcripts may 404 until setup completes
             last = f"transcripts not ready: {exc!r}"
         time.sleep(POLL_EVERY_S)
-    pytest.fail(
-        "call ended before the current hosted SMS request was persisted "
-        f"({last})"
-    )
+    pytest.fail(f"call ended before the current hosted SMS request was persisted ({last})")
+
+
+def _wait_for_hosted_action(
+    aut,
+    call_id,
+    marker: str,
+    *,
+    deadline: float | None = None,
+) -> None:
+    """Wait until Voice AI durably records this run's open SMS action."""
+    deadline = deadline or (time.monotonic() + TIMEOUT_S)
+    last = "call not ready"
+    while time.monotonic() < deadline:
+        try:
+            call = aut.calls.get(call_id)
+            if _hosted_action_persisted(call, marker):
+                return
+            actions = getattr(call, "post_call_action_items", None) or []
+            last = f"status={getattr(call, 'status', None)!r} open_actions={len(actions)}"
+        except Exception as exc:
+            last = f"call action items not ready: {exc!r}"
+        time.sleep(POLL_EVERY_S)
+    pytest.fail(f"call ended before Voice AI persisted the current hosted SMS action ({last})")
 
 
 def _aut_speech_mode(aut, direction, driver_number):
@@ -257,10 +297,13 @@ def _aut_speech_mode(aut, direction, driver_number):
     in `direction` with the driver. Tells Inkbox STT/TTS (True/True) from realtime
     (False/False), so each leg can prove it ran the speech path it claims."""
     tail = _digits(driver_number)[-10:]
-    answered = [c for c in aut.calls.list(limit=10)
-                if (getattr(c, "direction", "") or "").lower() == direction
-                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
-                and c.use_inkbox_tts is not None]
+    answered = [
+        c
+        for c in aut.calls.list(limit=10)
+        if (getattr(c, "direction", "") or "").lower() == direction
+        and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
+        and c.use_inkbox_tts is not None
+    ]
     assert answered, f"no answered {direction} agent call with the driver found"
     c = answered[0]  # newest first
     return c.use_inkbox_tts, c.use_inkbox_stt
@@ -284,9 +327,7 @@ def _hangup_call(client, call_id) -> None:
             if status in {"completed", "canceled", "failed"}:
                 return
             time.sleep(0.5)
-        raise RuntimeError(
-            f"failed to hang up live test call {call_id}; status={status!r}"
-        ) from hangup_error
+        raise RuntimeError(f"failed to hang up live test call {call_id}; status={status!r}") from hangup_error
 
 
 @pytest.mark.skipif(SCENARIO != "inbound_inkbox", reason="inbound Inkbox STT/TTS leg only")
@@ -332,20 +373,18 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
 
     def _driver_inbound():
         return [
-            call for call in remote.calls.list(limit=200)
+            call
+            for call in remote.calls.list(limit=200)
             if (getattr(call, "direction", "") or "").lower() == "inbound"
-            and _digits(
-                getattr(call, "remote_phone_number", "") or ""
-            )[-10:] == aut_tail
+            and _digits(getattr(call, "remote_phone_number", "") or "")[-10:] == aut_tail
         ]
 
     def _aut_outbound():
         return [
-            call for call in aut.calls.list(limit=200)
+            call
+            for call in aut.calls.list(limit=200)
             if (getattr(call, "direction", "") or "").lower() == "outbound"
-            and _digits(
-                getattr(call, "remote_phone_number", "") or ""
-            )[-10:] == driver_tail
+            and _digits(getattr(call, "remote_phone_number", "") or "")[-10:] == driver_tail
         ]
 
     aut_number_id = aut_numbers[0].id
@@ -358,9 +397,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             and driver_number in _sms_target_numbers(message)
         ]
 
-    assert HOSTED_POST_CALL_MARKER, (
-        "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
-    )
+    assert HOSTED_POST_CALL_MARKER, "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
     expected_postcall_text = _spoken_marker_key(HOSTED_POST_CALL_MARKER)
     assert expected_postcall_text, "hosted completion marker must contain words"
     scenario_deadline = time.monotonic() + TIMEOUT_S
@@ -368,11 +405,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     before_aut = {call.id for call in _aut_outbound()}
     baseline_sms = _aut_outbound_sms()
     before_postcall_sms = {message.id for message in baseline_sms}
-    baseline_times = [
-        created_at
-        for message in baseline_sms
-        if (created_at := _message_created_at(message)) is not None
-    ]
+    baseline_times = [created_at for message in baseline_sms if (created_at := _message_created_at(message)) is not None]
     sms_watermark = max(
         baseline_times,
         default=datetime.min.replace(tzinfo=timezone.utc),
@@ -383,14 +416,8 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     aut_call = None
     try:
         while time.monotonic() < scenario_deadline:
-            fresh_driver = [
-                call for call in _driver_inbound()
-                if call.id not in before_driver
-            ]
-            fresh_aut = [
-                call for call in _aut_outbound()
-                if call.id not in before_aut
-            ]
+            fresh_driver = [call for call in _driver_inbound() if call.id not in before_driver]
+            fresh_aut = [call for call in _aut_outbound() if call.id not in before_aut]
             if fresh_driver:
                 driver_call_id = fresh_driver[0].id
             if fresh_aut:
@@ -406,12 +433,19 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         assert str(getattr(mode, "value", mode)) == "hosted_agent"
         assert str(getattr(voicemail, "value", voicemail)) == "disabled"
         assert getattr(aut_call, "reason", None), "hosted call must persist a task reason"
-        assert getattr(
-            aut_call, "hosted_agent_authority_mode", None,
-        ) is not None
+        assert (
+            getattr(
+                aut_call,
+                "hosted_agent_authority_mode",
+                None,
+            )
+            is not None
+        )
 
         agent_said = _wait_for_two_way_call(
-            remote, st["number_id"], driver_call_id,
+            remote,
+            st["number_id"],
+            driver_call_id,
             deadline=scenario_deadline,
         )
         assert agent_said, "Inkbox Voice AI produced no speech"
@@ -422,15 +456,18 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             HOSTED_POST_CALL_MARKER,
             deadline=scenario_deadline,
         )
+        _wait_for_hosted_action(
+            aut,
+            aut_call.id,
+            HOSTED_POST_CALL_MARKER,
+            deadline=scenario_deadline,
+        )
     finally:
         _hangup_call(remote, driver_call_id)
 
-    enqueue_marker = (
-        f"Enqueued hosted call completion for call_id={aut_call.id}"
-    )
+    enqueue_marker = f"Enqueued hosted call completion for call_id={aut_call.id}"
     completed_marker = (
-        f"Finished hosted call reconciliation for call_id={aut_call.id} "
-        "outcome=success receipt_state=completed"
+        f"Finished hosted call reconciliation for call_id={aut_call.id} outcome=success receipt_state=completed"
     )
     duplicate_grace = 2 * POLL_EVERY_S
     settlement_deadline = scenario_deadline - duplicate_grace
@@ -444,8 +481,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
                 message.id not in before_postcall_sms
                 and (created_at := _message_created_at(message)) is not None
                 and created_at >= sms_watermark
-                and _spoken_marker_key(getattr(message, "text", None))
-                == expected_postcall_text
+                and _spoken_marker_key(getattr(message, "text", None)) == expected_postcall_text
             )
         ]
         if completed_marker in logs and accepted:
@@ -454,15 +490,10 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         if poll_delay:
             time.sleep(poll_delay)
     logs = _gateway_log_text()
-    assert enqueue_marker in logs, (
-        "Hermes did not receive the hosted call.ended completion"
-    )
-    assert completed_marker in logs, (
-        "Hermes did not finish the hosted post-call reconciliation"
-    )
+    assert enqueue_marker in logs, "Hermes did not receive the hosted call.ended completion"
+    assert completed_marker in logs, "Hermes did not finish the hosted post-call reconciliation"
     assert accepted, (
-        "Hermes did not execute the hosted post-call SMS commitment within "
-        f"the shared {TIMEOUT_S:.0f}s scenario budget"
+        f"Hermes did not execute the hosted post-call SMS commitment within the shared {TIMEOUT_S:.0f}s scenario budget"
     )
 
     # Give any accidental model-text delivery time to land, then prove the one
@@ -480,17 +511,14 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             message.id not in before_postcall_sms
             and (created_at := _message_created_at(message)) is not None
             and created_at >= sms_watermark
-            and _spoken_marker_key(getattr(message, "text", None))
-            == expected_postcall_text
+            and _spoken_marker_key(getattr(message, "text", None)) == expected_postcall_text
         )
     ]
     assert len(marker_sms) == 1, (
         "Hosted post-call processing duplicated or missed the current "
         f"commitment: {[getattr(m, 'text', '') for m in marker_sms]}"
     )
-    assert _spoken_marker_key(
-        getattr(marker_sms[0], "text", None)
-    ) == expected_postcall_text
+    assert _spoken_marker_key(getattr(marker_sms[0], "text", None)) == expected_postcall_text
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
@@ -578,17 +606,23 @@ def test_outbound_call_realtime_direct_contact_lookup():
             # The driver's INBOUND leg (remote/penetrator identity). Used only to
             # confirm a call was placed — its transcript comes from the driver's
             # own relay, not the agent's, so it is NOT where the recite lands.
-            return [c for c in remote.calls.list(limit=200)
-                    if (getattr(c, "direction", "") or "").lower() == "inbound"
-                    and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
+            return [
+                c
+                for c in remote.calls.list(limit=200)
+                if (getattr(c, "direction", "") or "").lower() == "inbound"
+                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
+            ]
 
         def _outbound_from_agent():
             # The agent's OWN outbound call to the driver — the record the Inkbox
             # console shows, and where the realtime relay persists the recite
             # (client_ws_agent → CLIENT_TRANSCRIPT_FINAL). Read THIS for the recite.
-            return [c for c in aut.calls.list(limit=200)
-                    if (getattr(c, "direction", "") or "").lower() == "outbound"
-                    and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail]
+            return [
+                c
+                for c in aut.calls.list(limit=200)
+                if (getattr(c, "direction", "") or "").lower() == "outbound"
+                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail
+            ]
 
         def _recite_from(reads):
             # reads: (client, call_id) pairs. Return the transcript that carries
@@ -598,9 +632,7 @@ def test_outbound_call_realtime_direct_contact_lookup():
                     segs = client.calls.transcripts(cid)
                 except Exception:  # transcripts 404 until the call is set up
                     continue
-                transcript = " ".join(
-                    (s.text or "").strip() for s in segs if (s.text or "").strip()
-                )
+                transcript = " ".join((s.text or "").strip() for s in segs if (s.text or "").strip())
                 squashed = transcript.lower().replace(" ", "")
                 if LOOKUP_CONTACT_FAMILY.lower() in squashed and "example" in squashed:
                     return transcript
@@ -656,17 +688,13 @@ def test_outbound_call_realtime_direct_contact_lookup():
                     break
                 time.sleep(POLL_EVERY_S)
 
-        assert placed_call, (
-            f"agent never placed a call back within {attempt_timeout:.0f}s "
-            "in two attempts"
-        )
+        assert placed_call, f"agent never placed a call back within {attempt_timeout:.0f}s in two attempts"
         # Deterministic anchor: the realtime agent did a DIRECT contact read on
         # the call (vs a consult loop or no lookup) — written when the contact
         # tool is invoked.
         log_text = _gateway_log_text()
         assert log_text, "gateway log unavailable to prove the direct contact read"
-        assert "direct contact read inkbox_" in log_text, \
-            "gateway logs show no direct contact read during the call"
+        assert "direct contact read inkbox_" in log_text, "gateway logs show no direct contact read during the call"
         # The spoken recite is the call's FINAL turn, and realtime relays each
         # turn's transcript live over the call WS — that last relay races the
         # teardown (realtime.py `_relay_transcript` is wrapped in `suppress`), so
@@ -685,8 +713,9 @@ def test_outbound_call_realtime_direct_contact_lookup():
             )
 
         tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
-        assert tts is False and stt is False, \
+        assert tts is False and stt is False, (
             f"call must be on the realtime path (Inkbox speech off), got tts={tts} stt={stt}"
+        )
     finally:
         _delete_contacts_by_email(aut, LOOKUP_CONTACT_EMAIL)
 
@@ -700,9 +729,12 @@ def test_outbound_call_realtime():
     tail = _digits(aut_phone)[-10:]
 
     def _inbound_from_aut():
-        return [c for c in remote.calls.list(limit=200)
-                if (getattr(c, "direction", "") or "").lower() == "inbound"
-                and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
+        return [
+            c
+            for c in remote.calls.list(limit=200)
+            if (getattr(c, "direction", "") or "").lower() == "inbound"
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
+        ]
 
     before = {c.id for c in _inbound_from_aut()}
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
@@ -723,7 +755,8 @@ def test_outbound_call_realtime():
         assert agent_said, "agent produced no speech on the outbound call"
 
         tts, stt = _aut_speech_mode(aut, "outbound", st["number"])
-        assert tts is False and stt is False, \
+        assert tts is False and stt is False, (
             f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
+        )
     finally:
         _hangup_call(remote, call_id)

@@ -19,9 +19,7 @@ voice = _load_voice_module()
 
 
 def test_spoken_marker_normalization_is_case_and_punctuation_insensitive() -> None:
-    assert voice._normalized_spoken_text("Alpha, BRAVO! Charlie.") == (
-        "alpha bravo charlie"
-    )
+    assert voice._normalized_spoken_text("Alpha, BRAVO! Charlie.") == ("alpha bravo charlie")
     assert voice._spoken_marker_key("Alpha X-ray") == "alphaxray"
     assert voice._spoken_marker_key("alpha x ray") == "alphaxray"
 
@@ -65,13 +63,81 @@ def test_hosted_request_requires_intent_and_current_marker() -> None:
     )
 
 
+def test_hosted_action_requires_open_sms_intent_and_current_marker() -> None:
+    marker = "alpha xray charlie"
+
+    matching = SimpleNamespace(
+        post_call_action_items=[
+            SimpleNamespace(
+                status="open",
+                action="Send a text message after the call",
+                details="Use the words Alpha, X-ray Charlie.",
+            ),
+        ],
+    )
+    assert voice._hosted_action_persisted(matching, marker)
+
+    dict_matching = SimpleNamespace(
+        post_call_action_items=[
+            {
+                "status": "open",
+                "action": "Send SMS",
+                "details": "alpha x ray charlie",
+            }
+        ],
+    )
+    assert voice._hosted_action_persisted(dict_matching, marker)
+
+    wrong_marker = SimpleNamespace(
+        post_call_action_items=[
+            SimpleNamespace(
+                status="open",
+                action="Send SMS",
+                details="delta echo foxtrot",
+            ),
+        ],
+    )
+    assert not voice._hosted_action_persisted(wrong_marker, marker)
+
+    closed = SimpleNamespace(
+        post_call_action_items=[
+            SimpleNamespace(
+                status="completed",
+                action="Send SMS",
+                details="alpha xray charlie",
+            ),
+        ],
+    )
+    assert not voice._hosted_action_persisted(closed, marker)
+
+    missing_status = SimpleNamespace(
+        post_call_action_items=[
+            SimpleNamespace(
+                status=None,
+                action="Send SMS",
+                details="alpha xray charlie",
+            ),
+        ],
+    )
+    assert not voice._hosted_action_persisted(missing_status, marker)
+
+    discussion_only = SimpleNamespace(
+        post_call_action_items=[
+            SimpleNamespace(
+                status="open",
+                action="Discuss SMS options",
+                details="alpha xray charlie",
+            ),
+        ],
+    )
+    assert not voice._hosted_action_persisted(discussion_only, marker)
+
+
 def test_message_created_at_normalizes_sdk_timestamp_shapes() -> None:
     aware = datetime(2026, 8, 1, 7, 0, tzinfo=timezone.utc)
     naive = datetime(2026, 8, 1, 7, 0)
 
     assert voice._message_created_at(SimpleNamespace(created_at=aware)) == aware
     assert voice._message_created_at(SimpleNamespace(created_at=naive)) == aware
-    assert voice._message_created_at(
-        SimpleNamespace(created_at="2026-08-01T07:00:00Z")
-    ) == aware
+    assert voice._message_created_at(SimpleNamespace(created_at="2026-08-01T07:00:00Z")) == aware
     assert voice._message_created_at(SimpleNamespace(created_at="bad")) is None
