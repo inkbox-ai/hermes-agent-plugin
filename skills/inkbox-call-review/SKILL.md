@@ -27,7 +27,15 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
    replace it.
 2. **Past call requests.** If the user asks to inspect old calls, missed calls, or transcripts, explain that this Hermes installation does not expose historical call-read tools.
 3. **Prepare follow-ups from supplied context.** If the user gives the transcript or call summary in the conversation, use that text and the available Inkbox send tools for follow-up.
-4. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.
+4. **Complete SMS commitments with the SMS tool.** For a still-needed SMS
+   requested during the call, use `inkbox_send_sms` with `to` equal to the exact
+   authoritative remote phone number from the current-call context and `text`
+   equal to the requested message. Do not use `conversationId` for this
+   post-call send. Require a tool result with `ok: true`; plain text does not
+   complete the commitment. If the first call has a recoverable argument or
+   format error, correct it once and retry once. Do not use `[SILENT]` while a
+   safe SMS commitment remains unattempted or unsuccessful.
+5. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.
 
 ## Caveats
 

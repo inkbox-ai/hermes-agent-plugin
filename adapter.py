@@ -6393,6 +6393,27 @@ class InkboxAdapter(BasePlatformAdapter):
                 "Open post-call actions recorded by Voice AI:",
                 action_block,
             ])
+        if remote_phone:
+            escaped_remote = _escape_contact_memory_tokens(remote_phone)
+            body_parts.extend([
+                "",
+                "SMS post-call tool contract:",
+                "If any still-needed commitment asks for an SMS, use "
+                "inkbox_send_sms. If that tool is not currently visible, "
+                "find it with tool_search first.",
+                "Call inkbox_send_sms with `to` set to the exact authoritative "
+                f"remote number `{escaped_remote}` and `text` set to the "
+                "requested SMS body. Do not use conversationId for this "
+                "post-call send.",
+                "The SMS commitment is complete only after inkbox_send_sms "
+                "returns a success payload with `ok: true`. Plain text is not "
+                "a send and does not complete the commitment.",
+                "If the first tool call returns a recoverable argument or "
+                "format error, correct the arguments once and retry once. "
+                "Otherwise do not duplicate a well-formed send.",
+                "Do not reply [SILENT] while a safe SMS commitment remains "
+                "unattempted or lacks a successful tool result.",
+            ])
         body_parts.extend([
             "",
             "Review the outcome, transcript, and open actions in one pass. "

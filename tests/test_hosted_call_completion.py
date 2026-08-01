@@ -151,6 +151,35 @@ def test_hosted_completion_marks_current_remote_number_as_authoritative(
     assert event.source.user_id_alt == "+15551112222"
 
 
+def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "id": "action-sms",
+        "action": "Send one SMS containing exactly: release-ready",
+        "status": "open",
+    }]
+    payload["data"]["transcript"]["entries"] = [{
+        "party": "remote",
+        "text": "After we hang up, text me release-ready.",
+    }]
+
+    response = asyncio.run(instance._on_call_ended(payload))
+
+    assert response.status == 200
+    assert len(events) == 1
+    prompt = events[0].text
+    assert "SMS post-call tool contract:" in prompt
+    assert "use inkbox_send_sms" in prompt
+    assert "tool_search" in prompt
+    assert "`to` set to the exact authoritative remote number `+15551112222`" in prompt
+    assert "`text` set to the requested SMS body" in prompt
+    assert "Do not use conversationId" in prompt
+    assert "`ok: true`" in prompt
+    assert "correct the arguments once and retry once" in prompt
+    assert "Do not reply [SILENT]" in prompt
+
+
 def test_hosted_completion_falls_back_to_inline_transcript_for_inbound(
     tmp_path,
 ):
