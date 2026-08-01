@@ -15,3 +15,18 @@ def test_live_workflow_uses_isolated_pytest_entrypoint(workflow_name):
 
     assert 'PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"' in workflow
     assert '"$PY" -m pytest' not in workflow
+
+
+@pytest.mark.parametrize(
+    "workflow_name",
+    [
+        "live-a2a.yml",
+        "live-channels.yml",
+        "live-external-events.yml",
+        "live-voice.yml",
+    ],
+)
+def test_agent_capable_live_workflow_disables_voicemail_detection(workflow_name):
+    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+
+    assert "INKBOX_VOICEMAIL_DETECTION=disabled" in workflow
