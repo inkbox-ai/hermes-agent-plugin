@@ -24,6 +24,16 @@ def test_spoken_marker_normalization_is_case_and_punctuation_insensitive() -> No
     assert voice._spoken_marker_key("alpha x ray") == "alphaxray"
 
 
+def test_sms_marker_match_accepts_surrounding_prose_but_requires_the_full_sequence() -> None:
+    marker = voice._spoken_marker_key("alpha xray charlie")
+
+    assert voice._sms_contains_marker(SimpleNamespace(text="Alpha, X-ray Charlie."), marker)
+    assert voice._sms_contains_marker(SimpleNamespace(text="Requested words: alpha x ray charlie — done."), marker)
+    assert not voice._sms_contains_marker(SimpleNamespace(text="alpha xray"), marker)
+    assert not voice._sms_contains_marker(SimpleNamespace(text="alpha delta xray charlie"), marker)
+    assert not voice._sms_contains_marker(SimpleNamespace(text=None), marker)
+
+
 def test_sms_targets_include_direct_and_recipient_rows() -> None:
     message = SimpleNamespace(
         remote_phone_number="+1 (555) 111-2222",
@@ -39,14 +49,15 @@ def test_sms_targets_include_direct_and_recipient_rows() -> None:
 
 
 def test_voicemail_detection_normalizes_sdk_enum_and_string() -> None:
-    assert voice._voicemail_detection_value(
-        SimpleNamespace(voicemail_detection="disabled")
-    ) == "disabled"
-    assert voice._voicemail_detection_value(
-        SimpleNamespace(
-            voicemail_detection=SimpleNamespace(value="disabled"),
+    assert voice._voicemail_detection_value(SimpleNamespace(voicemail_detection="disabled")) == "disabled"
+    assert (
+        voice._voicemail_detection_value(
+            SimpleNamespace(
+                voicemail_detection=SimpleNamespace(value="disabled"),
+            )
         )
-    ) == "disabled"
+        == "disabled"
+    )
 
 
 def test_hosted_request_requires_intent_and_current_marker() -> None:

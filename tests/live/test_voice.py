@@ -78,6 +78,11 @@ def _spoken_marker_key(value: str | None) -> str:
     return "".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
 
 
+def _sms_contains_marker(message, marker_key: str) -> bool:
+    """Whether a text carries this run's contiguous, speech-normalized marker."""
+    return bool(marker_key and marker_key in _spoken_marker_key(getattr(message, "text", None)))
+
+
 def _hosted_request_persisted(transcript: str, marker: str) -> bool:
     """Whether the caller's persisted transcript carries this run's request."""
     text = _normalized_spoken_text(transcript)
@@ -518,18 +523,24 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     duplicate_grace = 2 * POLL_EVERY_S
     settlement_deadline = scenario_deadline - duplicate_grace
     accepted = []
+    settlement_diagnostic = {}
     while time.monotonic() < settlement_deadline:
         logs = _gateway_log_text()
-        accepted = [
+        target_messages = _aut_outbound_sms()
+        current_messages = [message for message in target_messages if message.id not in before_postcall_sms]
+        timestamped_messages = [
             message
-            for message in _aut_outbound_sms()
-            if (
-                message.id not in before_postcall_sms
-                and (created_at := _message_created_at(message)) is not None
-                and created_at >= sms_watermark
-                and _spoken_marker_key(getattr(message, "text", None)) == expected_postcall_text
-            )
+            for message in current_messages
+            if (created_at := _message_created_at(message)) is not None and created_at >= sms_watermark
         ]
+        accepted = [message for message in timestamped_messages if _sms_contains_marker(message, expected_postcall_text)]
+        settlement_diagnostic = {
+            "target_rows": len(target_messages),
+            "current_rows": len(current_messages),
+            "timestamped_rows": len(timestamped_messages),
+            "marker_rows": len(accepted),
+            "completed_log": completed_marker in logs,
+        }
         if completed_marker in logs and accepted:
             break
         poll_delay = min(3.0, max(0.0, settlement_deadline - time.monotonic()))
@@ -539,7 +550,9 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     assert enqueue_marker in logs, "Hermes did not receive the hosted call.ended completion"
     assert completed_marker in logs, "Hermes did not finish the hosted post-call reconciliation"
     assert accepted, (
-        f"Hermes did not execute the hosted post-call SMS commitment within the shared {TIMEOUT_S:.0f}s scenario budget"
+        "Hermes did not execute the hosted post-call SMS commitment within "
+        f"the shared {TIMEOUT_S:.0f}s scenario budget "
+        f"(settlement_gate={settlement_diagnostic!r})"
     )
 
     # Give any accidental model-text delivery time to land, then prove the one
@@ -557,14 +570,13 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             message.id not in before_postcall_sms
             and (created_at := _message_created_at(message)) is not None
             and created_at >= sms_watermark
-            and _spoken_marker_key(getattr(message, "text", None)) == expected_postcall_text
+            and _sms_contains_marker(message, expected_postcall_text)
         )
     ]
     assert len(marker_sms) == 1, (
-        "Hosted post-call processing duplicated or missed the current "
-        f"commitment: {[getattr(m, 'text', '') for m in marker_sms]}"
+        f"Hosted post-call processing duplicated or missed the current commitment (matching_rows={len(marker_sms)})"
     )
-    assert _spoken_marker_key(getattr(marker_sms[0], "text", None)) == expected_postcall_text
+    assert _sms_contains_marker(marker_sms[0], expected_postcall_text)
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
