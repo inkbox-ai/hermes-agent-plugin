@@ -46,10 +46,10 @@ def _marker(token: str) -> list[str]:
 
 
 def test_live_voice_marker_is_deterministic_distinct_and_nato_only():
-    words = _marker("355071")
+    words = _marker("55071")
 
-    assert words == _marker("355071")
-    assert len(words) == 6
+    assert words == _marker("55071")
+    assert len(words) == 5
     assert len(set(words)) == len(words)
     assert set(words) <= NATO_WORDS
 
@@ -62,6 +62,7 @@ def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
     )[0]
 
     assert 'HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"' in workflow
+    assert 'DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"' in workflow
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
     assert "export VOICE_DRIVER_LISTEN=45" not in workflow
     assert hosted_proof.index("_wait_for_hosted_request(") < hosted_proof.index("_wait_for_hosted_action(")

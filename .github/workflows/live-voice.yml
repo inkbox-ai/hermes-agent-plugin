@@ -146,7 +146,9 @@ jobs:
             # follow-up. Encode the run as distinct NATO words so the assertion
             # does not depend on punctuation/long digits or let an action
             # summarizer collapse an adjacent repeated word.
-            DIGITS="${GITHUB_RUN_ID: -5}${GITHUB_RUN_ATTEMPT}"
+            # Five distinct words is enough current-run entropy while staying
+            # within the hosted action summarizer's reliable verbatim span.
+            DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"
             HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."

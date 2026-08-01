@@ -2,6 +2,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 pkg = types.ModuleType("inkbox_plugin")
@@ -46,6 +48,53 @@ def test_choice_prompt_uses_hermes_radio_picker(monkeypatch):
             },
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("saved_stack", "expected_index"),
+    [
+        ("inkbox_voice_ai", 0),
+        ("openai_realtime", 1),
+        ("inkbox_tts_stt", 2),
+    ],
+)
+def test_voice_stack_rerun_defaults_to_saved_selection(
+    monkeypatch,
+    saved_stack,
+    expected_index,
+):
+    values = {
+        "INKBOX_VOICE_STACK": saved_stack,
+        "INKBOX_REALTIME_ENABLED": "false",
+    }
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
+
+    assert setup_wizard._voice_stack_default_index("") == expected_index
+
+
+def test_choice_prompt_fallback_reprompts_invalid_input_and_honors_default(
+    monkeypatch,
+):
+    fallback = types.ModuleType("hermes_cli.curses_ui")
+    monkeypatch.setitem(sys.modules, "hermes_cli.curses_ui", fallback)
+    answers = iter(["not-a-number", "4", ""])
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(answers))
+
+    assert setup_wizard.prompt_choice("Choose", ["one", "two", "three"], 1) == 1
+
+
+def test_choice_prompt_fallback_cancellation_exits(monkeypatch):
+    fallback = types.ModuleType("hermes_cli.curses_ui")
+    monkeypatch.setitem(sys.modules, "hermes_cli.curses_ui", fallback)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        setup_wizard.prompt_choice("Choose", ["one", "two"], 0)
+
+    assert exc.value.code == 1
 
 
 def test_install_command_prefers_uv_when_available(monkeypatch):
@@ -619,6 +668,62 @@ def test_phone_call_voice_stack_prompts_for_admin_only_when_authority_changes(
     assert authority_identity.authority_updates == ["yolo"]
     assert FakeInkbox.constructed_with[0]["api_key"] == "ApiKey_admin"
     assert all(value != "ApiKey_admin" for _, value in saved)
+
+
+def test_voice_ai_rejects_non_admin_authority_key_and_returns_to_stack_choices(
+    monkeypatch,
+    capsys,
+):
+    identity = _FakeVoiceIdentity()
+    saved = []
+    choices = iter([0, 1, 2])
+
+    class Whoami:
+        auth_subtype = "agent_scoped"
+
+    class FakeInkbox:
+        def __init__(self, **_kwargs):
+            pass
+
+        def whoami(self):
+            return Whoami()
+
+        def get_identity(self, _handle):
+            raise AssertionError("non-admin credential must not configure authority")
+
+    monkeypatch.setattr(setup_wizard, "_detect_openai_realtime_key", lambda: None)
+    monkeypatch.setattr(setup_wizard, "_env", lambda _name: "")
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt_choice",
+        lambda *_args, **_kwargs: next(choices),
+    )
+    monkeypatch.setattr(
+        setup_wizard,
+        "prompt",
+        lambda question, *_args, **_kwargs: (
+            ""
+            if "Press Enter" in question
+            else "ApiKey_not_admin"
+        ),
+    )
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: saved.append((name, value)))
+
+    setup_wizard._configure_phone_call_voice_stack(
+        identity,
+        **_voice_setup_kwargs(
+            Inkbox=FakeInkbox,
+            WhoamiApiKeyResponse=Whoami,
+        ),
+    )
+
+    assert identity.hosted_updates == []
+    assert saved == [
+        ("INKBOX_REALTIME_ENABLED", "false"),
+        ("INKBOX_VOICE_STACK", "inkbox_tts_stt"),
+    ]
+    assert all(value != "ApiKey_not_admin" for _, value in saved)
+    assert "requires an admin-scoped API key" in capsys.readouterr().out
 
 
 def test_voice_ai_failure_restores_remote_config_and_keeps_local_selection(monkeypatch):

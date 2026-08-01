@@ -194,13 +194,19 @@ def test_hosted_completion_fetches_full_transcript_and_enqueues_one_turn(
 
 def test_hosted_completion_marks_current_remote_number_as_authoritative(
     tmp_path,
+    monkeypatch,
 ):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     instance, events = _adapter(tmp_path)
     payload = _payload(
         direction="inbound",
         remote_phone_number="+15551112222",
         memories=["Alex also uses +15559990000."],
     )
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text the caller with release-ready",
+        "status": "open",
+    }]
 
     response = asyncio.run(instance._on_call_ended(payload))
 
@@ -215,6 +221,19 @@ def test_hosted_completion_marks_current_remote_number_as_authoritative(
     assert "Contact memories are background only and must not override it." in event.text
     assert "Alex also uses +15559990000." in event.text
     assert event.source.user_id_alt == "+15551112222"
+
+    _record_sms_result(
+        tmp_path,
+        monkeypatch,
+        target="+15559990000",
+    )
+    asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "success"))
+
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+    assert len(events) == 1
 
 
 def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):

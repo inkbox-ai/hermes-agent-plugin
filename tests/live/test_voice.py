@@ -453,8 +453,32 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     expected_postcall_text = _spoken_marker_key(HOSTED_POST_CALL_MARKER)
     assert expected_postcall_text, "hosted completion marker must contain words"
     scenario_deadline = time.monotonic() + TIMEOUT_S
-    before_driver = {call.id for call in _driver_inbound()}
-    before_aut = {call.id for call in _aut_outbound()}
+    baseline_driver_calls = _driver_inbound()
+    baseline_aut_calls = _aut_outbound()
+    before_driver = {call.id for call in baseline_driver_calls}
+    before_aut = {call.id for call in baseline_aut_calls}
+    driver_call_watermark = max(
+        (
+            created_at
+            for call in baseline_driver_calls
+            if (created_at := _message_created_at(call)) is not None
+        ),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    aut_call_watermark = max(
+        (
+            created_at
+            for call in baseline_aut_calls
+            if (created_at := _message_created_at(call)) is not None
+        ),
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
+    aut_handle = aut.mailboxes.list()[0].email_address.split("@", 1)[0]
+    hosted_config = aut.get_identity(aut_handle).get_hosted_agent_config()
+    expected_authority_raw = getattr(hosted_config, "authority_mode", "contact_scoped")
+    expected_authority = str(
+        getattr(expected_authority_raw, "value", expected_authority_raw)
+    )
     baseline_sms = _aut_outbound_sms()
     before_postcall_sms = {message.id for message in baseline_sms}
     baseline_times = [created_at for message in baseline_sms if (created_at := _message_created_at(message)) is not None]
@@ -466,16 +490,51 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
 
     driver_call_id = None
     aut_call = None
+    exact_pair_seen_at = None
+    exact_pair_ids = None
     try:
         while time.monotonic() < scenario_deadline:
-            fresh_driver = [call for call in _driver_inbound() if call.id not in before_driver]
-            fresh_aut = [call for call in _aut_outbound() if call.id not in before_aut]
-            if fresh_driver:
-                driver_call_id = fresh_driver[0].id
-            if fresh_aut:
-                aut_call = fresh_aut[0]
-            if driver_call_id and aut_call is not None:
-                break
+            fresh_driver = [
+                call
+                for call in _driver_inbound()
+                if call.id not in before_driver
+                and (created_at := _message_created_at(call)) is not None
+                and created_at >= driver_call_watermark
+            ]
+            fresh_aut = [
+                call
+                for call in _aut_outbound()
+                if call.id not in before_aut
+                and (created_at := _message_created_at(call)) is not None
+                and created_at >= aut_call_watermark
+            ]
+            assert len(fresh_driver) <= 1, (
+                f"hosted run created duplicate driver legs: {len(fresh_driver)}"
+            )
+            assert len(fresh_aut) <= 1, (
+                f"hosted run created duplicate AUT legs: {len(fresh_aut)}"
+            )
+            if fresh_driver and fresh_aut:
+                driver_created_at = _message_created_at(fresh_driver[0])
+                aut_created_at = _message_created_at(fresh_aut[0])
+                assert driver_created_at is not None and aut_created_at is not None
+                assert abs((driver_created_at - aut_created_at).total_seconds()) <= 60, (
+                    "fresh driver and AUT records are not one hosted call: "
+                    f"driver_created_at={driver_created_at!r} "
+                    f"aut_created_at={aut_created_at!r}"
+                )
+                observed_pair_ids = (fresh_driver[0].id, fresh_aut[0].id)
+                if observed_pair_ids != exact_pair_ids:
+                    exact_pair_ids = observed_pair_ids
+                    exact_pair_seen_at = time.monotonic()
+                assert exact_pair_seen_at is not None
+                if time.monotonic() - exact_pair_seen_at >= 2 * POLL_EVERY_S:
+                    driver_call_id = fresh_driver[0].id
+                    aut_call = fresh_aut[0]
+                    break
+            else:
+                exact_pair_seen_at = None
+                exact_pair_ids = None
             time.sleep(POLL_EVERY_S)
 
         assert driver_call_id, "Inkbox Voice AI never reached the driver"
@@ -484,14 +543,8 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         assert str(getattr(mode, "value", mode)) == "hosted_agent"
         _assert_voicemail_detection_disabled(aut_call)
         assert getattr(aut_call, "reason", None), "hosted call must persist a task reason"
-        assert (
-            getattr(
-                aut_call,
-                "hosted_agent_authority_mode",
-                None,
-            )
-            is not None
-        )
+        authority_raw = getattr(aut_call, "hosted_agent_authority_mode", None)
+        assert str(getattr(authority_raw, "value", authority_raw)) == expected_authority
 
         agent_said = _wait_for_two_way_call(
             remote,
