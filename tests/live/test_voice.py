@@ -137,6 +137,18 @@ def _sms_target_numbers(message) -> set[str]:
     return {digits for value in values if (digits := _digits(value))}
 
 
+def _voicemail_detection_value(call) -> str:
+    value = getattr(call, "voicemail_detection", "")
+    return str(getattr(value, "value", value) or "").casefold()
+
+
+def _assert_voicemail_detection_disabled(call) -> None:
+    assert _voicemail_detection_value(call) == "disabled", (
+        f"call {getattr(call, 'id', None)} did not persist disabled "
+        f"voicemail detection: {_voicemail_detection_value(call)!r}"
+    )
+
+
 def _client(key):
     from inkbox import Inkbox
 
@@ -350,6 +362,7 @@ def test_inbound_call_inkbox_tts_stt():
         voicemail_detection="disabled",
     )
     try:
+        _assert_voicemail_detection_disabled(remote.calls.get(call.id))
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call.id)
         assert agent_said, "agent produced no speech on the inbound call"
 
@@ -429,9 +442,8 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         assert driver_call_id, "Inkbox Voice AI never reached the driver"
         assert aut_call is not None, "AUT hosted outbound call record was not created"
         mode = getattr(aut_call, "mode", "")
-        voicemail = getattr(aut_call, "voicemail_detection", "")
         assert str(getattr(mode, "value", mode)) == "hosted_agent"
-        assert str(getattr(voicemail, "value", voicemail)) == "disabled"
+        _assert_voicemail_detection_disabled(aut_call)
         assert getattr(aut_call, "reason", None), "hosted call must persist a task reason"
         assert (
             getattr(
@@ -644,6 +656,7 @@ def test_outbound_call_realtime_direct_contact_lookup():
         attempt_timeout = max(TIMEOUT_S / 2, 110.0)
         recite = ""
         placed_call = False
+        aut_call = None
         end_ids = []  # (client, call_id) legs to hang up so nothing lingers
         for attempt in (1, 2):
             before_out = {c.id for c in _outbound_from_agent()}
@@ -656,6 +669,8 @@ def test_outbound_call_realtime_direct_contact_lookup():
                 fresh_out = [c for c in _outbound_from_agent() if c.id not in before_out]
                 fresh_in = [c for c in _inbound_to_driver() if c.id not in before_in]
                 placed_call = placed_call or bool(fresh_out or fresh_in)
+                if fresh_out:
+                    aut_call = fresh_out[0]
                 end_ids = [(aut, c.id) for c in fresh_out] + [(remote, c.id) for c in fresh_in]
                 # Best-effort: the recite persists on the AGENT's own call record;
                 # the driver leg is a fallback only.
@@ -689,6 +704,8 @@ def test_outbound_call_realtime_direct_contact_lookup():
                 time.sleep(POLL_EVERY_S)
 
         assert placed_call, f"agent never placed a call back within {attempt_timeout:.0f}s in two attempts"
+        assert aut_call is not None, "agent call was not visible on the authoritative identity"
+        _assert_voicemail_detection_disabled(aut_call)
         # Deterministic anchor: the realtime agent did a DIRECT contact read on
         # the call (vs a consult loop or no lookup) — written when the contact
         # tool is invoked.
@@ -736,20 +753,39 @@ def test_outbound_call_realtime():
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail
         ]
 
+    driver_tail = _digits(st["number"])[-10:]
+
+    def _outbound_from_agent():
+        return [
+            c
+            for c in aut.calls.list(limit=200)
+            if (getattr(c, "direction", "") or "").lower() == "outbound"
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:]
+            == driver_tail
+        ]
+
     before = {c.id for c in _inbound_from_aut()}
+    before_aut = {c.id for c in _outbound_from_agent()}
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
     call_id = None
+    aut_call = None
     try:
         # Wait for the agent to dial back, then verify the call transcript.
         deadline = time.monotonic() + TIMEOUT_S
         while time.monotonic() < deadline:
             fresh = [c for c in _inbound_from_aut() if c.id not in before]
+            fresh_aut = [c for c in _outbound_from_agent() if c.id not in before_aut]
             if fresh:
                 call_id = fresh[0].id
+            if fresh_aut:
+                aut_call = fresh_aut[0]
+            if call_id and aut_call is not None:
                 break
             time.sleep(POLL_EVERY_S)
         assert call_id, f"agent never placed a call back within {TIMEOUT_S:.0f}s"
+        assert aut_call is not None, "agent call was not visible on the authoritative identity"
+        _assert_voicemail_detection_disabled(aut_call)
 
         agent_said = _wait_for_two_way_call(remote, st["number_id"], call_id)
         assert agent_said, "agent produced no speech on the outbound call"

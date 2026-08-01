@@ -45,6 +45,11 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+def _voicemail_detection_value(call) -> str:
+    value = getattr(call, "voicemail_detection", "")
+    return str(getattr(value, "value", value) or "").casefold()
+
+
 def _client(key):
     from inkbox import Inkbox
 
@@ -93,7 +98,8 @@ def xc():
 
     return {
         "remote": remote, "aut": aut,
-        "remote_email": remote_email, "remote_pid": remote_pid,
+        "remote_email": remote_email, "remote_phone": remote_phone,
+        "remote_pid": remote_pid,
         "aut_email": aut_email, "aut_phone": aut_phone,
     }
 
@@ -169,26 +175,59 @@ def _inbound_calls_from_aut(remote, remote_pid: str, aut_phone: str):
             and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
 
-def _wait_for_new_call(remote, remote_pid: str, aut_phone: str, before: set):
-    """Block until an inbound call from the AUT with an id not in ``before`` appears.
+def _outbound_calls_to_driver(aut, remote_phone: str):
+    """The AUT's outbound call records targeting the driver."""
+    tail = _digits(remote_phone)[-10:]
+    return [c for c in aut.calls.list(limit=30)
+            if (getattr(c, "direction", "") or "").lower() == "outbound"
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == tail]
 
-    ``before`` is the pre-request snapshot, so a stale call can't satisfy the
-    assertion — same new-id correlation the SMS/email legs use. Fails on timeout.
+
+def _wait_for_new_call_pair(
+    remote,
+    aut,
+    remote_pid: str,
+    remote_phone: str,
+    aut_phone: str,
+    before_driver: set,
+    before_aut: set,
+):
+    """Block until both fresh records for one AUT-to-driver call are visible.
+
+    The driver-owned inbound leg proves the phone rang. The AUT-owned outbound
+    leg is authoritative for the voicemail-detection request.
     """
     deadline = time.monotonic() + TIMEOUT_S
+    driver_call = None
+    aut_call = None
     while time.monotonic() < deadline:
         for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone):
-            if c.id not in before:
-                return  # a fresh call from the AUT landed on the driver's number
+            if c.id not in before_driver:
+                driver_call = c
+                break
+        for c in _outbound_calls_to_driver(aut, remote_phone):
+            if c.id not in before_aut:
+                aut_call = c
+                break
+        if driver_call is not None and aut_call is not None:
+            return driver_call, aut_call
         time.sleep(POLL_EVERY_S)
-    pytest.fail(f"agent did not place a call to the driver within {TIMEOUT_S:.0f}s")
+    pytest.fail(
+        f"agent call pair was incomplete within {TIMEOUT_S:.0f}s "
+        f"(driver_leg={driver_call is not None}, aut_leg={aut_call is not None})"
+    )
 
 
 def test_email_request_gets_call(xc):
     """Email asks the agent to CALL; a new inbound call must land on the driver."""
-    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
+    remote, aut = xc["remote"], xc["aut"]
+    remote_pid, remote_phone = xc["remote_pid"], xc["remote_phone"]
+    aut_phone = xc["aut_phone"]
     # Snapshot BEFORE sending so a pre-existing call can't be mistaken for the reply.
-    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+    before_driver = {
+        c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)
+    }
+    before_aut = {c.id for c in _outbound_calls_to_driver(aut, remote_phone)}
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
         body_text=(
@@ -196,13 +235,29 @@ def test_email_request_gets_call(xc):
             "voicemail_detection disabled — I'd rather talk than type."
         ),
     )
-    _wait_for_new_call(remote, remote_pid, aut_phone, before)
+    _driver_call, aut_call = _wait_for_new_call_pair(
+        remote,
+        aut,
+        remote_pid,
+        remote_phone,
+        aut_phone,
+        before_driver,
+        before_aut,
+    )
+    assert _voicemail_detection_value(aut_call) == "disabled", (
+        "email-triggered call did not persist disabled voicemail detection"
+    )
 
 
 def test_sms_request_gets_call(xc):
     """SMS asks the agent to CALL; a new inbound call must land on the driver."""
-    remote, remote_pid, aut_phone = xc["remote"], xc["remote_pid"], xc["aut_phone"]
-    before = {c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)}
+    remote, aut = xc["remote"], xc["aut"]
+    remote_pid, remote_phone = xc["remote_pid"], xc["remote_phone"]
+    aut_phone = xc["aut_phone"]
+    before_driver = {
+        c.id for c in _inbound_calls_from_aut(remote, remote_pid, aut_phone)
+    }
+    before_aut = {c.id for c in _outbound_calls_to_driver(aut, remote_phone)}
     # Fresh body each send: the agent replies by calling, not texting, so this
     # SMS never gets an SMS reply to reset the conversation cadence — two
     # identical no-reply sends would trip the duplicate_body rule (422).
@@ -214,4 +269,15 @@ def test_sms_request_gets_call(xc):
             f"give me a ring now. (ref {_token()})"
         ),
     )
-    _wait_for_new_call(remote, remote_pid, aut_phone, before)
+    _driver_call, aut_call = _wait_for_new_call_pair(
+        remote,
+        aut,
+        remote_pid,
+        remote_phone,
+        aut_phone,
+        before_driver,
+        before_aut,
+    )
+    assert _voicemail_detection_value(aut_call) == "disabled", (
+        "SMS-triggered call did not persist disabled voicemail detection"
+    )

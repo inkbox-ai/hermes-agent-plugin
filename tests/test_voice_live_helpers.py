@@ -38,6 +38,17 @@ def test_sms_targets_include_direct_and_recipient_rows() -> None:
     }
 
 
+def test_voicemail_detection_normalizes_sdk_enum_and_string() -> None:
+    assert voice._voicemail_detection_value(
+        SimpleNamespace(voicemail_detection="disabled")
+    ) == "disabled"
+    assert voice._voicemail_detection_value(
+        SimpleNamespace(
+            voicemail_detection=SimpleNamespace(value="disabled"),
+        )
+    ) == "disabled"
+
+
 def test_hosted_request_requires_intent_and_current_marker() -> None:
     marker = "alpha xray charlie"
 
