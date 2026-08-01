@@ -114,6 +114,37 @@ def _hosted_action_persisted(call, marker: str) -> bool:
     return False
 
 
+def _hosted_action_diagnostic(call, marker: str) -> str:
+    """Bounded, content-redacted reasons the hosted action gate did not match."""
+    expected_words = set(_normalized_spoken_text(marker).split())
+    summaries = []
+    for item in (getattr(call, "post_call_action_items", None) or [])[:3]:
+        if isinstance(item, dict):
+            status = item.get("status")
+            action = item.get("action")
+            details = item.get("details")
+        else:
+            status = getattr(item, "status", None)
+            action = getattr(item, "action", None)
+            details = getattr(item, "details", None)
+        text = _normalized_spoken_text(f"{action or ''} {details or ''}")
+        words = set(text.split())
+        status_value = str(getattr(status, "value", status) or "").casefold()
+        summaries.append(
+            {
+                "status": status_value[:24],
+                "send_intent": bool(re.search(r"\bsend\b", text)),
+                "sms_intent": bool(re.search(r"\b(?:sms|text(?: message)?)\b", text)),
+                "marker_exact": _spoken_marker_key(marker) in _spoken_marker_key(text),
+                "marker_words_present": len(expected_words & words),
+                "marker_words_expected": len(expected_words),
+                "action_chars": min(len(str(action or "")), 999),
+                "details_chars": min(len(str(details or "")), 999),
+            }
+        )
+    return repr(summaries)[:1_200]
+
+
 def _message_created_at(message) -> datetime | None:
     """Return an aware server timestamp from an SDK SMS row."""
     value = getattr(message, "created_at", None)
@@ -297,7 +328,10 @@ def _wait_for_hosted_action(
             if _hosted_action_persisted(call, marker):
                 return
             actions = getattr(call, "post_call_action_items", None) or []
-            last = f"status={getattr(call, 'status', None)!r} open_actions={len(actions)}"
+            last = (
+                f"status={getattr(call, 'status', None)!r} open_actions={len(actions)} "
+                f"action_gate={_hosted_action_diagnostic(call, marker)}"
+            )
         except Exception as exc:
             last = f"call action items not ready: {exc!r}"
         time.sleep(POLL_EVERY_S)
@@ -760,8 +794,7 @@ def test_outbound_call_realtime():
             c
             for c in aut.calls.list(limit=200)
             if (getattr(c, "direction", "") or "").lower() == "outbound"
-            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:]
-            == driver_tail
+            and _digits(getattr(c, "remote_phone_number", "") or "")[-10:] == driver_tail
         ]
 
     before = {c.id for c in _inbound_from_aut()}

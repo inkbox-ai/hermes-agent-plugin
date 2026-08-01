@@ -143,18 +143,16 @@ jobs:
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             # This value crosses TTS -> PSTN -> STT before Voice AI records the
-            # follow-up. Encode the run in phonetic words so the assertion does
-            # not depend on an ASR engine preserving punctuation or long digits.
+            # follow-up. Encode the run as distinct NATO words so the assertion
+            # does not depend on punctuation/long digits or let an action
+            # summarizer collapse an adjacent repeated word.
             DIGITS="${GITHUB_RUN_ID: -5}${GITHUB_RUN_ATTEMPT}"
-            WORDS=(amber beacon cactus dolphin ember forest galaxy harbor island jungle)
-            HOSTED_MARKER=""
-            for ((i = 0; i < ${#DIGITS}; i++)); do
-              WORD="${WORDS[${DIGITS:i:1}]}"
-              HOSTED_MARKER="${HOSTED_MARKER:+$HOSTED_MARKER }$WORD"
-            done
+            HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
             export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly these words: $HOSTED_MARKER. Do not send it during the call."
-            export VOICE_DRIVER_LISTEN=45
+            # Pytest owns the early hangup after both the transcript and open
+            # action gates pass. This is only the media peer's safety ceiling.
+            export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
