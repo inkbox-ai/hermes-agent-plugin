@@ -33,8 +33,10 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
    equal to the requested message. Do not use `conversationId` for this
    post-call send. Require a tool result with `ok: true`; plain text does not
    complete the commitment. If the first call has a recoverable argument or
-   format error, correct it once and retry once. Do not use `[SILENT]` while a
-   safe SMS commitment remains unattempted or unsuccessful.
+   format error, correct it once and retry once. Do not duplicate a well-formed
+   send. If the first error is nonrecoverable or the corrected call also fails,
+   do not call again; use `[SILENT]`. Do not use `[SILENT]` while a safe SMS
+   commitment remains unattempted.
 5. **Avoid exact-quote claims.** Speech-to-text can be imperfect; hedge unless the user supplies exact transcript text.
 
 ## Caveats

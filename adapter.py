@@ -6410,9 +6410,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 "a send and does not complete the commitment.",
                 "If the first tool call returns a recoverable argument or "
                 "format error, correct the arguments once and retry once. "
-                "Otherwise do not duplicate a well-formed send.",
+                "Do not duplicate a well-formed send. If the first error is "
+                "nonrecoverable, or the one corrected call also fails, do "
+                "not call the tool again; reply exactly [SILENT].",
                 "Do not reply [SILENT] while a safe SMS commitment remains "
-                "unattempted or lacks a successful tool result.",
+                "unattempted.",
             ])
         body_parts.extend([
             "",

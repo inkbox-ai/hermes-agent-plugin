@@ -177,7 +177,14 @@ def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
     assert "Do not use conversationId" in prompt
     assert "`ok: true`" in prompt
     assert "correct the arguments once and retry once" in prompt
-    assert "Do not reply [SILENT]" in prompt
+    assert "If the first error is nonrecoverable" in prompt
+    assert "the one corrected call also fails" in prompt
+    assert "do not call the tool again; reply exactly [SILENT]" in prompt
+    assert (
+        "Do not reply [SILENT] while a safe SMS commitment remains unattempted"
+        in prompt
+    )
+    assert "unattempted or lacks a successful tool result" not in prompt
 
 
 def test_hosted_completion_falls_back_to_inline_transcript_for_inbound(
