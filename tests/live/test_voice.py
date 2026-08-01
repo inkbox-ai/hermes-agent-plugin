@@ -262,14 +262,16 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             )[-10:] == driver_tail
         ]
 
-    def _driver_inbound_sms():
+    aut_number_id = aut_numbers[0].id
+
+    def _aut_outbound_sms():
         return [
             message
-            for message in remote.texts.list(st["number_id"], limit=200)
-            if (getattr(message, "direction", "") or "").lower() == "inbound"
+            for message in aut.texts.list(aut_number_id, limit=200)
+            if (getattr(message, "direction", "") or "").lower() == "outbound"
             and _digits(
                 getattr(message, "remote_phone_number", "") or ""
-            )[-10:] == aut_tail
+            )[-10:] == driver_tail
         ]
 
     assert HOSTED_POST_CALL_MARKER, (
@@ -277,13 +279,11 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     )
     before_driver = {call.id for call in _driver_inbound()}
     before_aut = {call.id for call in _aut_outbound()}
-    before_postcall_sms = {
-        message.id for message in _driver_inbound_sms()
-    }
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
     driver_call_id = None
     aut_call = None
+    before_postcall_sms = set()
     try:
         deadline = time.monotonic() + TIMEOUT_S
         while time.monotonic() < deadline:
@@ -320,6 +320,11 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             remote, st["number_id"], driver_call_id, agent_turns=2,
         )
         assert agent_said, "Inkbox Voice AI produced no speech"
+        # Snapshot the sender's authoritative rows after the setup SMS and
+        # live call, immediately before call.ended can trigger follow-up work.
+        before_postcall_sms = {
+            message.id for message in _aut_outbound_sms()
+        }
     finally:
         _hangup_call(remote, driver_call_id)
 
@@ -336,7 +341,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         logs = _gateway_log_text()
         delivered = [
             message
-            for message in _driver_inbound_sms()
+            for message in _aut_outbound_sms()
             if (
                 message.id not in before_postcall_sms
                 and HOSTED_POST_CALL_MARKER
@@ -362,7 +367,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     time.sleep(2 * POLL_EVERY_S)
     new_postcall_sms = [
         message
-        for message in _driver_inbound_sms()
+        for message in _aut_outbound_sms()
         if message.id not in before_postcall_sms
     ]
     assert len(new_postcall_sms) == 1, (
