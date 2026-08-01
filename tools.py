@@ -45,6 +45,23 @@ def _json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+def _safe_tool_error(exc: Exception) -> Dict[str, Any]:
+    """Keep only canonical failure metadata needed for bounded recovery."""
+    payload: Dict[str, Any] = {"error": str(exc)}
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        payload["status_code"] = status_code
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        error_code = detail.get("error") or detail.get("error_code") or detail.get("code")
+        rule = detail.get("rule")
+        if error_code:
+            payload["error_code"] = str(error_code)
+        if rule:
+            payload["rule"] = str(rule)
+    return payload
+
+
 def _a2a_intent(intent: str, text: str, session_id: str) -> str:
     context = read_a2a_turn_context(session_id)
     if context is None:
@@ -857,7 +874,7 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
             "status": object_summary(getattr(msg, "delivery_status", None) or getattr(msg, "status", None)),
         })
     except Exception as exc:
-        return _json({"error": str(exc)})
+        return _json(_safe_tool_error(exc))
 
 
 def inkbox_list_text_conversations(args: dict, **kwargs) -> str:

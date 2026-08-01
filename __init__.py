@@ -9,6 +9,11 @@ from typing import Any
 
 try:
     from .a2a_context import activate_next_a2a_turn_context
+    from .hosted_call_context import (
+        activate_next_hosted_turn_context,
+        observe_hosted_tool_start,
+        observe_hosted_tool_call,
+    )
     from .adapter import InkboxAdapter, check_inkbox_requirements, send_inkbox_direct
     from .cli import setup_argparse, handle_cli, slash_handler
     from .config import read_config, set_runtime_config_extra
@@ -47,6 +52,14 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     activate_next_a2a_turn_context = importlib.import_module(
         f"{_LOCAL_PACKAGE}.a2a_context"
     ).activate_next_a2a_turn_context
+    _hosted_context = importlib.import_module(
+        f"{_LOCAL_PACKAGE}.hosted_call_context"
+    )
+    activate_next_hosted_turn_context = (
+        _hosted_context.activate_next_hosted_turn_context
+    )
+    observe_hosted_tool_call = _hosted_context.observe_hosted_tool_call
+    observe_hosted_tool_start = _hosted_context.observe_hosted_tool_start
 
 logger = logging.getLogger(__name__)
 _unconfigured_warning_emitted = False
@@ -224,12 +237,13 @@ def register(ctx) -> None:
         ),
     )
     register_tools(ctx)
-    ctx.register_hook(
-        "pre_llm_call",
-        lambda session_id="", **_kwargs: activate_next_a2a_turn_context(
-            str(session_id)
-        ),
-    )
+    def _activate_trusted_turn_contexts(session_id="", **_kwargs):
+        activate_next_a2a_turn_context(str(session_id))
+        activate_next_hosted_turn_context(str(session_id))
+
+    ctx.register_hook("pre_llm_call", _activate_trusted_turn_contexts)
+    ctx.register_hook("pre_tool_call", observe_hosted_tool_start)
+    ctx.register_hook("post_tool_call", observe_hosted_tool_call)
     ctx.register_cli_command(
         name="inkbox",
         help="Inkbox plugin commands",

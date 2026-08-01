@@ -241,7 +241,6 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     aut_numbers = aut.phone_numbers.list()
     assert aut_numbers, "AUT identity has no phone number"
     aut_phone = aut_numbers[0].number
-    aut_number_id = str(aut_numbers[0].id)
     aut_tail = _digits(aut_phone)[-10:]
     driver_tail = _digits(st["number"])[-10:]
 
@@ -263,14 +262,14 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             )[-10:] == driver_tail
         ]
 
-    def _aut_outbound_sms():
+    def _driver_inbound_sms():
         return [
             message
-            for message in aut.texts.list(aut_number_id, limit=200)
-            if (getattr(message, "direction", "") or "").lower() == "outbound"
+            for message in remote.texts.list(st["number_id"], limit=200)
+            if (getattr(message, "direction", "") or "").lower() == "inbound"
             and _digits(
                 getattr(message, "remote_phone_number", "") or ""
-            )[-10:] == driver_tail
+            )[-10:] == aut_tail
         ]
 
     assert HOSTED_POST_CALL_MARKER, (
@@ -279,7 +278,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     before_driver = {call.id for call in _driver_inbound()}
     before_aut = {call.id for call in _aut_outbound()}
     before_postcall_sms = {
-        message.id for message in _aut_outbound_sms()
+        message.id for message in _driver_inbound_sms()
     }
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
@@ -337,7 +336,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         logs = _gateway_log_text()
         delivered = [
             message
-            for message in _aut_outbound_sms()
+            for message in _driver_inbound_sms()
             if (
                 message.id not in before_postcall_sms
                 and HOSTED_POST_CALL_MARKER
@@ -363,7 +362,7 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     time.sleep(2 * POLL_EVERY_S)
     new_postcall_sms = [
         message
-        for message in _aut_outbound_sms()
+        for message in _driver_inbound_sms()
         if message.id not in before_postcall_sms
     ]
     assert len(new_postcall_sms) == 1, (

@@ -142,6 +142,11 @@ try:
         read_a2a_turn_context,
         remove_queued_a2a_turn_context,
     )
+    from .hosted_call_context import (
+        clear_hosted_call_context,
+        enqueue_hosted_turn_context,
+        hosted_sms_settlement,
+    )
     from .config import (
         INKBOX_BASE_URL_DEFAULT,
         VoiceStack,
@@ -168,6 +173,11 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         enqueue_a2a_turn_context,
         read_a2a_turn_context,
         remove_queued_a2a_turn_context,
+    )
+    from hosted_call_context import (
+        clear_hosted_call_context,
+        enqueue_hosted_turn_context,
+        hosted_sms_settlement,
     )
     from config import (
         INKBOX_BASE_URL_DEFAULT,
@@ -3648,6 +3658,7 @@ class InkboxAdapter(BasePlatformAdapter):
         state: str,
         outcome: str = "",
         envelope: Dict[str, Any] | None = None,
+        retryable: bool | None = None,
     ) -> None:
         """Persist a hosted completion before acknowledging its webhook."""
         try:
@@ -3681,9 +3692,15 @@ class InkboxAdapter(BasePlatformAdapter):
                 "owner_id": self._hosted_call_registry_owner,
                 "updated_at": now,
             }
+            if retryable is not None:
+                entry["retryable"] = retryable
             # Keep only the bounded data required to rebuild an unfinished
             # synthetic turn. Completed receipts need no call content at all.
-            if state in {"queued", "running", "failed"} and replay_envelope is not None:
+            replayable = (
+                state in {"queued", "running"}
+                or (state == "failed" and retryable is not False)
+            )
+            if replayable and replay_envelope is not None:
                 entry["envelope"] = replay_envelope
             current[call_id] = entry
             if len(current) > 1_000:
@@ -3775,7 +3792,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 if action.get(key) is not None
             })
 
-        return {
+        snapshot = {
             "id": bounded(envelope.get("id"), 128),
             "event_type": "call.ended",
             "data": {
@@ -3785,6 +3802,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 "post_call_action_items": action_snapshot,
             },
         }
+        attempt = int(envelope.get("_inkbox_hosted_reconciliation_attempt") or 1)
+        if attempt > 1:
+            snapshot["_inkbox_hosted_reconciliation_attempt"] = 2
+        return snapshot
 
     async def _catch_up_hosted_call_completions(self) -> None:
         """Replay unfinished hosted-call turns owned by an earlier process."""
@@ -3799,6 +3820,8 @@ class InkboxAdapter(BasePlatformAdapter):
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("state") or "") not in {"queued", "running", "failed"}:
+                continue
+            if entry.get("retryable") is False:
                 continue
             if entry.get("owner_id") == self._hosted_call_registry_owner:
                 continue
@@ -3816,7 +3839,51 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 continue
             try:
-                await self._on_call_ended(envelope)
+                attempt = int(
+                    envelope.get("_inkbox_hosted_reconciliation_attempt") or 1
+                )
+                settlement = hosted_sms_settlement(str(call_id), attempt)
+                if settlement == "success":
+                    self._write_hosted_call_registry(
+                        str(call_id),
+                        event_id=str(entry.get("event_id") or ""),
+                        state="completed",
+                        outcome="success",
+                    )
+                    clear_hosted_call_context(str(call_id))
+                    logger.info(
+                        "[Inkbox] Recovered completed hosted SMS settlement "
+                        "for call_id=%s",
+                        call_id,
+                    )
+                    continue
+                if (
+                    settlement == "terminal"
+                    or (attempt > 1 and settlement == "recoverable")
+                ):
+                    self._write_hosted_call_registry(
+                        str(call_id),
+                        event_id=str(entry.get("event_id") or ""),
+                        state="failed",
+                        outcome="failure",
+                        retryable=False,
+                    )
+                    clear_hosted_call_context(str(call_id))
+                    logger.warning(
+                        "[Inkbox] Finalized ambiguous hosted SMS settlement "
+                        "without replay for call_id=%s",
+                        call_id,
+                    )
+                    continue
+                if settlement == "recoverable" and attempt == 1:
+                    envelope = dict(envelope)
+                    envelope["_inkbox_hosted_reconciliation_attempt"] = 2
+                    await self._on_call_ended(
+                        envelope,
+                        _safe_recovery=True,
+                    )
+                else:
+                    await self._on_call_ended(envelope)
             except Exception:
                 # Startup must remain available so Inkbox can retry fresh
                 # events. Keep the old receipt for the next restart.
@@ -3852,6 +3919,161 @@ class InkboxAdapter(BasePlatformAdapter):
         if not call_id:
             return None
         return call_id, str(raw.get("id") or "").strip()
+
+    @staticmethod
+    def _hosted_sms_required_from_data(
+        data: Dict[str, Any],
+        transcript_texts: list[str] | None = None,
+    ) -> bool:
+        actions = data.get("post_call_action_items")
+        for action in actions if isinstance(actions, list) else []:
+            if (
+                not isinstance(action, dict)
+                or str(action.get("status") or "open") != "open"
+            ):
+                continue
+            action_text = " ".join(
+                str(action.get(field) or "")
+                for field in ("action", "description", "details")
+            ).lower()
+            negated = re.search(
+                r"\b(?:do\s+not|don't|never)\s+(?:"
+                r"text\b[^.!?]{0,80}|"
+                r"send\b[^.!?]{0,80}\b(?:sms|text message)\b)",
+                action_text,
+                re.IGNORECASE,
+            )
+            if not negated and re.search(
+                r"\b(?:sms|text|texted|texting)\b",
+                action_text,
+            ):
+                return True
+
+        if transcript_texts is None:
+            transcript = data.get("transcript")
+            entries = transcript.get("entries") if isinstance(transcript, dict) else []
+            transcript_texts = [
+                str(entry.get("text") or "")
+                for entry in (entries if isinstance(entries, list) else [])
+                if isinstance(entry, dict)
+            ]
+        commitment_patterns = (
+            re.compile(
+                r"\b(?:after\s+(?:we\s+|you\s+|i\s+)?hang\s*up|"
+                r"(?:after|when|once)\s+(?:this|the)\s+call\s+"
+                r"(?:ends?|is\s+over))\b"
+                r".{0,160}\b(?:"
+                r"text\s+(?!(?:messages?|history|thread|conversation|"
+                r"transcript|from|content|body)\b)\S+|"
+                r"send\b.{0,80}\b(?:sms|text message)\b)",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:text\s+(?!(?:messages?|history|thread|conversation|"
+                r"transcript|from|content|body)\b)\S+|"
+                r"send\b.{0,80}\b(?:sms|text message)\b)"
+                r".{0,160}\b(?:after\s+(?:we\s+|you\s+|i\s+)?hang\s*up|"
+                r"(?:after|when|once)\s+(?:this|the)\s+call\s+"
+                r"(?:ends?|is\s+over))\b",
+                re.IGNORECASE,
+            ),
+        )
+        negated_action = re.compile(
+            r"\b(?:do\s+not|don't|never)\s+(?:"
+            r"text\b[^.!?]{0,80}|"
+            r"send\b[^.!?]{0,80}\b(?:sms|text message)\b)",
+            re.IGNORECASE,
+        )
+        for text in transcript_texts:
+            candidate = negated_action.sub("", text)
+            if any(pattern.search(candidate) for pattern in commitment_patterns):
+                return True
+        return False
+
+    @classmethod
+    def _hosted_sms_required(cls, event: MessageEvent) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        detected = raw.get("_inkbox_hosted_sms_required")
+        if isinstance(detected, bool):
+            return detected
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        return cls._hosted_sms_required_from_data(data)
+
+    def _bind_hosted_turn_context(
+        self,
+        event: MessageEvent,
+        *,
+        call_id: str,
+        remote_phone: str,
+        attempt: int,
+    ) -> None:
+        """Bind verified call data to the Hermes session observed by tools."""
+        handler_owner = getattr(
+            getattr(self, "_message_handler", None),
+            "__self__",
+            None,
+        )
+        session_store = getattr(handler_owner, "session_store", None)
+        if session_store is None:
+            # Unit tests that invoke lifecycle hooks directly do not have a
+            # gateway runner. Their settlement state is seeded explicitly.
+            return
+        try:
+            entry = session_store.get_or_create_session(event.source)
+            enqueue_hosted_turn_context(
+                str(entry.session_id),
+                {
+                    "call_id": call_id,
+                    "remote_phone": remote_phone,
+                    "sms_required": self._hosted_sms_required(event),
+                    "attempt": attempt,
+                },
+            )
+        except Exception:
+            # Settlement will remain missing and take the bounded correction
+            # path. Do not abort lifecycle bookkeeping for this model turn.
+            logger.exception(
+                "[Inkbox] Could not bind hosted call tool context for call_id=%s",
+                call_id,
+            )
+
+    def _hosted_sms_correction_event(
+        self,
+        event: MessageEvent,
+        *,
+        call_id: str,
+        remote_phone: str,
+        settlement: str,
+    ) -> MessageEvent:
+        raw = json.loads(json.dumps(event.raw_message or {}))
+        raw["_inkbox_hosted_reconciliation_attempt"] = 2
+        reason = (
+            "The required SMS tool was not called"
+            if settlement == "missing"
+            else "The required SMS tool had a deterministic pre-send error"
+        )
+        text = "\n".join([
+            "[hosted_post_call_sms_correction]",
+            f"{reason}. This is the only correction attempt.",
+            "Call inkbox_send_sms exactly once with `to` set to the exact "
+            f"authoritative remote number `{remote_phone}` and `text` set to "
+            "the still-needed SMS body from the original reconciliation below.",
+            "Do not use conversationId, another recipient, or plain prose. "
+            "Do not reply [SILENT] or skip the tool in this correction turn. "
+            "Stop after the tool result.",
+            "",
+            event.text,
+        ])
+        return MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=event.source,
+            raw_message=raw,
+            message_id=f"call:{call_id}:sms-correction",
+            reply_to_message_id=call_id,
+            channel_prompt=event.channel_prompt,
+            auto_skill=event.auto_skill,
+        )
 
     def _write_a2a_registry(self, key: str, data: Dict[str, Any], state: str) -> None:
         """Durably record an A2A delivery before acknowledging its webhook."""
@@ -4032,6 +4254,15 @@ class InkboxAdapter(BasePlatformAdapter):
         hosted = self._hosted_call_processing_data(event)
         if hosted is not None:
             call_id, event_id = hosted
+            raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            call = data.get("call") if isinstance(data.get("call"), dict) else {}
+            self._bind_hosted_turn_context(
+                event,
+                call_id=call_id,
+                remote_phone=str(call.get("remote_phone_number") or "").strip(),
+                attempt=int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1),
+            )
             chat_id = str(event.source.chat_id)
             self._hosted_post_call_active_chats[chat_id] = (
                 self._hosted_post_call_active_chats.get(chat_id, 0) + 1
@@ -4066,26 +4297,64 @@ class InkboxAdapter(BasePlatformAdapter):
         hosted = self._hosted_call_processing_data(event)
         if hosted is not None:
             call_id, event_id = hosted
+            raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            call = data.get("call") if isinstance(data.get("call"), dict) else {}
+            attempt = int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1)
             outcome_value = str(
                 getattr(outcome, "value", outcome)
             ).strip().lower()
-            receipt_state = (
-                "failed" if outcome_value == "failure" else "completed"
-            )
+            correction_event = None
+            retryable: bool | None = None
+            receipt_state = "completed" if outcome_value == "success" else "failed"
+            if self._hosted_sms_required(event):
+                settlement = hosted_sms_settlement(call_id, attempt)
+                if settlement == "success":
+                    receipt_state = "completed"
+                elif (
+                    attempt == 1
+                    and settlement in {"missing", "recoverable"}
+                ):
+                    correction_event = self._hosted_sms_correction_event(
+                        event,
+                        call_id=call_id,
+                        remote_phone=str(call.get("remote_phone_number") or "").strip(),
+                        settlement=settlement,
+                    )
+                    receipt_state = "queued"
+                else:
+                    receipt_state = "failed"
+                    # Once an SMS tool may have run, or the one correction has
+                    # finished, replay is more dangerous than omission.
+                    retryable = False
             try:
                 self._write_hosted_call_registry(
                     call_id,
                     event_id=event_id,
                     state=receipt_state,
                     outcome=outcome_value,
+                    envelope=(
+                        correction_event.raw_message
+                        if correction_event is not None
+                        and isinstance(correction_event.raw_message, dict)
+                        else None
+                    ),
+                    retryable=retryable,
                 )
-                logger.info(
-                    "[Inkbox] Finished hosted call reconciliation for "
-                    "call_id=%s outcome=%s receipt_state=%s",
-                    call_id,
-                    outcome_value,
-                    receipt_state,
-                )
+                if correction_event is None:
+                    logger.info(
+                        "[Inkbox] Finished hosted call reconciliation for "
+                        "call_id=%s outcome=%s receipt_state=%s",
+                        call_id,
+                        outcome_value,
+                        receipt_state,
+                    )
+                else:
+                    logger.info(
+                        "[Inkbox] Enqueued one hosted SMS correction for "
+                        "call_id=%s",
+                        call_id,
+                    )
             finally:
                 remaining = (
                     self._hosted_post_call_active_chats.get(chat_id, 0) - 1
@@ -4099,6 +4368,12 @@ class InkboxAdapter(BasePlatformAdapter):
                         self._hosted_post_call_failure_replies.get(chat_id, 0)
                         + 1
                     )
+            if correction_event is not None:
+                # Same-session queueing pattern used by A2A below: the host
+                # drains this pending event after the completion hook returns.
+                await self.handle_message(correction_event)
+            else:
+                clear_hosted_call_context(call_id)
             return
 
         if not chat_id.startswith("a2a:"):
@@ -6233,7 +6508,10 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def _on_call_ended(
-        self, envelope: Dict[str, Any],
+        self,
+        envelope: Dict[str, Any],
+        *,
+        _safe_recovery: bool = False,
     ) -> "web.Response":
         """Wake Hermes once after an Inkbox Voice AI call finishes."""
         data = envelope.get("data")
@@ -6263,7 +6541,28 @@ class InkboxAdapter(BasePlatformAdapter):
             and existing.get("owner_id")
             == self._hosted_call_registry_owner
         )
-        if existing_state == "completed" or same_process_inflight:
+        terminal_failure = (
+            existing_state in {"running", "failed"}
+            and isinstance(existing, dict)
+            and existing.get("retryable") is False
+        )
+        ambiguous_running_sms = False
+        if isinstance(existing, dict) and existing_state == "running":
+            replay = existing.get("envelope")
+            replay_attempt = (
+                int(replay.get("_inkbox_hosted_reconciliation_attempt") or 1)
+                if isinstance(replay, dict)
+                else 1
+            )
+            ambiguous_running_sms = (
+                hosted_sms_settlement(call_id, replay_attempt) != "missing"
+            )
+        if (
+            existing_state == "completed"
+            or terminal_failure
+            or (ambiguous_running_sms and not _safe_recovery)
+            or same_process_inflight
+        ):
             logger.info(
                 "[Inkbox] Ignored replayed hosted call completion call_id=%s "
                 "state=%s",
@@ -6347,6 +6646,10 @@ class InkboxAdapter(BasePlatformAdapter):
             if isinstance(action, dict)
             and str(action.get("status") or "open") == "open"
         ]
+        hosted_sms_required = self._hosted_sms_required_from_data(
+            data,
+            [text for _role, text in transcript],
+        )
         transcript_block = "\n".join(
             f"  - {_escape_contact_memory_tokens(role)}: "
             f"{_escape_contact_memory_tokens(text)}"
@@ -6449,16 +6752,25 @@ class InkboxAdapter(BasePlatformAdapter):
         channel_prompt, auto_skill = self._resolve_channel_overrides(
             "voice", contact_id, "inkbox:inkbox-call-review",
         )
+        event_envelope = dict(envelope)
+        event_envelope["_inkbox_hosted_sms_required"] = hosted_sms_required
         event = MessageEvent(
             text="\n".join(body_parts),
             message_type=MessageType.TEXT,
             source=source,
-            raw_message=envelope,
+            raw_message=event_envelope,
             message_id=f"call:{call_id}:ended",
             reply_to_message_id=call_id,
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
         )
+        if int(envelope.get("_inkbox_hosted_reconciliation_attempt") or 1) > 1:
+            event = self._hosted_sms_correction_event(
+                event,
+                call_id=call_id,
+                remote_phone=remote_phone,
+                settlement="missing",
+            )
         self._write_hosted_call_registry(
             call_id,
             event_id=event_id,

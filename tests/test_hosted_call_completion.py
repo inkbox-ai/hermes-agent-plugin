@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import types
 import time
@@ -14,6 +15,12 @@ pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin import adapter as adapter_mod
+from inkbox_plugin.hosted_call_context import (
+    activate_next_hosted_turn_context,
+    enqueue_hosted_turn_context,
+    observe_hosted_tool_call,
+    observe_hosted_tool_start,
+)
 
 
 def _adapter(tmp_path, *, transcript_rows=None, transcript_error=None):
@@ -49,7 +56,53 @@ def _adapter(tmp_path, *, transcript_rows=None, transcript_error=None):
         events.append(event)
 
     instance._enqueue = _enqueue
+    instance.handle_message = _enqueue
     return instance, events
+
+
+def _record_sms_result(
+    tmp_path,
+    monkeypatch,
+    *,
+    attempt=1,
+    result=None,
+    target="+15551112222",
+    count=1,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    enqueue_hosted_turn_context("session-1", {
+        "call_id": "call-1",
+        "remote_phone": "+15551112222",
+        "sms_required": True,
+        "attempt": attempt,
+    })
+    activate_next_hosted_turn_context("session-1")
+    for _ in range(count):
+        observe_hosted_tool_call(
+            tool_name="inkbox_send_sms",
+            args={"to": target, "text": "release-ready"},
+            result=json.dumps(result or {"ok": True}),
+            task_id="session-1",
+            status="ok" if (result or {"ok": True}).get("ok") is True else "error",
+        )
+
+
+def _record_sms_start(tmp_path, monkeypatch, *, attempt=1):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    enqueue_hosted_turn_context("session-1", {
+        "call_id": "call-1",
+        "remote_phone": "+15551112222",
+        "sms_required": True,
+        "attempt": attempt,
+    })
+    activate_next_hosted_turn_context("session-1")
+    observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": "release-ready"},
+        task_id="tool-task-99",
+        session_id="session-1",
+        tool_call_id=f"sms-attempt-{attempt}",
+    )
 
 
 def _payload(
@@ -185,6 +238,441 @@ def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
         in prompt
     )
     assert "unattempted or lacks a successful tool result" not in prompt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "After we hang up, send me one SMS containing release-ready.",
+        "After this call ends, text the release status to the team.",
+        "When the call ends, send her an SMS with the confirmation.",
+        "I will text you once this call is over.",
+    ],
+)
+def test_hosted_sms_commitment_is_detected_in_transcript(tmp_path, text):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = []
+    payload["data"]["transcript"]["entries"] = [{
+        "party": "remote",
+        "text": text,
+    }]
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is True
+
+
+def test_hosted_sms_commitment_uses_fetched_authoritative_transcript(tmp_path):
+    rows = [types.SimpleNamespace(
+        party="remote",
+        text="After we hang up, send me one SMS containing release-ready.",
+    )]
+    instance, events = _adapter(tmp_path, transcript_rows=rows)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = []
+    payload["data"].pop("transcript")
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I got your text yesterday.",
+        "She texted me about the release.",
+        "Our SMS history has the details.",
+        "After we hang up, review the release notes.",
+        "After we hang up, review the text history.",
+        "After we hang up, review the text conversation.",
+        "After we hang up, send me the report by email.",
+        "I will send her the confirmation.",
+        "Please text me the final release status.",
+        "I will send her an SMS with the confirmation.",
+        "The call ended after I sent the message.",
+        "After we hang up, do not send me an SMS.",
+        "Don't text me after the call ends.",
+        "After the call ends, never text me.",
+    ],
+)
+def test_hosted_sms_history_does_not_create_a_commitment(tmp_path, text):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = []
+    payload["data"]["transcript"]["entries"] = [{
+        "party": "remote",
+        "text": text,
+    }]
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is False
+
+
+def test_negated_open_action_does_not_create_sms_commitment(tmp_path):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Do not send me an SMS after this call.",
+        "status": "open",
+    }]
+    payload["data"]["transcript"]["entries"] = []
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is False
+
+
+def test_hosted_sms_missing_tool_enqueues_one_correction(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "id": "action-sms",
+        "action": "Send one SMS containing exactly: release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+
+    asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "success"))
+
+    assert len(events) == 2
+    correction = events[1]
+    assert "only correction attempt" in correction.text
+    assert "Do not reply [SILENT] or skip the tool" in correction.text
+    assert correction.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "queued"
+    assert receipt["envelope"]["_inkbox_hosted_reconciliation_attempt"] == 2
+
+
+def test_queued_hosted_sms_correction_replays_as_correction_after_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+
+    assert len(restarted_events) == 1
+    replay = restarted_events[0]
+    assert "only correction attempt" in replay.text
+    assert replay.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
+
+
+def test_clean_running_hosted_sms_correction_replays_after_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+    correction = events[1]
+    asyncio.run(instance.on_processing_start(correction))
+
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "running"
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+    assert len(restarted_events) == 1
+    assert "only correction attempt" in restarted_events[0].text
+
+
+def test_clean_running_initial_hosted_sms_turn_replays_after_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "running"
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+    assert len(restarted_events) == 1
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_started_hosted_sms_tool_is_terminal_across_restart(
+    tmp_path,
+    monkeypatch,
+    attempt,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    first = events[0]
+    asyncio.run(instance.on_processing_start(first))
+    if attempt == 2:
+        asyncio.run(instance.on_processing_complete(first, "success"))
+        asyncio.run(instance.on_processing_start(events[1]))
+    _record_sms_start(tmp_path, monkeypatch, attempt=attempt)
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+
+    assert restarted_events == []
+    receipt = restarted._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+    assert "envelope" not in receipt
+
+
+def test_recoverable_initial_sms_result_recovers_as_one_correction(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    _record_sms_start(tmp_path, monkeypatch, attempt=1)
+    observe_hosted_tool_call(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": ""},
+        result=json.dumps({"error": "`text` is required"}),
+        task_id="tool-task-99",
+        session_id="session-1",
+        tool_call_id="sms-attempt-1",
+        status="error",
+    )
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+
+    assert len(restarted_events) == 1
+    assert "only correction attempt" in restarted_events[0].text
+    assert restarted_events[0].raw_message[
+        "_inkbox_hosted_reconciliation_attempt"
+    ] == 2
+
+
+def test_recoverable_correction_result_is_terminal_after_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+    asyncio.run(instance.on_processing_start(events[1]))
+    _record_sms_start(tmp_path, monkeypatch, attempt=2)
+    observe_hosted_tool_call(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": ""},
+        result=json.dumps({"error": "`text` is required"}),
+        session_id="session-1",
+        tool_call_id="sms-attempt-2",
+        status="error",
+    )
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+
+    assert restarted_events == []
+    receipt = restarted._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+
+
+def test_hosted_sms_failed_model_turn_still_enqueues_only_correction(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+
+    asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "failure"))
+
+    assert len(events) == 2
+    assert events[1].raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "queued"
+
+
+def test_hosted_sms_exact_success_completes_without_correction(tmp_path, monkeypatch):
+    _record_sms_result(tmp_path, monkeypatch)
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "id": "action-sms",
+        "action": "Send one SMS containing exactly: release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+
+    asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "success"))
+
+    assert len(events) == 1
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "completed"
+
+
+def test_hosted_sms_missing_then_successful_correction_completes(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    first = events[0]
+    asyncio.run(instance.on_processing_start(first))
+    asyncio.run(instance.on_processing_complete(first, "success"))
+    correction = events[1]
+
+    _record_sms_result(tmp_path, monkeypatch, attempt=2)
+    asyncio.run(instance.on_processing_start(correction))
+    asyncio.run(instance.on_processing_complete(correction, "success"))
+
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "completed"
+    assert len(events) == 2
+
+
+def test_hosted_sms_recoverable_failure_enqueues_one_correction(
+    tmp_path,
+    monkeypatch,
+):
+    _record_sms_result(
+        tmp_path,
+        monkeypatch,
+        result={"error": "`text` is required"},
+    )
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    first = events[0]
+
+    asyncio.run(instance.on_processing_start(first))
+    asyncio.run(instance.on_processing_complete(first, "success"))
+
+    assert len(events) == 2
+    assert "deterministic pre-send error" in events[1].text
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "queued"
+
+
+@pytest.mark.parametrize(
+    ("target", "count"),
+    [("+15559990000", 1), ("+15551112222", 2)],
+)
+def test_hosted_sms_wrong_or_duplicate_attempt_is_terminal(
+    tmp_path,
+    monkeypatch,
+    target,
+    count,
+):
+    _record_sms_result(
+        tmp_path,
+        monkeypatch,
+        target=target,
+        count=count,
+    )
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+    asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "success"))
+
+    assert len(events) == 1
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+    assert restarted_events == []
+
+
+def test_hosted_sms_failed_correction_is_terminal(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    first = events[0]
+    asyncio.run(instance.on_processing_start(first))
+    asyncio.run(instance.on_processing_complete(first, "success"))
+    correction = events[1]
+
+    asyncio.run(instance.on_processing_start(correction))
+    asyncio.run(instance.on_processing_complete(correction, "success"))
+
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+    assert len(events) == 2
 
 
 def test_hosted_completion_falls_back_to_inline_transcript_for_inbound(
