@@ -6,32 +6,26 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 MARKER_HELPER = ROOT / "tests" / "live" / "voice_marker.py"
 SPEECH_WORDS = {
-    "apple",
-    "basket",
-    "candle",
-    "dragon",
-    "engine",
-    "forest",
-    "garden",
-    "hammer",
-    "island",
-    "jacket",
-    "kettle",
-    "lemon",
-    "meadow",
-    "napkin",
-    "orange",
-    "pencil",
-    "rabbit",
-    "silver",
-    "tiger",
+    "banana",
+    "elephant",
+    "pineapple",
+    "alligator",
+    "motorcycle",
     "umbrella",
-    "velvet",
-    "window",
-    "yellow",
-    "zebra",
-    "coffee",
-    "sunset",
+    "dinosaur",
+    "potato",
+    "computer",
+    "volcano",
+    "airplane",
+    "butterfly",
+    "kangaroo",
+    "octopus",
+    "calendar",
+    "chocolate",
+    "hospital",
+    "library",
+    "sandwich",
+    "telescope",
 }
 
 
@@ -59,7 +53,7 @@ def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
 def test_live_voice_marker_mapping_is_stable():
     words = _marker("55071")
 
-    assert words == ["forest", "pencil", "velvet", "lemon", "rabbit"]
+    assert words == ["umbrella", "chocolate", "banana", "library", "elephant"]
 
 
 def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
