@@ -164,3 +164,13 @@ def test_terminal_cleanup_prevents_later_session_sms_misattribution():
     clear_hosted_call_context("call-1")
     _observe()
     assert hosted_sms_settlement("call-1", 1) == "missing"
+
+
+def test_durable_context_uses_private_directory_and_files(tmp_path):
+    _activate()
+    root = tmp_path / "inkbox_hosted_call_contexts"
+
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert list(root.glob("*.json"))
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in root.glob("*.json"))
+    assert list(root.glob("*.tmp")) == []

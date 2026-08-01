@@ -146,6 +146,7 @@ try:
         clear_hosted_call_context,
         enqueue_hosted_turn_context,
         hosted_sms_settlement,
+        mark_hosted_binding_failure,
     )
     from .config import (
         INKBOX_BASE_URL_DEFAULT,
@@ -178,6 +179,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         clear_hosted_call_context,
         enqueue_hosted_turn_context,
         hosted_sms_settlement,
+        mark_hosted_binding_failure,
     )
     from config import (
         INKBOX_BASE_URL_DEFAULT,
@@ -228,6 +230,61 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
+
+_TRANSCRIPT_POST_CALL_TIMING = (
+    r"(?:after|when|once)\s+(?:(?:i|we|you)\s+hang\s*up|"
+    r"(?:this|the)\s+call\s+(?:ends?|is\s+over))"
+)
+_TRANSCRIPT_TEXT_VERB = (
+    r"text\s+(?!conversation\b|exchange\b|messages?\b|history\b|thread\b|"
+    r"yesterday\b|earlier\b|from\b)[\w@][\w@.'’+-]*\b"
+)
+_TRANSCRIPT_TEXT_CLAUSE_PREFIX = (
+    r"(?:please\s+|then\s+|(?:(?:can|could|would|will)\s+you|"
+    r"(?:i|we)\s*(?:will|'ll|’ll|am\s+going\s+to|are\s+going\s+to))\s+)"
+)
+_TRANSCRIPT_SEND_SMS = r"send\b.{0,80}\b(?:an?\s+)?(?:sms|text\s+message)\b"
+_TRANSCRIPT_NEGATED_SMS_ACTION = re.compile(
+    r"\b(?:do\s+not|don['’]?t|never)\s+(?:(?:ever|again)\s+)?"
+    r"(?:text\b|send\b.{0,80}\b(?:sms|text\s+message)\b)",
+    re.IGNORECASE,
+)
+_TRANSCRIPT_SMS_COMMITMENT_PATTERNS = (
+    re.compile(
+        rf"\b{_TRANSCRIPT_POST_CALL_TIMING}\b[\s,;:!—-]*"
+        rf"(?:{_TRANSCRIPT_TEXT_CLAUSE_PREFIX})?{_TRANSCRIPT_TEXT_VERB}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:^|[.!?]\s+|\b{_TRANSCRIPT_TEXT_CLAUSE_PREFIX})"
+        rf"{_TRANSCRIPT_TEXT_VERB}.{{0,160}}\b{_TRANSCRIPT_POST_CALL_TIMING}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_TRANSCRIPT_POST_CALL_TIMING}\b.{{0,160}}{_TRANSCRIPT_SEND_SMS}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_TRANSCRIPT_SEND_SMS}.{{0,160}}\b{_TRANSCRIPT_POST_CALL_TIMING}\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _write_private_json_atomic(path: Path, value: Any) -> None:
+    """Write JSON without exposing a permissive temporary-file window."""
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, path)
+    path.chmod(0o600)
 
 # Injected as the per-turn system prompt whenever an external event wakes the
 # agent. The agent's text reply on an external thread is not delivered to a
@@ -3710,11 +3767,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     reverse=True,
                 )[:1_000]
                 current = dict(newest)
-            tmp = self._hosted_call_registry_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
-            tmp.chmod(0o600)
-            os.replace(tmp, self._hosted_call_registry_path)
-            self._hosted_call_registry_path.chmod(0o600)
+            _write_private_json_atomic(self._hosted_call_registry_path, current)
         except Exception:
             logger.exception(
                 "[Inkbox] Could not persist hosted-call completion registry"
@@ -3898,11 +3951,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if call_id not in current:
             return
         current.pop(call_id, None)
-        tmp = self._hosted_call_registry_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
-        tmp.chmod(0o600)
-        os.replace(tmp, self._hosted_call_registry_path)
-        self._hosted_call_registry_path.chmod(0o600)
+        _write_private_json_atomic(self._hosted_call_registry_path, current)
 
     @staticmethod
     def _hosted_call_processing_data(
@@ -3929,23 +3978,18 @@ class InkboxAdapter(BasePlatformAdapter):
         for action in actions if isinstance(actions, list) else []:
             if (
                 not isinstance(action, dict)
-                or str(action.get("status") or "open") != "open"
+                or str(action.get("status") or "open").strip().lower() != "open"
             ):
                 continue
             action_text = " ".join(
                 str(action.get(field) or "")
                 for field in ("action", "description", "details")
-            ).lower()
-            negated = re.search(
-                r"\b(?:do\s+not|don't|never)\s+(?:"
-                r"text\b[^.!?]{0,80}|"
-                r"send\b[^.!?]{0,80}\b(?:sms|text message)\b)",
-                action_text,
-                re.IGNORECASE,
             )
+            negated = _TRANSCRIPT_NEGATED_SMS_ACTION.search(action_text)
             if not negated and re.search(
                 r"\b(?:sms|text|texted|texting)\b",
                 action_text,
+                re.IGNORECASE,
             ):
                 return True
 
@@ -3957,36 +4001,13 @@ class InkboxAdapter(BasePlatformAdapter):
                 for entry in (entries if isinstance(entries, list) else [])
                 if isinstance(entry, dict)
             ]
-        commitment_patterns = (
-            re.compile(
-                r"\b(?:after\s+(?:we\s+|you\s+|i\s+)?hang\s*up|"
-                r"(?:after|when|once)\s+(?:this|the)\s+call\s+"
-                r"(?:ends?|is\s+over))\b"
-                r".{0,160}\b(?:"
-                r"text\s+(?!(?:messages?|history|thread|conversation|"
-                r"transcript|from|content|body)\b)\S+|"
-                r"send\b.{0,80}\b(?:sms|text message)\b)",
-                re.IGNORECASE,
-            ),
-            re.compile(
-                r"\b(?:text\s+(?!(?:messages?|history|thread|conversation|"
-                r"transcript|from|content|body)\b)\S+|"
-                r"send\b.{0,80}\b(?:sms|text message)\b)"
-                r".{0,160}\b(?:after\s+(?:we\s+|you\s+|i\s+)?hang\s*up|"
-                r"(?:after|when|once)\s+(?:this|the)\s+call\s+"
-                r"(?:ends?|is\s+over))\b",
-                re.IGNORECASE,
-            ),
-        )
-        negated_action = re.compile(
-            r"\b(?:do\s+not|don't|never)\s+(?:"
-            r"text\b[^.!?]{0,80}|"
-            r"send\b[^.!?]{0,80}\b(?:sms|text message)\b)",
-            re.IGNORECASE,
-        )
         for text in transcript_texts:
-            candidate = negated_action.sub("", text)
-            if any(pattern.search(candidate) for pattern in commitment_patterns):
+            if _TRANSCRIPT_NEGATED_SMS_ACTION.search(text):
+                continue
+            if any(
+                pattern.search(text)
+                for pattern in _TRANSCRIPT_SMS_COMMITMENT_PATTERNS
+            ):
                 return True
         return False
 
@@ -4015,8 +4036,13 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         session_store = getattr(handler_owner, "session_store", None)
         if session_store is None:
-            # Unit tests that invoke lifecycle hooks directly do not have a
-            # gateway runner. Their settlement state is seeded explicitly.
+            if self._hosted_sms_required(event):
+                mark_hosted_binding_failure(call_id, attempt, remote_phone)
+                logger.error(
+                    "[Inkbox] Hosted SMS context unavailable for call_id=%s; "
+                    "tool sends will be blocked",
+                    call_id,
+                )
             return
         try:
             entry = session_store.get_or_create_session(event.source)
@@ -4030,8 +4056,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 },
             )
         except Exception:
-            # Settlement will remain missing and take the bounded correction
-            # path. Do not abort lifecycle bookkeeping for this model turn.
+            if self._hosted_sms_required(event):
+                mark_hosted_binding_failure(call_id, attempt, remote_phone)
             logger.exception(
                 "[Inkbox] Could not bind hosted call tool context for call_id=%s",
                 call_id,

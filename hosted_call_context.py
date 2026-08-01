@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 _LOCK = threading.Lock()
+_BINDING_FAILURES: Dict[tuple[str, int], str] = {}
 
 
 def _root() -> Path:
@@ -44,10 +45,66 @@ def _settlement_path(call_id: str, attempt: int) -> Path:
 
 def _atomic_write(path: Path, value: Any) -> None:
     tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    tmp.chmod(0o600)
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, sort_keys=True) + "\n")
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     os.replace(tmp, path)
     path.chmod(0o600)
+
+
+def _binding_failure_path(call_id: str, attempt: int) -> Path:
+    return _root() / f"binding-{_digest(call_id)}-{attempt}.json"
+
+
+def mark_hosted_binding_failure(
+    call_id: str,
+    attempt: int,
+    remote_phone: str,
+) -> None:
+    """Fail closed when trusted hosted context cannot bind to a session."""
+    with _LOCK:
+        _BINDING_FAILURES[(_digest(call_id), attempt)] = _digest(remote_phone.strip())
+        _atomic_write(_binding_failure_path(call_id, attempt), {
+            "terminal": True,
+            "target_digest": _digest(remote_phone.strip()),
+        })
+
+
+def _binding_failure_matches(args: Any) -> bool:
+    arguments = args if isinstance(args, dict) else {}
+    target = arguments.get("to")
+    if isinstance(target, list):
+        target = target[0] if len(target) == 1 else ""
+    target = str(target or "").strip()
+    has_conversation = bool(
+        arguments.get("conversationId") or arguments.get("conversation_id")
+    )
+    target_digest = _digest(target) if target else ""
+    with _LOCK:
+        active_targets = set(_BINDING_FAILURES.values())
+    if has_conversation and active_targets:
+        return True
+    if target_digest and target_digest in active_targets:
+        return True
+    for path in _root().glob("binding-*.json"):
+        if has_conversation:
+            return True
+        try:
+            value = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if (
+            target
+            and isinstance(value, dict)
+            and value.get("target_digest") == _digest(target)
+        ):
+            return True
+    return False
 
 
 def enqueue_hosted_turn_context(session_id: str, context: Dict[str, Any]) -> None:
@@ -224,10 +281,15 @@ def observe_hosted_tool_start(
     session_id: str = "",
     tool_call_id: str = "",
     **_kwargs: Any,
-) -> None:
+) -> Optional[Dict[str, str]]:
     """Persist a sanitized pending marker before an SMS side effect starts."""
     if tool_name != "inkbox_send_sms":
         return
+    if _binding_failure_matches(args):
+        return {
+            "action": "block",
+            "message": "Hosted-call SMS context is unavailable; send blocked safely.",
+        }
     context = _read_context(str(session_id))
     if context is None:
         context = _read_context(str(task_id))
@@ -260,6 +322,12 @@ def observe_hosted_tool_start(
 
 def hosted_sms_settlement(call_id: str, attempt: int) -> str:
     """Return success, missing, recoverable, or terminal for one model turn."""
+    with _LOCK:
+        failed_in_process = (_digest(call_id), attempt) in _BINDING_FAILURES
+    if failed_in_process:
+        return "terminal"
+    if _binding_failure_path(call_id, attempt).exists():
+        return "terminal"
     try:
         loaded = json.loads(_settlement_path(call_id, attempt).read_text())
         observations = loaded if isinstance(loaded, list) else []
@@ -279,7 +347,9 @@ def clear_hosted_call_context(call_id: str) -> None:
     """Remove sanitized per-call attempt observations after terminal settlement."""
     with _LOCK:
         for attempt in (1, 2):
+            _BINDING_FAILURES.pop((_digest(call_id), attempt), None)
             _settlement_path(call_id, attempt).unlink(missing_ok=True)
+            _binding_failure_path(call_id, attempt).unlink(missing_ok=True)
         for path in _root().glob("session-*.json"):
             try:
                 loaded = json.loads(path.read_text())

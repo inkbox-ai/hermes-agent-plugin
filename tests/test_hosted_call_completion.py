@@ -52,6 +52,19 @@ def _adapter(tmp_path, *, transcript_rows=None, transcript_error=None):
         lambda *_args: (None, ["inkbox:inkbox-call-review"])
     )
 
+    class SessionStore:
+        @staticmethod
+        def get_or_create_session(_source):
+            return types.SimpleNamespace(session_id="bound-session")
+
+    class HandlerOwner:
+        session_store = SessionStore()
+
+        def handle(self, _event):
+            return None
+
+    instance._message_handler = HandlerOwner().handle
+
     async def _enqueue(event):
         events.append(event)
 
@@ -287,13 +300,18 @@ def test_hosted_sms_commitment_uses_fetched_authoritative_transcript(tmp_path):
         "After we hang up, review the release notes.",
         "After we hang up, review the text history.",
         "After we hang up, review the text conversation.",
+        "After we hang up, review the text exchange.",
+        "Review the text exchange after we hang up.",
         "After we hang up, send me the report by email.",
         "I will send her the confirmation.",
         "Please text me the final release status.",
         "I will send her an SMS with the confirmation.",
         "The call ended after I sent the message.",
         "After we hang up, do not send me an SMS.",
+        "After we hang up, do not ever send me an SMS.",
         "Don't text me after the call ends.",
+        "Don’t text me after the call ends.",
+        "Dont text me after the call ends.",
         "After the call ends, never text me.",
     ],
 )
@@ -311,11 +329,18 @@ def test_hosted_sms_history_does_not_create_a_commitment(tmp_path, text):
     assert instance._hosted_sms_required(events[0]) is False
 
 
-def test_negated_open_action_does_not_create_sms_commitment(tmp_path):
+@pytest.mark.parametrize("action", [
+    "Do not send me an SMS after this call.",
+    "Do not ever send me an SMS after this call.",
+    "Don't text me after this call.",
+    "Don’t text me after this call.",
+    "Dont text me after this call.",
+])
+def test_negated_open_action_does_not_create_sms_commitment(tmp_path, action):
     instance, events = _adapter(tmp_path)
     payload = _payload()
     payload["data"]["post_call_action_items"] = [{
-        "action": "Do not send me an SMS after this call.",
+        "action": action,
         "status": "open",
     }]
     payload["data"]["transcript"]["entries"] = []
@@ -323,6 +348,85 @@ def test_negated_open_action_does_not_create_sms_commitment(tmp_path):
     asyncio.run(instance._on_call_ended(payload))
 
     assert instance._hosted_sms_required(events[0]) is False
+
+
+def test_hosted_sms_binding_failure_blocks_only_affected_target(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+
+    class FailingStore:
+        @staticmethod
+        def get_or_create_session(_source):
+            raise OSError("session store unavailable")
+
+    instance._message_handler.__self__.session_store = FailingStore()
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+
+    asyncio.run(instance.on_processing_start(event))
+    blocked = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": "release-ready"},
+        session_id="unbound-session",
+        tool_call_id="blocked-call",
+    )
+    unrelated = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15559990000", "text": "unrelated"},
+        session_id="unrelated-session",
+        tool_call_id="unrelated-call",
+    )
+
+    assert blocked == {
+        "action": "block",
+        "message": "Hosted-call SMS context is unavailable; send blocked safely.",
+    }
+    assert unrelated is None
+    asyncio.run(instance.on_processing_complete(event, "success"))
+    assert len(events) == 1
+    receipt = instance._read_hosted_call_registry()["call-1"]
+    assert receipt["state"] == "failed"
+    assert receipt["retryable"] is False
+
+
+def test_hosted_sms_context_persist_failure_blocks_send(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        adapter_mod,
+        "enqueue_hosted_turn_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    event = events[0]
+
+    asyncio.run(instance.on_processing_start(event))
+    directive = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": "release-ready"},
+        session_id="bound-session",
+        tool_call_id="blocked-call",
+    )
+
+    assert directive and directive["action"] == "block"
+    asyncio.run(instance.on_processing_complete(event, "success"))
+    assert instance._read_hosted_call_registry()["call-1"]["state"] == "failed"
 
 
 def test_hosted_sms_missing_tool_enqueues_one_correction(tmp_path, monkeypatch):
@@ -710,6 +814,7 @@ def test_queued_hosted_completion_recovers_once_after_adapter_restart(tmp_path):
     assert asyncio.run(first._on_call_ended(_payload())).status == 200
     assert len(first_events) == 1
     receipt = first._read_hosted_call_registry()["call-1"]
+    assert first._hosted_call_registry_path.stat().st_mode & 0o777 == 0o600
     assert receipt["envelope"]["data"]["call"]["id"] == "call-1"
     assert "transcript" not in receipt["envelope"]["data"]
     assert "memories" not in receipt["envelope"]["data"]["contacts"][0]
