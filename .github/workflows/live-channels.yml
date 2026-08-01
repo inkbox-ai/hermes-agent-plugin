@@ -121,7 +121,7 @@ jobs:
             "$GITHUB_WORKSPACE/tests/live/mock_openai.py" 8088 > "$RUNNER_TEMP/mock.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/mock.pid"
           for i in $(seq 1 10); do
-            curl -sf http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
+            curl -sf --connect-timeout 1 --max-time 3 http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
             sleep 1
           done
           echo "::error::mock model did not start"; cat "$RUNNER_TEMP/mock.log"; exit 1
