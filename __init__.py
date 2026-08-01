@@ -9,9 +9,14 @@ from typing import Any
 
 try:
     from .a2a_context import activate_next_a2a_turn_context
+    from .hosted_call_context import (
+        activate_next_hosted_turn_context,
+        observe_hosted_tool_start,
+        observe_hosted_tool_call,
+    )
     from .adapter import InkboxAdapter, check_inkbox_requirements, send_inkbox_direct
     from .cli import setup_argparse, handle_cli, slash_handler
-    from .config import read_config
+    from .config import read_config, set_runtime_config_extra
     from .diagnostics import SETUP_HINT
     from .setup_wizard import interactive_setup
     from .tools import register_tools
@@ -40,12 +45,21 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     handle_cli = _cli.handle_cli
     slash_handler = _cli.slash_handler
     read_config = _config.read_config
+    set_runtime_config_extra = _config.set_runtime_config_extra
     SETUP_HINT = _diagnostics.SETUP_HINT
     interactive_setup = _setup_wizard.interactive_setup
     register_tools = _tools.register_tools
     activate_next_a2a_turn_context = importlib.import_module(
         f"{_LOCAL_PACKAGE}.a2a_context"
     ).activate_next_a2a_turn_context
+    _hosted_context = importlib.import_module(
+        f"{_LOCAL_PACKAGE}.hosted_call_context"
+    )
+    activate_next_hosted_turn_context = (
+        _hosted_context.activate_next_hosted_turn_context
+    )
+    observe_hosted_tool_call = _hosted_context.observe_hosted_tool_call
+    observe_hosted_tool_start = _hosted_context.observe_hosted_tool_start
 
 logger = logging.getLogger(__name__)
 _unconfigured_warning_emitted = False
@@ -86,6 +100,21 @@ def _env_enablement() -> dict | None:
         "api_key": cfg.api_key,
         "identity": cfg.identity,
     }
+    configured_voice_stack = os.getenv("INKBOX_VOICE_STACK", "").strip()
+    if configured_voice_stack:
+        seed["voice_stack"] = configured_voice_stack
+    configured_authority = os.getenv(
+        "INKBOX_VOICE_AI_AUTHORITY_MODE",
+        "",
+    ).strip()
+    if configured_authority:
+        seed["voice_ai_authority_mode"] = configured_authority
+    configured_voicemail = os.getenv(
+        "INKBOX_VOICEMAIL_DETECTION",
+        "",
+    ).strip()
+    if configured_voicemail:
+        seed["voicemail_detection"] = configured_voicemail
     if cfg.base_url:
         seed["base_url"] = cfg.base_url
     if cfg.signing_key:
@@ -131,6 +160,12 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "requireSignature": "require_signature",
         "contact_memories_enabled": "contact_memories_enabled",
         "contactMemoriesEnabled": "contact_memories_enabled",
+        "voice_stack": "voice_stack",
+        "voiceStack": "voice_stack",
+        "voice_ai_authority_mode": "voice_ai_authority_mode",
+        "voiceAiAuthorityMode": "voice_ai_authority_mode",
+        "voicemail_detection": "voicemail_detection",
+        "voicemailDetection": "voicemail_detection",
         "sms_text_batch_delay_seconds": "sms_text_batch_delay_seconds",
         "smsTextBatchDelaySeconds": "sms_text_batch_delay_seconds",
     }
@@ -145,6 +180,7 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
     for passthrough in ("channel_prompts", "channel_skill_bindings"):
         if passthrough in platform_cfg and passthrough not in extra:
             extra[passthrough] = platform_cfg[passthrough]
+    set_runtime_config_extra(extra)
     return extra or None
 
 
@@ -201,12 +237,13 @@ def register(ctx) -> None:
         ),
     )
     register_tools(ctx)
-    ctx.register_hook(
-        "pre_llm_call",
-        lambda session_id="", **_kwargs: activate_next_a2a_turn_context(
-            str(session_id)
-        ),
-    )
+    def _activate_trusted_turn_contexts(session_id="", **_kwargs):
+        activate_next_a2a_turn_context(str(session_id))
+        activate_next_hosted_turn_context(str(session_id))
+
+    ctx.register_hook("pre_llm_call", _activate_trusted_turn_contexts)
+    ctx.register_hook("pre_tool_call", observe_hosted_tool_start)
+    ctx.register_hook("post_tool_call", observe_hosted_tool_call)
     ctx.register_cli_command(
         name="inkbox",
         help="Inkbox plugin commands",

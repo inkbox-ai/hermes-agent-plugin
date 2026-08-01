@@ -8,7 +8,12 @@ pkg = types.ModuleType("inkbox_plugin")
 pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
-from inkbox_plugin.config import InkboxPluginConfig, read_config, public_call_ws_url
+from inkbox_plugin.config import (
+    InkboxPluginConfig,
+    VoiceStack,
+    public_call_ws_url,
+    read_config,
+)
 from inkbox_plugin.adapter import _bool_setting
 from inkbox_plugin.tools import _append_query_param
 
@@ -53,3 +58,39 @@ def test_contact_memories_platform_config_overrides_environment(monkeypatch):
         True,
     ) is False
     assert read_config().contact_memories_enabled is True
+
+
+def test_voice_stack_preserves_legacy_realtime_auto_detection(monkeypatch):
+    monkeypatch.delenv("INKBOX_VOICE_STACK", raising=False)
+    monkeypatch.delenv("INKBOX_REALTIME_ENABLED", raising=False)
+    monkeypatch.setenv("INKBOX_REALTIME_API_KEY", "sk-existing")
+
+    assert read_config().voice_stack is VoiceStack.OPENAI_REALTIME
+
+    monkeypatch.setenv("INKBOX_REALTIME_ENABLED", "false")
+    assert read_config().voice_stack is VoiceStack.INKBOX_TTS_STT
+
+
+def test_explicit_voice_stack_is_canonical(monkeypatch):
+    monkeypatch.setenv("INKBOX_REALTIME_API_KEY", "sk-existing")
+    monkeypatch.setenv("INKBOX_REALTIME_ENABLED", "true")
+    monkeypatch.setenv("INKBOX_VOICE_STACK", "inkbox_voice_ai")
+    monkeypatch.setenv("INKBOX_VOICE_AI_AUTHORITY_MODE", "yolo")
+    monkeypatch.setenv("INKBOX_VOICEMAIL_DETECTION", "disabled")
+
+    cfg = read_config()
+
+    assert cfg.voice_stack is VoiceStack.INKBOX_VOICE_AI
+    assert cfg.voice_ai_authority_mode == "yolo"
+    assert cfg.voicemail_detection == "disabled"
+    assert cfg.voice_stack_invalid_value == ""
+
+
+def test_invalid_voice_stack_fails_closed_to_tts(monkeypatch):
+    monkeypatch.setenv("INKBOX_VOICE_STACK", "unknown")
+    monkeypatch.setenv("INKBOX_REALTIME_API_KEY", "sk-existing")
+
+    cfg = read_config()
+
+    assert cfg.voice_stack is VoiceStack.INKBOX_TTS_STT
+    assert cfg.voice_stack_invalid_value == "unknown"

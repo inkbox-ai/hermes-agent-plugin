@@ -44,9 +44,15 @@ explicitly only to override that default.
    - `origination` — usually omit it; it auto-follows the conversation's channel (and the only available line). Set it explicitly only to override.
    - `opening_message` — include when the user told you what to say first.
    - `context` — concise background the voice agent may need during the call.
-4. Do not invent or request `client_websocket_url`; the plugin supplies the active Inkbox call bridge when the channel gateway is running.
-5. When the callee answers, the call session starts with the supplied purpose/context instead of a generic greeting.
+4. Do not invent or request `client_websocket_url`. In Inkbox Voice AI mode no
+   media WebSocket is used; in OpenAI Realtime and Inkbox TTS/STT modes the
+   plugin supplies the active bridge.
+5. In Inkbox Voice AI mode, `purpose`, `opening_message`, and `context` become
+   the hosted task brief. In the local modes they seed the live-call context.
+6. When the callee answers, the selected voice stack conducts the call.
 
 ## Follow-ups
 
-If the user asks you to call and then send a post-call email/SMS/note, include that request in the call context. During realtime calls, the voice agent can register post-call actions for the main agent to execute after hangup.
+If the user asks you to call and then send a post-call email/SMS/note, include
+that request in the call context. OpenAI Realtime and Inkbox Voice AI can record
+post-call actions for Hermes to reconcile and execute once after hangup.

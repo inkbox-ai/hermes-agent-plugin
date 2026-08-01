@@ -38,6 +38,75 @@ def _with_tool_bridge(req: dict[str, Any]) -> dict[str, Any]:
     return req
 
 
+def test_responses_stream_has_typed_output_and_terminal_events() -> None:
+    response = {
+        "text": "REPLY_OK smoke-012345",
+    }
+
+    events = mock._responses_events(response, "mock-model")
+
+    assert [event["type"] for event in events] == [
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert events[0]["delta"] == "REPLY_OK smoke-012345"
+    completed = events[-1]["response"]
+    assert completed["status"] == "completed"
+    assert completed["output"][0]["content"][0]["text"] == response["text"]
+
+
+def test_responses_tool_history_and_output_are_understood() -> None:
+    req = {
+        "input": [
+            {"role": "user", "content": "complete the task"},
+            {
+                "id": "fc-1",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "inkbox_a2a_check",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": json.dumps(_task_result("task-1", "TASK_STATE_WORKING")),
+            },
+        ],
+        "tools": [{"type": "function", "name": "inkbox_a2a_complete"}],
+    }
+    response = {
+        "id": "call-2",
+        "name": "inkbox_a2a_complete",
+        "arguments": {"text": "done"},
+    }
+
+    assert mock._effective_tool_names(req) == ["inkbox_a2a_check"]
+    assert mock._available_tool_names(req) == {"inkbox_a2a_complete"}
+    assert mock._task_id(req) == "task-1"
+    output = mock._responses_output(response)[0]
+    assert output["type"] == "function_call"
+    assert output["name"] == "inkbox_a2a_complete"
+
+
+def test_responses_lazy_tool_bridge_history_uses_underlying_name() -> None:
+    req = {
+        "input": [{
+            "id": "fc-1",
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "tool_call",
+            "arguments": json.dumps({
+                "name": "inkbox_a2a_check",
+                "arguments": {"taskId": "task-1"},
+            }),
+        }],
+    }
+
+    assert mock._tool_names(req) == ["tool_call"]
+    assert mock._effective_tool_names(req) == ["inkbox_a2a_check"]
+
+
 def _record_tool(
     req: dict[str, Any],
     response: dict[str, Any],

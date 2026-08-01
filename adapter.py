@@ -21,12 +21,12 @@ On ``connect()`` the adapter:
   2. Registers webhook subscriptions for the configured identity's
      mailbox (``message.*`` events), phone number (``text.*``
      events), and — when the identity is iMessage-enabled — the
-     identity itself (``imessage.*`` events; shared and dedicated iMessage
-     lines are all owned by the agent identity at the webhook layer) pointing
-     at the tunnel, and
-     patches the phone number's incoming-call webhook URL + WebSocket
-     URL on the resource itself (the call channel is a synchronous
-     control-plane callback and is not a fan-out subscription).
+     identity itself (``imessage.*`` and ``call.*`` events use separate
+     subscriptions because each subscription belongs to one event channel;
+     shared and dedicated iMessage lines are all owned by the agent identity)
+     pointing at the tunnel, and configures the identity's incoming-call
+     routing. Incoming call control remains synchronous, while completed-call
+     lifecycle events arrive through the ``call.*`` subscription.
   3. Starts an aiohttp server with two routes:
         - ``POST /webhook`` — verifies the ``X-Inkbox-Signature`` HMAC
           via the SDK, parses the body into one of three event shapes
@@ -89,6 +89,7 @@ import shutil
 import re
 import socket as _socket
 import time
+import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -141,7 +142,19 @@ try:
         read_a2a_turn_context,
         remove_queued_a2a_turn_context,
     )
-    from .config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from .hosted_call_context import (
+        clear_hosted_call_context,
+        enqueue_hosted_turn_context,
+        hosted_sms_settlement,
+        mark_hosted_binding_failure,
+    )
+    from .config import (
+        INKBOX_BASE_URL_DEFAULT,
+        VoiceStack,
+        inkbox_client_kwargs,
+        resolve_voice_stack,
+        set_runtime_config_extra,
+    )
     from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
     from .realtime import (
@@ -162,7 +175,19 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         read_a2a_turn_context,
         remove_queued_a2a_turn_context,
     )
-    from config import INKBOX_BASE_URL_DEFAULT, inkbox_client_kwargs
+    from hosted_call_context import (
+        clear_hosted_call_context,
+        enqueue_hosted_turn_context,
+        hosted_sms_settlement,
+        mark_hosted_binding_failure,
+    )
+    from config import (
+        INKBOX_BASE_URL_DEFAULT,
+        VoiceStack,
+        inkbox_client_kwargs,
+        resolve_voice_stack,
+        set_runtime_config_extra,
+    )
     from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
     from realtime import (
@@ -205,6 +230,94 @@ DEFAULT_WEBHOOK_PATH = "/webhook"
 DEFAULT_WS_PATH = "/phone/media/ws"
 CONTACT_CACHE_TTL_SECONDS = 300
 WEBHOOK_DEDUP_TTL_SECONDS = 300
+
+_TRANSCRIPT_POST_CALL_TIMING = (
+    r"(?:after|when|once)\s+(?:(?:i|we|you)\s+hang\s*up|"
+    r"(?:this|the)\s+call\s+(?:ends?|is\s+over))"
+)
+_TRANSCRIPT_TEXT_VERB = (
+    r"text\s+(?!conversation\b|exchange\b|messages?\b|history\b|thread\b|"
+    r"yesterday\b|earlier\b|from\b)[\w@][\w@.'’+-]*\b"
+)
+_TRANSCRIPT_TEXT_CLAUSE_PREFIX = (
+    r"(?:please\s+|then\s+|(?:(?:can|could|would|will)\s+you|"
+    r"(?:i|we)\s*(?:will|'ll|’ll|am\s+going\s+to|are\s+going\s+to))\s+)"
+)
+_TRANSCRIPT_SEND_SMS = r"send\b.{0,80}\b(?:an?\s+)?(?:sms|text\s+message)\b"
+_TRANSCRIPT_NEGATED_SMS_ACTION = re.compile(
+    r"\b(?:do\s+not|don['’]?t|never)\s+(?:(?:ever|again)\s+)?"
+    r"(?:text\b|send\b.{0,80}\b(?:sms|text\s+message)\b)",
+    re.IGNORECASE,
+)
+_TRANSCRIPT_SMS_COMMITMENT_PATTERNS = (
+    re.compile(
+        rf"\b{_TRANSCRIPT_POST_CALL_TIMING}\b[\s,;:!—-]*"
+        rf"(?:{_TRANSCRIPT_TEXT_CLAUSE_PREFIX})?{_TRANSCRIPT_TEXT_VERB}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:^|[.!?]\s+|\b{_TRANSCRIPT_TEXT_CLAUSE_PREFIX})"
+        rf"{_TRANSCRIPT_TEXT_VERB}.{{0,160}}\b{_TRANSCRIPT_POST_CALL_TIMING}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_TRANSCRIPT_POST_CALL_TIMING}\b.{{0,160}}{_TRANSCRIPT_SEND_SMS}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_TRANSCRIPT_SEND_SMS}.{{0,160}}\b{_TRANSCRIPT_POST_CALL_TIMING}\b",
+        re.IGNORECASE,
+    ),
+)
+_OPEN_ACTION_SMS_COMMITMENT_PATTERNS = (
+    re.compile(rf"\b{_TRANSCRIPT_TEXT_VERB}", re.IGNORECASE),
+    re.compile(rf"\b{_TRANSCRIPT_SEND_SMS}", re.IGNORECASE),
+)
+
+
+def _sms_candidate_clauses(text: str) -> list[str]:
+    """Build clause windows without widening a negation to later intent."""
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"(?:[.!?;]+|\s+\bbut\b\s+)", str(text or ""), flags=re.IGNORECASE)
+        if clause.strip()
+    ]
+    candidates = list(clauses)
+    candidates.extend(
+        f"{left}; {right}"
+        for left, right in zip(clauses, clauses[1:])
+        if not _TRANSCRIPT_NEGATED_SMS_ACTION.search(left)
+        and not _TRANSCRIPT_NEGATED_SMS_ACTION.search(right)
+    )
+    return candidates
+
+
+def _positive_sms_clauses(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+) -> list[str]:
+    return [
+        clause
+        for clause in _sms_candidate_clauses(text)
+        if not _TRANSCRIPT_NEGATED_SMS_ACTION.search(clause)
+        and any(pattern.search(clause) for pattern in patterns)
+    ]
+
+
+def _write_private_json_atomic(path: Path, value: Any) -> None:
+    """Write JSON without exposing a permissive temporary-file window."""
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, path)
+    path.chmod(0o600)
 
 # Injected as the per-turn system prompt whenever an external event wakes the
 # agent. The agent's text reply on an external thread is not delivered to a
@@ -367,7 +480,7 @@ _DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
         "Rewrite the message so it no longer trips the stated rule and it "
         "reads like a human text: plain conversational prose, no markdown "
         "(**bold**, # headers, ``` fences), at most one emoji, no profanity, "
-        "no test/probe phrasing. Then send the corrected reply now."
+        "no test/probe phrasing."
     ),
     "imessage": (
         "Rewrite the message so it no longer trips the stated rule and it "
@@ -383,6 +496,106 @@ _DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
         "only resend here if you have reason to think it will now deliver."
     ),
 }
+
+_DELIVERY_FAILURE_TERMINAL_CODES = frozenset({
+    "recipient_not_opted_in",
+    "recipient_opted_out",
+    "recipient_blocked",
+    "invalid_phone_number",
+    "carrier_rejected",
+    "sender_sms_pending",
+    "sender_sms_assignment_failed",
+    "sender_not_registered",
+    "sender_registration_required",
+    "messaging_profile_disabled",
+    "toll_free_sms_unsupported",
+})
+_DELIVERY_FAILURE_TERMINAL_MARKERS = (
+    "opted out",
+    "opt-out",
+    "not opted in",
+    "invalid number",
+    "invalid phone",
+    "unreachable",
+    "unknown subscriber",
+    "cannot receive",
+    "unsafe",
+    "harmful",
+    "abusive",
+    "harassment",
+    "threatening",
+    "illegal content",
+)
+_DELIVERY_FAILURE_RETRY_MARKERS = (
+    "40002",
+    "spam",
+    "content",
+    "too_long",
+    "too long",
+    "markdown",
+    "emoji",
+    "profanity",
+    "temporar",
+    "carrier_unavailable",
+)
+
+
+def _sms_delivery_failure_policy(
+    error_code: Optional[str],
+    error_detail: Optional[str],
+) -> str:
+    """Classify whether an SMS failure requires retry, stop, or judgment."""
+    code = str(error_code or "").strip().lower()
+    detail = str(error_detail or "").strip().lower()
+    combined = f"{code} {detail}"
+    if code in _DELIVERY_FAILURE_TERMINAL_CODES or any(
+        marker in combined for marker in _DELIVERY_FAILURE_TERMINAL_MARKERS
+    ):
+        return "stop"
+    if any(marker in combined for marker in _DELIVERY_FAILURE_RETRY_MARKERS):
+        return "retry"
+    return "conditional"
+
+
+def _delivery_failure_reply_instruction(
+    *,
+    mode: str,
+    error_code: Optional[str],
+    error_detail: Optional[str],
+    attempt: int,
+) -> str:
+    """Give the model one non-contradictory action for this failure class."""
+    if mode != "sms":
+        return (
+            "Send a corrected message only when it is safe, permitted, and likely "
+            "to deliver. Otherwise reply exactly [SILENT]."
+        )
+    policy = _sms_delivery_failure_policy(error_code, error_detail)
+    if policy == "retry":
+        if attempt == 1:
+            return (
+                "SMS failure classification: FIRST SAFE RETRY REQUIRED. This "
+                "is the first failure and it is retryable. You MUST now send "
+                "exactly one safe, materially rephrased SMS in plain "
+                "conversational prose; do not reuse the failed wording."
+            )
+        return (
+            "SMS failure classification: RETRY OPTIONAL. A safe, materially "
+            "rephrased SMS may use the remaining retry budget, but the first "
+            "retry has already failed. You may instead reply exactly [SILENT]."
+        )
+    if policy == "stop":
+        return (
+            "SMS failure classification: DO NOT RETRY. The recipient has not "
+            "consented, the destination is invalid or unreachable, or the "
+            "content is unsafe or harmful. Do not resend this message; reply "
+            "exactly [SILENT]."
+        )
+    return (
+        "SMS failure classification: REVIEW BEFORE RETRY. Send one corrected "
+        "SMS only if it is safe, permitted, and likely to deliver. Otherwise "
+        "reply exactly [SILENT]."
+    )
 
 
 def _inkbox_platform() -> Platform:
@@ -424,6 +637,7 @@ _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.delivery_failed",
     "imessage.reaction_received",
 )
+_DESIRED_CALL_EVENTS: tuple[str, ...] = ("call.ended",)
 _DESIRED_A2A_EVENTS: tuple[str, ...] = (
     "a2a.task.created",
     "a2a.task.message",
@@ -739,7 +953,20 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
         if rt_enabled_raw is not None
         else "auto"
     )
-    rt_enabled_requested = rt_enabled_text in ("auto", "true", "1", "yes", "on")
+    explicit_voice_stack = str(
+        extra.get("voice_stack") or os.getenv("INKBOX_VOICE_STACK") or ""
+    ).strip()
+    if explicit_voice_stack:
+        resolved_stack, invalid_stack = resolve_voice_stack(
+            explicit_voice_stack,
+            realtime_enabled=rt_enabled_raw,
+            realtime_api_key=rt_api_key,
+        )
+        rt_enabled_requested = (
+            not invalid_stack and resolved_stack is VoiceStack.OPENAI_REALTIME
+        )
+    else:
+        rt_enabled_requested = rt_enabled_text in ("auto", "true", "1", "yes", "on")
     config = RealtimeConfig(
         enabled=rt_enabled_requested and rt_has_cred,
         api_key=rt_api_key,
@@ -763,7 +990,7 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
             True,
         ),
     )
-    if rt_enabled_text in ("true", "1", "yes", "on") and not rt_has_cred:
+    if rt_enabled_requested and not rt_has_cred:
         logger.warning(
             "[Inkbox] realtime voice was enabled but no OpenAI credential was found "
             "(checked realtime.api_key, INKBOX_REALTIME_API_KEY, OPENAI_API_KEY); "
@@ -994,6 +1221,25 @@ def _reconcile_imessage_subscription(
         previous_webhook_url=previous_webhook_url,
         desired_events=desired_events,
     )
+
+
+def _reconcile_call_subscription(
+    client,
+    agent_identity_id,
+    desired_url: str,
+    previous_webhook_url: Optional[str],
+    desired_events: tuple[str, ...] = _DESIRED_CALL_EVENTS,
+):
+    """Reconcile the identity-owned call lifecycle subscription."""
+    return _reconcile_subscription(
+        client,
+        owner_kwarg="agent_identity_id",
+        owner_id=agent_identity_id,
+        desired_url=desired_url,
+        previous_webhook_url=previous_webhook_url,
+        desired_events=desired_events,
+    )
+
 
 SMS_CONTROL_WORDS = frozenset({
     "start",
@@ -1709,6 +1955,7 @@ class InkboxAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, _inkbox_platform())
         extra = config.extra or {}
+        set_runtime_config_extra(extra)
 
         self._api_key = (
             extra.get("api_key") or os.getenv("INKBOX_API_KEY") or ""
@@ -1790,6 +2037,16 @@ class InkboxAdapter(BasePlatformAdapter):
         #   additional_instructions: str
         #   consult_timeout_s: float
         self._realtime_config = _resolve_realtime_config(extra)
+        self._voice_stack, self._voice_stack_invalid_value = resolve_voice_stack(
+            extra.get("voice_stack") or os.getenv("INKBOX_VOICE_STACK"),
+            realtime_enabled=(
+                extra.get("realtime", {}).get("enabled")
+                if isinstance(extra.get("realtime"), dict)
+                and "enabled" in extra["realtime"]
+                else os.getenv("INKBOX_REALTIME_ENABLED")
+            ),
+            realtime_api_key=self._realtime_config.api_key,
+        )
         self._sms_text_batch_delay_seconds = _float_setting(
             extra,
             "sms_text_batch_delay_seconds",
@@ -1871,6 +2128,17 @@ class InkboxAdapter(BasePlatformAdapter):
         # otherwise fall through to the email/SMS default and leak the
         # voice-intended text into the user's inbox.
         self._voice_recently_closed: Dict[str, float] = {}
+        # Contact ids whose synthetic hosted-call completion turn is currently
+        # being processed. Unlike the short voice-close grace period above,
+        # this remains active for the entire tool-using turn so a slow
+        # post-call reconciliation can never leak its model prose to SMS,
+        # iMessage, or email.
+        self._hosted_post_call_active_chats: Dict[str, int] = {}
+        # Hermes reports a failed processing outcome before it sends its own
+        # generated error text. Track that one known fallback separately so
+        # the completion hook can release the active-turn count without
+        # allowing the host error to escape onto a user channel.
+        self._hosted_post_call_failure_replies: Dict[str, int] = {}
         self._a2a_tasks_by_chat: Dict[str, List[str]] = {}
         self._a2a_events_by_chat: Dict[str, List[MessageEvent]] = {}
         self._a2a_active_chats: set[str] = set()
@@ -1881,6 +2149,10 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_registry_path = _inkbox_state_path().with_name(
             "inkbox_a2a_tasks.json"
         )
+        self._hosted_call_registry_path = _inkbox_state_path().with_name(
+            "inkbox_hosted_call_completions.json"
+        )
+        self._hosted_call_registry_owner = uuid.uuid4().hex
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1891,6 +2163,13 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.warning(
                 "[Inkbox] aiohttp or `inkbox` SDK not installed. "
                 "Run: pip install 'hermes-agent[inkbox]' or `pip install inkbox aiohttp`",
+            )
+            return False
+        if self._voice_stack_invalid_value:
+            logger.error(
+                "[Inkbox] Invalid INKBOX_VOICE_STACK=%r. Run `hermes inkbox "
+                "setup` and restart the gateway.",
+                self._voice_stack_invalid_value,
             )
             return False
         if not self._api_key:
@@ -1985,6 +2264,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return False
 
         self._mark_connected()
+        await self._catch_up_hosted_call_completions()
         await self._catch_up_a2a_tasks()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
@@ -2200,22 +2480,33 @@ class InkboxAdapter(BasePlatformAdapter):
                 identity.phone_number.number, webhook_url,
             )
 
-        # Inbound-call config is identity-scoped (SDK 0.4.15+): one row covers
-        # the dedicated number AND any shared iMessage line. ``auto_accept``
-        # skips the webhook round-trip and opens the WS directly (context in
-        # the ``x-call-context`` header). Register whenever calls can arrive.
+        # Inbound-call config is identity-scoped: one row covers the dedicated
+        # number and any shared iMessage line. Local voice stacks open the media
+        # WebSocket directly; Inkbox Voice AI handles media without this bridge.
         can_receive_calls = (
             identity.phone_number is not None
             or bool(getattr(identity, "imessage_enabled", False))
         )
         if can_receive_calls:
             if hasattr(identity, "set_incoming_call_action"):
-                identity.set_incoming_call_action(
-                    incoming_call_action="auto_accept",
-                    client_websocket_url=ws_url,
-                    incoming_call_webhook_url=webhook_url,
-                )
+                if self._voice_stack is VoiceStack.INKBOX_VOICE_AI:
+                    identity.set_incoming_call_action(
+                        incoming_call_action="hosted_agent",
+                        client_websocket_url=None,
+                        incoming_call_webhook_url=None,
+                    )
+                else:
+                    identity.set_incoming_call_action(
+                        incoming_call_action="auto_accept",
+                        client_websocket_url=ws_url,
+                        incoming_call_webhook_url=webhook_url,
+                    )
             elif identity.phone_number is not None:
+                if self._voice_stack is VoiceStack.INKBOX_VOICE_AI:
+                    raise RuntimeError(
+                        "Inkbox Voice AI requires identity-scoped incoming-call "
+                        "configuration from a newer Inkbox SDK."
+                    )
                 # Legacy SDKs (<0.4.15) only expose the number-scoped shim,
                 # which cannot configure a shared-iMessage-only identity.
                 self._inkbox.phone_numbers.update(
@@ -2225,8 +2516,9 @@ class InkboxAdapter(BasePlatformAdapter):
                     client_websocket_url=ws_url,
                 )
             logger.info(
-                "[Inkbox] Patched incoming-call action for identity %s → %s + %s",
-                self._identity_handle, webhook_url, ws_url,
+                "[Inkbox] Patched incoming-call action for identity %s → %s",
+                self._identity_handle,
+                self._voice_stack.value,
             )
 
         # Identity-owned event channels use independent subscription rows at
@@ -2254,6 +2546,14 @@ class InkboxAdapter(BasePlatformAdapter):
                     desired_url=webhook_url,
                     previous_webhook_url=previous_webhook_url,
                     desired_events=_DESIRED_IMESSAGE_EVENTS,
+                )
+            if can_receive_calls:
+                _reconcile_call_subscription(
+                    self._inkbox,
+                    self._identity_id,
+                    desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url,
+                    desired_events=_DESIRED_CALL_EVENTS,
                 )
             logger.info(
                 "[Inkbox] Patched identity events for %s → %s",
@@ -2705,6 +3005,39 @@ class InkboxAdapter(BasePlatformAdapter):
         # post-call send_message tool call is exactly the case that bit us
         # (the agent's "reflect on the call" reply leaked out as an email).
         VOICE_GRACE_SECONDS = 60
+        chat_key = str(chat_id)
+        active_hosted_turns = getattr(
+            self, "_hosted_post_call_active_chats", {},
+        )
+        if active_hosted_turns.get(chat_key, 0) > 0:
+            logger.info(
+                "[Inkbox] Suppressed hosted post-call model text for chat %s: %s…",
+                chat_id, (content or "")[:60].replace("\n", " "),
+            )
+            return SendResult(
+                success=True,
+                message_id="suppressed-hosted-post-call-text",
+            )
+        failure_replies = getattr(
+            self, "_hosted_post_call_failure_replies", {},
+        )
+        pending_failure_replies = failure_replies.get(chat_key, 0)
+        if (
+            pending_failure_replies > 0
+            and (content or "").startswith("Sorry, I encountered an error (")
+        ):
+            if pending_failure_replies == 1:
+                failure_replies.pop(chat_key, None)
+            else:
+                failure_replies[chat_key] = pending_failure_replies - 1
+            logger.info(
+                "[Inkbox] Suppressed hosted post-call host error for chat %s",
+                chat_id,
+            )
+            return SendResult(
+                success=True,
+                message_id="suppressed-hosted-post-call-error",
+            )
         closed_at = self._voice_recently_closed.get(str(chat_id))
         if (
             closed_at is not None
@@ -3213,7 +3546,13 @@ class InkboxAdapter(BasePlatformAdapter):
 
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
-        if request_id and self._dedup_begin(request_id):
+        event_id = (
+            str(envelope.get("id") or "").strip()
+            if event_type == "call.ended"
+            else ""
+        )
+        dedup_id = event_id or request_id
+        if dedup_id and self._dedup_begin(dedup_id):
             return web.Response(status=200, text="duplicate")
 
         try:
@@ -3249,6 +3588,8 @@ class InkboxAdapter(BasePlatformAdapter):
                     response = await self._on_imessage_reaction(envelope)
                 elif event_type and event_type.startswith("imessage."):
                     response = await self._on_imessage_lifecycle(envelope)
+                elif event_type == "call.ended":
+                    response = await self._on_call_ended(envelope)
                 else:
                     response = await self._on_incoming_call(envelope)
             elif source is not None and source != "inkbox":
@@ -3273,9 +3614,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 # a fresh session each.
                 response = web.Response(status=200, text="ignored")
         except Exception:
-            self._dedup_rollback(request_id)
+            self._dedup_rollback(dedup_id)
             raise
-        self._dedup_commit(request_id)
+        self._dedup_commit(dedup_id)
         return response
 
     @staticmethod
@@ -3296,7 +3637,7 @@ class InkboxAdapter(BasePlatformAdapter):
             bool: True for a recognised Inkbox event shape.
         """
         if event_type and event_type.startswith(
-            ("message.", "text.", "imessage.", "a2a.")
+            ("message.", "text.", "imessage.", "a2a.", "call.")
         ):
             return True
         return "phone_number_id" in envelope and "remote_phone_number" in envelope
@@ -3391,6 +3732,442 @@ class InkboxAdapter(BasePlatformAdapter):
             return {}
         loaded = json.loads(self._a2a_registry_path.read_text())
         return loaded if isinstance(loaded, dict) else {}
+
+    def _read_hosted_call_registry(self) -> Dict[str, Any]:
+        """Read durable hosted-call completion receipts."""
+        if not self._hosted_call_registry_path.exists():
+            return {}
+        loaded = json.loads(self._hosted_call_registry_path.read_text())
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _write_hosted_call_registry(
+        self,
+        call_id: str,
+        *,
+        event_id: str,
+        state: str,
+        outcome: str = "",
+        envelope: Dict[str, Any] | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        """Persist a hosted completion before acknowledging its webhook."""
+        try:
+            now = time.time()
+            current = self._read_hosted_call_registry()
+            # Completion receipts are only needed across normal webhook retry
+            # and restart windows. Bound the file even on long-running agents.
+            current = {
+                key: value
+                for key, value in current.items()
+                if (
+                    isinstance(value, dict)
+                    and now - float(value.get("updated_at") or 0)
+                    < 30 * 24 * 60 * 60
+                )
+            }
+            previous = current.get(call_id)
+            replay_envelope = (
+                self._hosted_call_replay_envelope(envelope)
+                if envelope is not None
+                else (
+                    previous.get("envelope")
+                    if isinstance(previous, dict)
+                    else None
+                )
+            )
+            entry = {
+                "event_id": event_id,
+                "state": state,
+                "outcome": outcome,
+                "owner_id": self._hosted_call_registry_owner,
+                "updated_at": now,
+            }
+            if retryable is not None:
+                entry["retryable"] = retryable
+            # Keep only the bounded data required to rebuild an unfinished
+            # synthetic turn. Completed receipts need no call content at all.
+            replayable = (
+                state in {"queued", "running"}
+                or (state == "failed" and retryable is not False)
+            )
+            if replayable and replay_envelope is not None:
+                entry["envelope"] = replay_envelope
+            current[call_id] = entry
+            if len(current) > 1_000:
+                newest = sorted(
+                    current.items(),
+                    key=lambda item: float(item[1].get("updated_at") or 0),
+                    reverse=True,
+                )[:1_000]
+                current = dict(newest)
+            _write_private_json_atomic(self._hosted_call_registry_path, current)
+        except Exception:
+            logger.exception(
+                "[Inkbox] Could not persist hosted-call completion registry"
+            )
+            raise
+
+    @staticmethod
+    def _hosted_call_replay_envelope(
+        envelope: Dict[str, Any] | None,
+    ) -> Dict[str, Any] | None:
+        """Return the bounded minimum needed to replay a completed call.
+
+        The authenticated webhook can contain a full transcript and contact
+        memories. Those are intentionally not copied to disk: replay fetches
+        the authoritative transcript through the SDK, while this snapshot
+        retains only routing, outcome, and open-action context. The registry is
+        also mode 0600 and discards this snapshot once processing completes.
+        """
+        if not isinstance(envelope, dict):
+            return None
+        data = envelope.get("data")
+        call = data.get("call") if isinstance(data, dict) else None
+        if not isinstance(call, dict):
+            return None
+
+        def bounded(value: Any, limit: int) -> str:
+            return str(value or "")[:limit]
+
+        call_snapshot = {
+            key: bounded(call.get(key), limit)
+            for key, limit in (
+                ("id", 128),
+                ("mode", 64),
+                ("direction", 32),
+                ("status", 64),
+                ("hangup_reason", 512),
+                ("remote_phone_number", 128),
+                ("reason", 4_000),
+            )
+            if call.get(key) is not None
+        }
+        contacts = data.get("contacts") if isinstance(data, dict) else None
+        contact_snapshot: list[Dict[str, str]] = []
+        if isinstance(contacts, list) and contacts and isinstance(contacts[0], dict):
+            contact = contacts[0]
+            contact_snapshot.append({
+                key: bounded(contact.get(key), limit)
+                for key, limit in (
+                    ("id", 128),
+                    ("name", 1_000),
+                    ("preferred_name", 1_000),
+                )
+                if contact.get(key) is not None
+            })
+
+        action_snapshot = []
+        raw_actions = (
+            data.get("post_call_action_items")
+            if isinstance(data, dict)
+            else None
+        )
+        for action in raw_actions[:100] if isinstance(raw_actions, list) else []:
+            if not isinstance(action, dict):
+                continue
+            action_snapshot.append({
+                key: bounded(action.get(key), limit)
+                for key, limit in (
+                    ("id", 128),
+                    ("seq", 32),
+                    ("action", 4_000),
+                    ("description", 4_000),
+                    ("details", 8_000),
+                    ("status", 64),
+                )
+                if action.get(key) is not None
+            })
+
+        snapshot = {
+            "id": bounded(envelope.get("id"), 128),
+            "event_type": "call.ended",
+            "data": {
+                "call": call_snapshot,
+                "contacts": contact_snapshot,
+                "outcome": bounded(data.get("outcome"), 128),
+                "post_call_action_items": action_snapshot,
+            },
+        }
+        attempt = int(envelope.get("_inkbox_hosted_reconciliation_attempt") or 1)
+        if attempt > 1:
+            snapshot["_inkbox_hosted_reconciliation_attempt"] = 2
+        return snapshot
+
+    async def _catch_up_hosted_call_completions(self) -> None:
+        """Replay unfinished hosted-call turns owned by an earlier process."""
+        try:
+            entries = list(self._read_hosted_call_registry().items())
+        except Exception:
+            logger.exception(
+                "[Inkbox] Could not read hosted-call completion registry"
+            )
+            return
+        for call_id, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("state") or "") not in {"queued", "running", "failed"}:
+                continue
+            if entry.get("retryable") is False:
+                continue
+            if entry.get("owner_id") == self._hosted_call_registry_owner:
+                continue
+            envelope = entry.get("envelope")
+            data = envelope.get("data") if isinstance(envelope, dict) else None
+            call = data.get("call") if isinstance(data, dict) else None
+            if (
+                not isinstance(call, dict)
+                or str(call.get("id") or "").strip() != str(call_id)
+            ):
+                logger.warning(
+                    "[Inkbox] Cannot replay unfinished hosted call %s: "
+                    "receipt has no valid event snapshot",
+                    call_id,
+                )
+                continue
+            try:
+                attempt = int(
+                    envelope.get("_inkbox_hosted_reconciliation_attempt") or 1
+                )
+                settlement = hosted_sms_settlement(str(call_id), attempt)
+                if settlement == "success":
+                    self._write_hosted_call_registry(
+                        str(call_id),
+                        event_id=str(entry.get("event_id") or ""),
+                        state="completed",
+                        outcome="success",
+                    )
+                    clear_hosted_call_context(str(call_id))
+                    logger.info(
+                        "[Inkbox] Recovered completed hosted SMS settlement "
+                        "for call_id=%s",
+                        call_id,
+                    )
+                    continue
+                if (
+                    settlement == "terminal"
+                    or (attempt > 1 and settlement == "recoverable")
+                ):
+                    self._write_hosted_call_registry(
+                        str(call_id),
+                        event_id=str(entry.get("event_id") or ""),
+                        state="failed",
+                        outcome="failure",
+                        retryable=False,
+                    )
+                    clear_hosted_call_context(str(call_id))
+                    logger.warning(
+                        "[Inkbox] Finalized ambiguous hosted SMS settlement "
+                        "without replay for call_id=%s",
+                        call_id,
+                    )
+                    continue
+                if settlement == "recoverable" and attempt == 1:
+                    envelope = dict(envelope)
+                    envelope["_inkbox_hosted_reconciliation_attempt"] = 2
+                    await self._on_call_ended(
+                        envelope,
+                        _safe_recovery=True,
+                    )
+                else:
+                    await self._on_call_ended(envelope)
+            except Exception:
+                # Startup must remain available so Inkbox can retry fresh
+                # events. Keep the old receipt for the next restart.
+                logger.exception(
+                    "[Inkbox] Failed to replay hosted call completion %s",
+                    call_id,
+                )
+
+    def _forget_hosted_call_registry(self, call_id: str) -> None:
+        """Allow webhook retry when enqueueing the synthetic turn failed."""
+        current = self._read_hosted_call_registry()
+        if call_id not in current:
+            return
+        current.pop(call_id, None)
+        _write_private_json_atomic(self._hosted_call_registry_path, current)
+
+    @staticmethod
+    def _hosted_call_processing_data(
+        event: MessageEvent,
+    ) -> tuple[str, str] | None:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        if raw.get("event_type") != "call.ended":
+            return None
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        call = data.get("call") if isinstance(data.get("call"), dict) else {}
+        if str(call.get("mode") or "") != "hosted_agent":
+            return None
+        call_id = str(call.get("id") or "").strip()
+        if not call_id:
+            return None
+        return call_id, str(raw.get("id") or "").strip()
+
+    @staticmethod
+    def _hosted_sms_required_from_data(
+        data: Dict[str, Any],
+        transcript_texts: list[str] | None = None,
+    ) -> bool:
+        actions = data.get("post_call_action_items")
+        for action in actions if isinstance(actions, list) else []:
+            if (
+                not isinstance(action, dict)
+                or str(action.get("status") or "open").strip().lower() != "open"
+            ):
+                continue
+            action_text = " ".join(
+                str(action.get(field) or "")
+                for field in ("action", "description", "details")
+            )
+            if _positive_sms_clauses(
+                action_text,
+                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
+            ):
+                return True
+
+        if transcript_texts is None:
+            transcript = data.get("transcript")
+            entries = transcript.get("entries") if isinstance(transcript, dict) else []
+            transcript_texts = [
+                str(entry.get("text") or "")
+                for entry in (entries if isinstance(entries, list) else [])
+                if isinstance(entry, dict)
+            ]
+        for text in transcript_texts:
+            if _positive_sms_clauses(
+                text,
+                _TRANSCRIPT_SMS_COMMITMENT_PATTERNS,
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _hosted_sms_context_from_data(
+        data: Dict[str, Any],
+        transcript_texts: list[str],
+    ) -> list[str]:
+        """Keep only the positive SMS clauses needed by a correction turn."""
+        context: list[str] = []
+        actions = data.get("post_call_action_items")
+        for action in actions if isinstance(actions, list) else []:
+            if (
+                not isinstance(action, dict)
+                or str(action.get("status") or "open").strip().lower() != "open"
+            ):
+                continue
+            action_text = " ".join(
+                str(action.get(field) or "")
+                for field in ("action", "description", "details")
+            )
+            context.extend(_positive_sms_clauses(
+                action_text,
+                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
+            ))
+        for text in transcript_texts:
+            context.extend(_positive_sms_clauses(
+                text,
+                _TRANSCRIPT_SMS_COMMITMENT_PATTERNS,
+            ))
+        return [value[:4_000] for value in context[:20]]
+
+    @classmethod
+    def _hosted_sms_required(cls, event: MessageEvent) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        detected = raw.get("_inkbox_hosted_sms_required")
+        if isinstance(detected, bool):
+            return detected
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        return cls._hosted_sms_required_from_data(data)
+
+    def _bind_hosted_turn_context(
+        self,
+        event: MessageEvent,
+        *,
+        call_id: str,
+        remote_phone: str,
+        attempt: int,
+    ) -> bool:
+        """Bind verified call data to the Hermes session observed by tools."""
+        sms_required = self._hosted_sms_required(event)
+        handler_owner = getattr(
+            getattr(self, "_message_handler", None),
+            "__self__",
+            None,
+        )
+        session_store = getattr(handler_owner, "session_store", None)
+        if session_store is None:
+            if sms_required:
+                mark_hosted_binding_failure(call_id, attempt, remote_phone)
+                logger.error(
+                    "[Inkbox] Hosted SMS context unavailable for call_id=%s; "
+                    "tool sends will be blocked",
+                    call_id,
+                )
+            return not sms_required
+        try:
+            entry = session_store.get_or_create_session(event.source)
+            enqueue_hosted_turn_context(
+                str(entry.session_id),
+                {
+                    "call_id": call_id,
+                    "remote_phone": remote_phone,
+                    "sms_required": self._hosted_sms_required(event),
+                    "attempt": attempt,
+                },
+            )
+            return True
+        except Exception:
+            if sms_required:
+                mark_hosted_binding_failure(call_id, attempt, remote_phone)
+            logger.exception(
+                "[Inkbox] Could not bind hosted call tool context for call_id=%s",
+                call_id,
+            )
+            return not sms_required
+
+    def _hosted_sms_correction_event(
+        self,
+        event: MessageEvent,
+        *,
+        call_id: str,
+        remote_phone: str,
+        settlement: str,
+    ) -> MessageEvent:
+        raw = json.loads(json.dumps(event.raw_message or {}))
+        raw["_inkbox_hosted_reconciliation_attempt"] = 2
+        reason = (
+            "The required SMS tool was not called"
+            if settlement == "missing"
+            else "The required SMS tool had a deterministic pre-send error"
+        )
+        sms_context = raw.get("_inkbox_hosted_sms_context")
+        context_lines = [
+            f"- {str(value)[:4_000]}"
+            for value in (sms_context if isinstance(sms_context, list) else [])[:20]
+            if str(value).strip()
+        ]
+        text = "\n".join([
+            "[hosted_post_call_sms_correction]",
+            f"{reason}. This is the only correction attempt.",
+            "Call inkbox_send_sms exactly once with `to` set to the exact "
+            f"authoritative remote number `{remote_phone}` and `text` set to "
+            "the still-needed SMS body from the SMS-only context below.",
+            "Do not use conversationId, another recipient, or plain prose. "
+            "Do not reply [SILENT] or skip the tool in this correction turn. "
+            "Do not execute any non-SMS post-call action. Stop after the tool result.",
+            "",
+            "Still-needed SMS context:",
+            *(context_lines or ["- Use the SMS commitment from the completed call context."]),
+        ])
+        return MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=event.source,
+            raw_message=raw,
+            message_id=f"call:{call_id}:sms-correction",
+            reply_to_message_id=call_id,
+            channel_prompt=event.channel_prompt,
+            auto_skill=event.auto_skill,
+        )
 
     def _write_a2a_registry(self, key: str, data: Dict[str, Any], state: str) -> None:
         """Durably record an A2A delivery before acknowledging its webhook."""
@@ -3568,6 +4345,42 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        hosted = self._hosted_call_processing_data(event)
+        if hosted is not None:
+            call_id, event_id = hosted
+            raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            call = data.get("call") if isinstance(data.get("call"), dict) else {}
+            bound = self._bind_hosted_turn_context(
+                event,
+                call_id=call_id,
+                remote_phone=str(call.get("remote_phone_number") or "").strip(),
+                attempt=int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1),
+            )
+            if not bound:
+                raw["_inkbox_hosted_binding_failed"] = True
+                self._write_hosted_call_registry(
+                    call_id,
+                    event_id=event_id,
+                    state="failed",
+                    outcome="failure",
+                    retryable=False,
+                )
+                clear_hosted_call_context(call_id)
+                raise RuntimeError(
+                    "Hosted-call SMS context could not be bound safely"
+                )
+            chat_id = str(event.source.chat_id)
+            self._hosted_post_call_active_chats[chat_id] = (
+                self._hosted_post_call_active_chats.get(chat_id, 0) + 1
+            )
+            self._write_hosted_call_registry(
+                call_id,
+                event_id=event_id,
+                state="running",
+            )
+            return
+
         if not str(event.source.chat_id).startswith("a2a:"):
             return
         self._a2a_default_reply_allowed[str(event.source.chat_id)] = True
@@ -3588,6 +4401,98 @@ class InkboxAdapter(BasePlatformAdapter):
         outcome: Any,
     ) -> None:
         chat_id = str(event.source.chat_id)
+        hosted = self._hosted_call_processing_data(event)
+        if hosted is not None:
+            call_id, event_id = hosted
+            raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            call = data.get("call") if isinstance(data.get("call"), dict) else {}
+            attempt = int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1)
+            if raw.get("_inkbox_hosted_binding_failed") is True:
+                self._write_hosted_call_registry(
+                    call_id,
+                    event_id=event_id,
+                    state="failed",
+                    outcome="failure",
+                    retryable=False,
+                )
+                clear_hosted_call_context(call_id)
+                return
+            outcome_value = str(
+                getattr(outcome, "value", outcome)
+            ).strip().lower()
+            correction_event = None
+            retryable: bool | None = None
+            receipt_state = "completed" if outcome_value == "success" else "failed"
+            if self._hosted_sms_required(event):
+                settlement = hosted_sms_settlement(call_id, attempt)
+                if settlement == "success":
+                    receipt_state = "completed"
+                elif (
+                    attempt == 1
+                    and settlement in {"missing", "recoverable"}
+                ):
+                    correction_event = self._hosted_sms_correction_event(
+                        event,
+                        call_id=call_id,
+                        remote_phone=str(call.get("remote_phone_number") or "").strip(),
+                        settlement=settlement,
+                    )
+                    receipt_state = "queued"
+                else:
+                    receipt_state = "failed"
+                    # Once an SMS tool may have run, or the one correction has
+                    # finished, replay is more dangerous than omission.
+                    retryable = False
+            try:
+                self._write_hosted_call_registry(
+                    call_id,
+                    event_id=event_id,
+                    state=receipt_state,
+                    outcome=outcome_value,
+                    envelope=(
+                        correction_event.raw_message
+                        if correction_event is not None
+                        and isinstance(correction_event.raw_message, dict)
+                        else None
+                    ),
+                    retryable=retryable,
+                )
+                if correction_event is None:
+                    logger.info(
+                        "[Inkbox] Finished hosted call reconciliation for "
+                        "call_id=%s outcome=%s receipt_state=%s",
+                        call_id,
+                        outcome_value,
+                        receipt_state,
+                    )
+                else:
+                    logger.info(
+                        "[Inkbox] Enqueued one hosted SMS correction for "
+                        "call_id=%s",
+                        call_id,
+                    )
+            finally:
+                remaining = (
+                    self._hosted_post_call_active_chats.get(chat_id, 0) - 1
+                )
+                if remaining > 0:
+                    self._hosted_post_call_active_chats[chat_id] = remaining
+                else:
+                    self._hosted_post_call_active_chats.pop(chat_id, None)
+                if outcome_value == "failure":
+                    self._hosted_post_call_failure_replies[chat_id] = (
+                        self._hosted_post_call_failure_replies.get(chat_id, 0)
+                        + 1
+                    )
+            if correction_event is not None:
+                # Same-session queueing pattern used by A2A below: the host
+                # drains this pending event after the completion hook returns.
+                await self.handle_message(correction_event)
+            else:
+                clear_hosted_call_context(call_id)
+            return
+
         if not chat_id.startswith("a2a:"):
             return
         self._a2a_default_reply_allowed[chat_id] = (
@@ -4842,6 +5747,12 @@ class InkboxAdapter(BasePlatformAdapter):
         guidance = _DELIVERY_FAILURE_CHANNEL_GUIDANCE.get(
             mode, _DELIVERY_FAILURE_CHANNEL_GUIDANCE["sms"],
         )
+        reply_instruction = _delivery_failure_reply_instruction(
+            mode=mode,
+            error_code=error_code,
+            error_detail=error_detail,
+            attempt=attempts,
+        )
         target_part = f" to={target}" if target else ""
         conversation_part = (
             f" conversation_id={conversation_id}" if conversation_id else ""
@@ -4856,10 +5767,11 @@ class InkboxAdapter(BasePlatformAdapter):
             f"Undelivered message:\n"
             f"«{snippet}»\n"
             f"{guidance}\n"
+            f"{reply_instruction}\n"
             f"This reply has now failed {attempts} of {OUTBOUND_FAILURE_MAX_ATTEMPTS} allowed sends; "
-            f"{remaining} left before the thread goes quiet. Send the corrected message as a normal "
-            f"reply in this conversation. Do not mention this delivery problem to the recipient. "
-            f"If there is nothing sensible to send, reply exactly [SILENT]."
+            f"{remaining} left before the thread goes quiet. If retrying, send the corrected message "
+            f"as a normal reply in this conversation and do not mention this delivery problem to "
+            f"the recipient."
         )
 
         default_skills = (
@@ -5710,6 +6622,293 @@ class InkboxAdapter(BasePlatformAdapter):
         if reaction_type == "question" and not is_group:
             self._start_imessage_typing(conversation_id)
         await self._enqueue(event)
+        return web.Response(status=200, text="ok")
+
+    async def _on_call_ended(
+        self,
+        envelope: Dict[str, Any],
+        *,
+        _safe_recovery: bool = False,
+    ) -> "web.Response":
+        """Wake Hermes once after an Inkbox Voice AI call finishes."""
+        data = envelope.get("data")
+        if not isinstance(data, dict):
+            return web.Response(status=200, text="ignored")
+        call = data.get("call")
+        if not isinstance(call, dict):
+            return web.Response(status=200, text="ignored")
+        if str(call.get("mode") or "client_websocket") != "hosted_agent":
+            # Local media calls already enqueue their reflection when the
+            # WebSocket closes. A second webhook turn would duplicate work.
+            return web.Response(status=200, text="ignored")
+
+        call_id = str(call.get("id") or "").strip()
+        if not call_id:
+            return web.Response(status=200, text="ignored")
+        event_id = str(envelope.get("id") or "").strip()
+        existing = self._read_hosted_call_registry().get(call_id)
+        existing_state = (
+            str(existing.get("state") or "")
+            if isinstance(existing, dict)
+            else ""
+        )
+        same_process_inflight = (
+            isinstance(existing, dict)
+            and existing_state in {"queued", "running"}
+            and existing.get("owner_id")
+            == self._hosted_call_registry_owner
+        )
+        terminal_failure = (
+            existing_state in {"running", "failed"}
+            and isinstance(existing, dict)
+            and existing.get("retryable") is False
+        )
+        ambiguous_running_sms = False
+        if isinstance(existing, dict) and existing_state == "running":
+            replay = existing.get("envelope")
+            replay_attempt = (
+                int(replay.get("_inkbox_hosted_reconciliation_attempt") or 1)
+                if isinstance(replay, dict)
+                else 1
+            )
+            ambiguous_running_sms = (
+                hosted_sms_settlement(call_id, replay_attempt) != "missing"
+            )
+        if (
+            existing_state == "completed"
+            or terminal_failure
+            or (ambiguous_running_sms and not _safe_recovery)
+            or same_process_inflight
+        ):
+            logger.info(
+                "[Inkbox] Ignored replayed hosted call completion call_id=%s "
+                "state=%s",
+                call_id,
+                existing_state,
+            )
+            return web.Response(status=200, text="duplicate")
+        direction = str(call.get("direction") or "inbound")
+        remote_phone = str(call.get("remote_phone_number") or "").strip()
+        contacts = data.get("contacts")
+        contact = (
+            contacts[0]
+            if isinstance(contacts, list)
+            and contacts
+            and isinstance(contacts[0], dict)
+            else {}
+        )
+        contact_id = str(contact.get("id") or remote_phone or call_id)
+        contact_name = str(
+            contact.get("name")
+            or contact.get("preferred_name")
+            or remote_phone
+            or "Unknown caller"
+        )
+
+        transcript: list[tuple[str, str]] = []
+        transcript_fetch_failed = False
+        try:
+            identity = self._inkbox.get_identity(self._identity_handle)
+            list_transcripts = getattr(identity, "list_transcripts", None)
+            if list_transcripts is not None:
+                rows = await asyncio.to_thread(list_transcripts, call_id)
+                transcript = [
+                    (
+                        str(
+                            getattr(
+                                getattr(row, "party", ""),
+                                "value",
+                                getattr(row, "party", ""),
+                            )
+                            or "unknown"
+                        ),
+                        str(getattr(row, "text", "") or ""),
+                    )
+                    for row in (rows or [])
+                    if str(getattr(row, "text", "") or "").strip()
+                ]
+        except Exception as exc:
+            transcript_fetch_failed = True
+            logger.warning(
+                "[Inkbox] Could not fetch full transcript for hosted call %s: %s",
+                call_id,
+                exc,
+            )
+
+        if not transcript:
+            inline = data.get("transcript")
+            entries = (
+                inline.get("entries")
+                if isinstance(inline, dict)
+                else []
+            )
+            transcript = [
+                (
+                    str(entry.get("party") or "unknown"),
+                    str(entry.get("text") or ""),
+                )
+                for entry in (entries or [])
+                if isinstance(entry, dict)
+                and "marker" not in entry
+                and str(entry.get("text") or "").strip()
+            ]
+            if transcript_fetch_failed and not isinstance(inline, dict):
+                raise RuntimeError(
+                    "authoritative transcript unavailable for recovered hosted call"
+                )
+
+        actions = [
+            action
+            for action in (data.get("post_call_action_items") or [])
+            if isinstance(action, dict)
+            and str(action.get("status") or "open") == "open"
+        ]
+        hosted_sms_required = self._hosted_sms_required_from_data(
+            data,
+            [text for _role, text in transcript],
+        )
+        hosted_sms_context = self._hosted_sms_context_from_data(
+            data,
+            [text for _role, text in transcript],
+        )
+        transcript_block = "\n".join(
+            f"  - {_escape_contact_memory_tokens(role)}: "
+            f"{_escape_contact_memory_tokens(text)}"
+            for role, text in transcript
+        )
+        action_block = self._format_realtime_post_call_actions(actions)
+        outcome = str(data.get("outcome") or call.get("status") or "unknown")
+        reason = str(call.get("reason") or "").strip()
+        hangup_reason = str(call.get("hangup_reason") or "").strip()
+
+        body_parts = [
+            f"[inkbox:voice_call call_id={call_id} | "
+            f"{self._contact_marker(contact or None)}]",
+        ]
+        memories_block = format_contact_memories(contact.get("memories") or [])
+        if memories_block:
+            body_parts.append(memories_block)
+        body_parts.extend([
+            "[call_ended] Inkbox Voice AI finished this phone call.",
+            f"Direction: {direction}",
+            f"Outcome: {outcome}",
+        ])
+        if hangup_reason:
+            body_parts.append(f"Hangup reason: {hangup_reason}")
+        if remote_phone:
+            body_parts.extend([
+                "Remote party phone number: "
+                f"{_escape_contact_memory_tokens(remote_phone)}",
+                "For a callback or other phone follow-up to this call's remote "
+                "party, use that exact number. Contact memories are background "
+                "only and must not override it.",
+            ])
+        if reason:
+            body_parts.append(
+                f"Outbound task: {_escape_contact_memory_tokens(reason)}"
+            )
+        if transcript_block:
+            body_parts.extend(["", "Call transcript:", transcript_block])
+        else:
+            body_parts.extend(["", "No transcript was captured for this call."])
+        if action_block:
+            body_parts.extend([
+                "",
+                "Open post-call actions recorded by Voice AI:",
+                action_block,
+            ])
+        if remote_phone:
+            escaped_remote = _escape_contact_memory_tokens(remote_phone)
+            body_parts.extend([
+                "",
+                "SMS post-call tool contract:",
+                "If any still-needed commitment asks for an SMS, use "
+                "inkbox_send_sms. If that tool is not currently visible, "
+                "find it with tool_search first.",
+                "Call inkbox_send_sms with `to` set to the exact authoritative "
+                f"remote number `{escaped_remote}` and `text` set to the "
+                "requested SMS body. Do not use conversationId for this "
+                "post-call send.",
+                "The SMS commitment is complete only after inkbox_send_sms "
+                "returns a success payload with `ok: true`. Plain text is not "
+                "a send and does not complete the commitment.",
+                "If the first tool call returns a recoverable argument or "
+                "format error, correct the arguments once and retry once. "
+                "Do not duplicate a well-formed send. If the first error is "
+                "nonrecoverable, or the one corrected call also fails, do "
+                "not call the tool again; reply exactly [SILENT].",
+                "Do not reply [SILENT] while a safe SMS commitment remains "
+                "unattempted.",
+            ])
+        body_parts.extend([
+            "",
+            "Review the outcome, transcript, and open actions in one pass. "
+            "Execute every still-needed commitment with normal Hermes tools. "
+            "Do not repeat work that was completed, canceled, superseded, or "
+            "already performed during the call. Also catch commitments in the "
+            "transcript that were not recorded as explicit actions.",
+            "If nothing remains, reply with exactly [SILENT]. Any plain-text "
+            "reply is suppressed because the call has ended; side effects must "
+            "come from tool calls.",
+        ])
+
+        # Suppress any model text generated by this synthetic turn. A hosted
+        # outbound call is often initiated from SMS/iMessage, so clear that
+        # stale routing hint first; otherwise the post-call prose could leak
+        # back onto the channel that requested the call. The post-call agent
+        # still has its normal tool surface for explicit side effects.
+        self._last_inbound_modality.pop(str(contact_id), None)
+        self._voice_recently_closed[contact_id] = time.time()
+        source = self.build_source(
+            chat_id=contact_id,
+            chat_name=contact_name,
+            chat_type="dm",
+            user_id=contact_id,
+            user_name=contact_name,
+            user_id_alt=remote_phone,
+            thread_id=None if direction == "outbound" else f"call:{call_id}",
+            chat_topic="voice_call",
+            message_id=f"call:{call_id}:ended",
+        )
+        channel_prompt, auto_skill = self._resolve_channel_overrides(
+            "voice", contact_id, "inkbox:inkbox-call-review",
+        )
+        event_envelope = dict(envelope)
+        event_envelope["_inkbox_hosted_sms_required"] = hosted_sms_required
+        event_envelope["_inkbox_hosted_sms_context"] = hosted_sms_context
+        event = MessageEvent(
+            text="\n".join(body_parts),
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=event_envelope,
+            message_id=f"call:{call_id}:ended",
+            reply_to_message_id=call_id,
+            channel_prompt=channel_prompt,
+            auto_skill=auto_skill,
+        )
+        if int(envelope.get("_inkbox_hosted_reconciliation_attempt") or 1) > 1:
+            event = self._hosted_sms_correction_event(
+                event,
+                call_id=call_id,
+                remote_phone=remote_phone,
+                settlement="missing",
+            )
+        self._write_hosted_call_registry(
+            call_id,
+            event_id=event_id,
+            state="queued",
+            envelope=envelope,
+        )
+        try:
+            await self._enqueue(event)
+        except Exception:
+            self._forget_hosted_call_registry(call_id)
+            raise
+        logger.info(
+            "[Inkbox] Enqueued hosted call completion for call_id=%s outcome=%s",
+            call_id,
+            outcome,
+        )
         return web.Response(status=200, text="ok")
 
     async def _on_incoming_call(self, envelope: Dict[str, Any]) -> "web.Response":

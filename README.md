@@ -62,7 +62,9 @@ Start the gateway:
 hermes gateway run
 ```
 
-Keep that process running. On startup the plugin opens an Inkbox tunnel, configures mail/text/iMessage webhook subscriptions and the incoming-call URL, and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
+Keep that process running. On startup the plugin opens an Inkbox tunnel,
+configures mail/text/iMessage webhook subscriptions and incoming-call handling,
+and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
 To update an existing install:
 
@@ -75,11 +77,11 @@ hermes gateway restart
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.8,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.5.9,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
-5. Offers OpenAI Realtime for calls when a phone number exists, validates the OpenAI API key, and stores `INKBOX_REALTIME_*` settings only when validation succeeds.
+5. Presents the **Phone call voice stack** choices: Inkbox Voice AI, OpenAI Realtime API, or Inkbox TTS/STT. Realtime is saved only after key validation succeeds.
 6. Offers to enable iMessage for the agent (existing or freshly created), then walks you through connecting your iPhone: text the connect command to the Inkbox iMessage router, message the agent once, and receive a welcome reply confirming the channel.
 7. Stores `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and related settings in `~/.hermes/.env`.
 8. Points the identity's mailbox, phone number, and iMessage events at the agent-owned Inkbox tunnel.
@@ -96,13 +98,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.8,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.8,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -140,7 +142,30 @@ platforms:
     contact_memories_enabled: false
 ```
 
-## Realtime Calls
+## Phone Call Voice Stack
+
+The setup wizard offers three ways to handle phone calls:
+
+1. **Inkbox Voice AI** handles calls on behalf of the agent and notifies Hermes
+   when each call ends. Setup also asks whether its tools should be
+   contact-scoped or use YOLO mode.
+2. **OpenAI Realtime API** uses your API key for low-latency conversations. The
+   realtime agent can consult Hermes for complex tasks.
+3. **Inkbox TTS/STT** routes transcripts and spoken replies through Hermes with
+   higher conversational latency and no OpenAI API key.
+
+`INKBOX_VOICE_STACK` is the canonical selection. Existing installations without
+that setting retain their current Realtime auto-detection behavior.
+
+In Voice AI mode, `inkbox_place_call` turns `purpose`, `opening_message`, and
+`context` into Inkbox Voice AI's task brief. The runtime omits a per-call
+authority override, so the call inherits the authority approved during setup.
+When any Voice AI call ends—including unanswered and failed calls—Inkbox sends
+one signed `call.ended` event. Hermes receives the outcome, transcript, and open
+post-call actions in a single suppressed-text turn and can complete remaining
+work with its normal tools.
+
+### OpenAI Realtime credentials
 
 Calls auto-detect OpenAI Realtime credentials. The plugin checks, in order:
 
@@ -149,7 +174,10 @@ Calls auto-detect OpenAI Realtime credentials. The plugin checks, in order:
 3. Hermes `openai-api` credentials, including `credential_pool.openai-api`.
 4. `OPENAI_API_KEY`.
 
-The setup wizard offers Realtime after a phone number is available. When an OpenAI API key is available and realtime is enabled, the wizard validates Realtime access before saving the plugin-specific key. If no realtime API key is available, validation fails, or realtime is disabled, calls use Inkbox STT/TTS. Hermes/Codex OAuth is not used for GA Realtime calls.
+When OpenAI Realtime is selected, the wizard validates Realtime access before
+saving the plugin-specific key. Failed validation returns to the three voice
+stack choices without changing the active selection. Hermes/Codex OAuth is not
+used for GA Realtime calls.
 
 Common realtime env vars:
 
@@ -160,12 +188,15 @@ export INKBOX_REALTIME_VOICE="cedar"
 export INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=true
 ```
 
-Disable realtime:
+Switch from Realtime to Inkbox TTS/STT:
 
 ```bash
-export INKBOX_REALTIME_ENABLED=false
+export INKBOX_VOICE_STACK=inkbox_tts_stt
 hermes gateway restart
 ```
+
+`INKBOX_REALTIME_ENABLED` is a legacy compatibility toggle used only when
+`INKBOX_VOICE_STACK` is absent.
 
 Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller contact metadata, and outbound-call purpose before greeting. The realtime model has direct access to `consult_agent`, `register_post_call_action`, `edit_post_call_action`, `delete_post_call_action`, and `hang_up_call`.
 
@@ -178,7 +209,11 @@ Calls — inbound and outbound — can run over either of two lines, and the age
 - **The dedicated phone number.** The agent's own number (the same line SMS uses). Outbound calls present this number; inbound calls to it ring the agent.
 - **The shared Inkbox iMessage line.** The agent can also place and receive voice calls with a person it's connected to over iMessage, over the same shared line that person already messages. The underlying number is never surfaced — Inkbox resolves it from the iMessage connection — and it only works for people already connected over iMessage (an unknown caller is rejected; an outbound call with no connection is refused).
 
-Inbound answering is configured once per identity (`auto_accept` → open the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it when only one line is available.
+Inbound answering is configured once per identity, so one voice-stack selection
+governs both lines. OpenAI Realtime and Inkbox TTS/STT open the call bridge
+WebSocket; Inkbox Voice AI handles call media without the local bridge. Outbound,
+the agent sets `origination` on `inkbox_place_call` (`dedicated_number` /
+`shared_imessage_number`), or omits it when only one line is available.
 
 ## iMessage
 
@@ -223,6 +258,41 @@ hermes config
 hermes config edit
 ```
 
+## Docker Test Environment
+
+The repository includes a manual-testing image with Hermes and the Inkbox SDK
+preinstalled. The plugin source is staged from the exact local Docker build
+context, while the public Inkbox SDK dependency is pinned in the Dockerfile.
+The plugin is not installed or configured in the image.
+
+Build and start it:
+
+```bash
+docker build --tag hermes-inkbox-dev .
+docker volume create hermes-inkbox-dev-data
+docker run --detach \
+  --name hermes-inkbox-dev \
+  --volume hermes-inkbox-dev-data:/opt/data \
+  hermes-inkbox-dev
+docker exec --interactive --tty --user hermes hermes-inkbox-dev bash
+```
+
+Then, inside the container:
+
+```bash
+hermes setup
+hermes plugins install "file://${INKBOX_PLUGIN_SOURCE}" --enable
+hermes inkbox setup
+hermes inkbox doctor
+hermes gateway run
+```
+
+On a reused Docker volume, skip `hermes setup` when a model provider is already
+configured.
+
+Hermes state and credentials persist in the `hermes-inkbox-dev-data` Docker
+volume when the container is restarted or recreated.
+
 ## Smoke Test
 
 After the gateway starts:
@@ -252,7 +322,10 @@ After the gateway starts:
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
 | `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
-| `INKBOX_REALTIME_ENABLED` | no | `auto` | Use raw phone media with OpenAI Realtime when credentials exist. Set `false` to force Inkbox STT/TTS. |
+| `INKBOX_VOICE_STACK` | no | legacy migration | Phone call stack: `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
+| `INKBOX_VOICE_AI_AUTHORITY_MODE` | Voice AI | `contact_scoped` | Voice AI tool authority: `contact_scoped` or `yolo`. |
+| `INKBOX_VOICEMAIL_DETECTION` | no | `enabled` | Outbound call voicemail detection: `enabled` or `disabled`. Live CI sets `disabled`; ordinary calls keep `enabled`. |
+| `INKBOX_REALTIME_ENABLED` | no | `auto` | Legacy Realtime toggle for installations without `INKBOX_VOICE_STACK`. |
 | `INKBOX_REALTIME_API_KEY` | no | - | OpenAI API key used only for realtime calls. `OPENAI_API_KEY` is also accepted. |
 | `OPENAI_API_KEY` | no | - | OpenAI API key used for realtime calls when `INKBOX_REALTIME_API_KEY` is absent. |
 | `INKBOX_REALTIME_MODEL` | no | `gpt-realtime-2` | Realtime voice model. |
@@ -336,7 +409,7 @@ turn. Outbound delegation tools can create tasks, wait for worker state changes,
 and answer requests for more input. The history tools support direction,
 participant, lifecycle, context, keyword, timestamp, and cursor filters. The
 sent-task tools remain available as outbound-only compatibility aliases. The
-plugin requires Inkbox SDK 0.5.8 or newer.
+plugin requires Inkbox SDK 0.5.9 or newer.
 
 Realtime-only call tools:
 
@@ -375,9 +448,13 @@ python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.p
 ## Architecture Notes
 
 - Agent-scoped: runtime should use an Inkbox agent-scoped API key.
-- Tunnel-first inbound: with a signing key, gateway opens an Inkbox tunnel, creates mail/text webhook subscriptions (plus an identity-owned iMessage subscription when enabled), and wires the incoming-call URL.
-- Voice: Inkbox STT/TTS fallback path and realtime raw-media path both route through the same call WebSocket.
-- Post-call actions: realtime calls can register, edit, delete, and dispatch work for the main Hermes agent after hangup.
+- Tunnel-first inbound: with a signing key, the gateway opens an Inkbox tunnel,
+  creates mail/text subscriptions, and keeps separate identity-owned iMessage
+  and `call.ended` subscriptions at the same canonical receiver URL.
+- Voice: Inkbox TTS/STT and OpenAI Realtime use the local media WebSocket.
+  Inkbox Voice AI handles media remotely and reports completion by webhook.
+- Post-call actions: Realtime and Voice AI calls dispatch one reconciled
+  post-call turn for the main Hermes agent after hangup.
 - Identity-aware calls: call prompts include agent handle/mailbox/phone/tunnel and known caller contact metadata.
 
 ## Recommended Configuration

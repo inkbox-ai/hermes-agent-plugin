@@ -537,6 +537,8 @@ class _BridgeState:
     consult_results: List[RealtimeConsultResult] = field(default_factory=list)
     pending_consult_keys: Dict[str, str] = field(default_factory=dict)
     last_response_id: Optional[str] = None
+    response_active: bool = False
+    pending_response_create: Optional[Dict[str, Any]] = None
     closed: bool = False
     greeting_triggered: bool = False
     # Inkbox-assigned stream id from the `start` event; echoed on outbound
@@ -993,6 +995,46 @@ def _consult_result_text(output: Dict[str, Any]) -> str:
     return json.dumps(output)
 
 
+async def _request_realtime_response(
+    openai_ws: Any,
+    state: _BridgeState,
+    *,
+    response: Optional[Dict[str, Any]] = None,
+    supersede_pending: bool = False,
+) -> bool:
+    requested = dict(response or {})
+    if state.response_active:
+        if state.pending_response_create is None or supersede_pending:
+            state.pending_response_create = requested
+        return False
+
+    payload: Dict[str, Any] = {"type": "response.create"}
+    if requested:
+        payload["response"] = requested
+    state.response_active = True
+    try:
+        await openai_ws.send_str(json.dumps(payload))
+    except Exception:
+        state.response_active = False
+        raise
+    return True
+
+
+async def _flush_pending_realtime_response(
+    openai_ws: Any,
+    state: _BridgeState,
+) -> None:
+    pending = state.pending_response_create
+    if state.response_active or pending is None:
+        return
+    state.pending_response_create = None
+    await _request_realtime_response(
+        openai_ws,
+        state,
+        response=pending or None,
+    )
+
+
 async def _maybe_send_greeting(
     openai_ws: Any, state: _BridgeState, meta: RealtimeCallMeta,
 ) -> None:
@@ -1001,10 +1043,11 @@ async def _maybe_send_greeting(
         return
     state.greeting_triggered = True
     try:
-        await openai_ws.send_str(json.dumps({
-            "type": "response.create",
-            "response": {"instructions": build_realtime_greeting(meta)},
-        }))
+        await _request_realtime_response(
+            openai_ws,
+            state,
+            response={"instructions": build_realtime_greeting(meta)},
+        )
         logger.info(
             "[Inkbox realtime] greeting sent for call_id=%s direction=%s",
             meta.call_id, meta.direction,
@@ -1377,6 +1420,11 @@ async def _openai_to_inkbox_pump(
             rid = resp.get("id")
             if rid:
                 state.last_response_id = rid
+            state.response_active = False
+            await _flush_pending_realtime_response(openai_ws, state)
+
+        elif ftype == "response.created":
+            state.response_active = True
 
         elif ftype == "error":
             err = frame.get("error") or frame
@@ -1451,14 +1499,15 @@ _INTERIM_FILLER_INSTRUCTIONS = (
 )
 
 
-async def _say_interim_filler(openai_ws: Any) -> None:
+async def _say_interim_filler(openai_ws: Any, state: _BridgeState) -> None:
     """Make the model speak a short filler while a tool runs. Best-effort — the
     tool result is authoritative; this only keeps the line alive during the gap."""
     with suppress(Exception):
-        await openai_ws.send_str(json.dumps({
-            "type": "response.create",
-            "response": {"instructions": _INTERIM_FILLER_INSTRUCTIONS},
-        }))
+        await _request_realtime_response(
+            openai_ws,
+            state,
+            response={"instructions": _INTERIM_FILLER_INSTRUCTIONS},
+        )
 
 
 async def _dispatch_tool_call(
@@ -1474,6 +1523,19 @@ async def _dispatch_tool_call(
     inkbox_ws: Any = None,
 ) -> None:
     """Handle a function-call event from the realtime model."""
+    async def _submit(
+        output: Dict[str, Any],
+        *,
+        create_response: bool = True,
+    ) -> None:
+        await _submit_tool_result(
+            openai_ws,
+            call_id,
+            output,
+            state=state,
+            create_response=create_response,
+        )
+
     try:
         args = json.loads(arguments_json or "{}")
     except (TypeError, ValueError):
@@ -1484,7 +1546,7 @@ async def _dispatch_tool_call(
         # moves to a thread so the audio pump keeps streaming meanwhile. Say a
         # short filler first so the call keeps audio flowing during the otherwise
         # silent read (else the caller's line can idle-end before the recite).
-        await _say_interim_filler(openai_ws)
+        await _say_interim_filler(openai_ws, state)
         output = await asyncio.to_thread(_run_contact_read_sync, name, args)
         # Tool name only — args/results carry contact PII and live-suite logs
         # can end up in CI output.
@@ -1492,21 +1554,21 @@ async def _dispatch_tool_call(
             "[Inkbox realtime] direct contact read %s for call_id=%s",
             name, meta.call_id,
         )
-        await _submit_tool_result(openai_ws, call_id, output)
+        await _submit(output)
         return
 
     if name == POST_CALL_ACTION_TOOL_NAME:
         action = (args.get("action") or "").strip()
         if not action:
-            await _submit_tool_result(
-                openai_ws, call_id, {"error": "missing action argument"},
+            await _submit(
+                {"error": "missing action argument"},
             )
             return
         state.post_call_actions.append({
             "action": action,
             "details": (args.get("details") or "").strip(),
         })
-        await _submit_tool_result(openai_ws, call_id, {
+        await _submit({
             "status": "queued",
             "action_index": len(state.post_call_actions),
             "action_count": len(state.post_call_actions),
@@ -1524,7 +1586,7 @@ async def _dispatch_tool_call(
         except (TypeError, ValueError):
             action_index = 0
         if action_index < 1 or action_index > len(state.post_call_actions):
-            await _submit_tool_result(openai_ws, call_id, {
+            await _submit({
                 "error": "invalid action_index",
                 "action_count": len(state.post_call_actions),
             })
@@ -1533,7 +1595,7 @@ async def _dispatch_tool_call(
         has_action = "action" in args
         has_details = "details" in args
         if not has_action and not has_details:
-            await _submit_tool_result(openai_ws, call_id, {
+            await _submit({
                 "error": "missing action or details argument",
             })
             return
@@ -1542,7 +1604,7 @@ async def _dispatch_tool_call(
         if has_action:
             new_action = (args.get("action") or "").strip()
             if not new_action:
-                await _submit_tool_result(openai_ws, call_id, {
+                await _submit({
                     "error": "action cannot be empty",
                 })
                 return
@@ -1550,7 +1612,7 @@ async def _dispatch_tool_call(
         if has_details:
             queued["details"] = (args.get("details") or "").strip()
 
-        await _submit_tool_result(openai_ws, call_id, {
+        await _submit({
             "status": "updated",
             "action_index": action_index,
             "action_count": len(state.post_call_actions),
@@ -1569,14 +1631,14 @@ async def _dispatch_tool_call(
         except (TypeError, ValueError):
             action_index = 0
         if action_index < 1 or action_index > len(state.post_call_actions):
-            await _submit_tool_result(openai_ws, call_id, {
+            await _submit({
                 "error": "invalid action_index",
                 "action_count": len(state.post_call_actions),
             })
             return
 
         deleted = state.post_call_actions.pop(action_index - 1)
-        await _submit_tool_result(openai_ws, call_id, {
+        await _submit({
             "status": "deleted",
             "deleted_action": deleted,
             "action_index": action_index,
@@ -1591,7 +1653,7 @@ async def _dispatch_tool_call(
 
     if name == HANG_UP_CALL_TOOL_NAME:
         if inkbox_ws is None:
-            await _submit_tool_result(openai_ws, call_id, {
+            await _submit({
                 "error": "hangup unavailable without Inkbox websocket",
             })
             return
@@ -1607,7 +1669,7 @@ async def _dispatch_tool_call(
                 meta.call_id,
             )
             # Default create_response=True so the model speaks the goodbye.
-            await _submit_tool_result(openai_ws, call_id, {
+            await _submit({
                 "status": "confirm_goodbye",
                 "message": (
                     "Don't hang up yet. Say a brief, natural goodbye to the "
@@ -1634,9 +1696,7 @@ async def _dispatch_tool_call(
         if state.stream_id:
             stop_frame["stream_id"] = state.stream_id
 
-        await _submit_tool_result(
-            openai_ws,
-            call_id,
+        await _submit(
             {
                 "status": "hangup_requested",
                 "reason": reason,
@@ -1652,8 +1712,8 @@ async def _dispatch_tool_call(
     if name == AGENT_CONSULT_TOOL_NAME:
         query = (args.get("query") or "").strip()
         if not query:
-            await _submit_tool_result(
-                openai_ws, call_id, {"error": "missing query argument"},
+            await _submit(
+                {"error": "missing query argument"},
             )
             return
 
@@ -1661,7 +1721,7 @@ async def _dispatch_tool_call(
         if consult_key and not _realtime_consult_allows_repeat(query):
             pending_call_id = state.pending_consult_keys.get(consult_key)
             if pending_call_id:
-                await _submit_tool_result(openai_ws, call_id, {
+                await _submit({
                     "status": "already_running",
                     "existing_tool_call_id": pending_call_id,
                     "answer": (
@@ -1680,7 +1740,7 @@ async def _dispatch_tool_call(
                 None,
             )
             if completed:
-                await _submit_tool_result(openai_ws, call_id, {
+                await _submit({
                     "status": "already_handled",
                     "existing_tool_call_id": completed.id,
                     "answer": (
@@ -1696,7 +1756,7 @@ async def _dispatch_tool_call(
         # model says "one moment" while the agent thinks. No modalities field — it
         # inherits the session's output_modalities (GA rejects output_modalities
         # inside response.create). The final tool result is authoritative.
-        await _say_interim_filler(openai_ws)
+        await _say_interim_filler(openai_ws, state)
 
         if consult_key:
             state.pending_consult_keys[consult_key] = call_id
@@ -1728,7 +1788,7 @@ async def _dispatch_tool_call(
             ))
             if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
                 state.pending_consult_keys.pop(consult_key, None)
-            await _submit_tool_result(openai_ws, call_id, output)
+            await _submit(output)
             return
         except Exception as exc:
             logger.warning("[Inkbox realtime] agent_consult failed: %s", exc)
@@ -1745,7 +1805,7 @@ async def _dispatch_tool_call(
             ))
             if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
                 state.pending_consult_keys.pop(consult_key, None)
-            await _submit_tool_result(openai_ws, call_id, output)
+            await _submit(output)
             return
 
         output = {
@@ -1771,11 +1831,11 @@ async def _dispatch_tool_call(
         ))
         if consult_key and state.pending_consult_keys.get(consult_key) == call_id:
             state.pending_consult_keys.pop(consult_key, None)
-        await _submit_tool_result(openai_ws, call_id, output)
+        await _submit(output)
         return
 
     # Unknown tool — refuse politely.
-    await _submit_tool_result(openai_ws, call_id, {
+    await _submit({
         "error": f"Tool '{name}' is not available on live calls.",
     })
 
@@ -1785,6 +1845,7 @@ async def _submit_tool_result(
     call_id: str,
     output: Dict[str, Any],
     *,
+    state: _BridgeState,
     create_response: bool = True,
 ) -> None:
     """Submit a function call output and trigger a model response.
@@ -1807,9 +1868,11 @@ async def _submit_tool_result(
         # Bare response.create — let the session's configured output
         # modalities + audio settings apply. Passing a beta-style
         # ``modalities`` field here would be rejected by GA models.
-        await openai_ws.send_str(json.dumps({
-            "type": "response.create",
-        }))
+        await _request_realtime_response(
+            openai_ws,
+            state,
+            supersede_pending=True,
+        )
     except Exception as exc:
         logger.debug("[Inkbox realtime] submit_tool_result failed: %s", exc)
 

@@ -87,7 +87,7 @@ def _inbound_from_aut(sms):
     remote, aut_phone, pid = sms["remote"], sms["aut_phone"], sms["remote_pid"]
     tail = _digits(aut_phone)[-10:]
     out = []
-    for m in remote.texts.list(pid, limit=30):
+    for m in remote.texts.list(pid, limit=200):
         if (getattr(m, "direction", "") or "").lower() == "inbound" \
                 and _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == tail:
             out.append(m)
@@ -389,7 +389,7 @@ def test_sms_retry_after_carrier_delivery_failure(sms):
     conversation_id = ""
     remote_tail = _digits(remote_phone)[-10:]
     try:
-        for m in aut.texts.list(aut_pid, limit=30):
+        for m in aut.texts.list(aut_pid, limit=200):
             if _digits(getattr(m, "remote_phone_number", "") or "")[-10:] == remote_tail:
                 conversation_id = str(getattr(m, "conversation_id", "") or "")
                 if conversation_id:

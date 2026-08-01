@@ -317,6 +317,33 @@ def test_realtime_transcripts_are_mirrored_into_inkbox():
     ]
 
 
+def test_response_done_flushes_a_queued_tool_response():
+    openai_ws = _FakeOpenAIWS([
+        {"type": "response.done", "response": {"id": "response-tool-call"}},
+    ])
+    state = _BridgeState(
+        response_active=True,
+        pending_response_create={},
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return ""
+
+    asyncio.run(_openai_to_inkbox_pump(
+        openai_ws=openai_ws,
+        inkbox_ws=_FakeWS(),
+        state=state,
+        config=RealtimeConfig(enabled=True, api_key="sk-test"),
+        meta=_meta(),
+        on_agent_consult=_noop,
+    ))
+
+    assert openai_ws.sent == [{"type": "response.create"}]
+    assert state.last_response_id == "response-tool-call"
+    assert state.response_active is True
+    assert state.pending_response_create is None
+
+
 def test_ga_function_call_events_dispatch_once_with_buffered_name():
     state = _BridgeState()
     openai_ws = _FakeOpenAIWS([

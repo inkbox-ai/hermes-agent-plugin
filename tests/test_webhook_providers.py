@@ -92,6 +92,34 @@ def test_match_provider_returns_none_for_unknown_source():
     assert wp.match_provider({"X-Stripe-Signature": "t=1,v1=abc"}) is None
 
 
+def test_call_ended_uses_stable_event_id_for_replay_dedup(monkeypatch):
+    adapter = _adapter(
+        require_signature=False,
+        external_events_enabled=False,
+    )
+    handled = []
+
+    async def _handled(envelope):
+        handled.append(envelope["id"])
+        return adapter_mod.web.Response(status=200, text="ok")
+
+    adapter._on_call_ended = _handled
+    provider = types.SimpleNamespace(name="inkbox", verify=lambda **_kwargs: True)
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda _headers: provider)
+    body = b'{"id":"evt-call-stable","event_type":"call.ended","data":{}}'
+
+    first = asyncio.run(adapter._handle_webhook(
+        _FakeRequest(body, request_id="delivery-1"),
+    ))
+    replay = asyncio.run(adapter._handle_webhook(
+        _FakeRequest(body, request_id="delivery-2"),
+    ))
+
+    assert first.text == "ok"
+    assert replay.text == "duplicate"
+    assert handled == ["evt-call-stable"]
+
+
 def test_github_provider_registered_and_matches():
     provider = wp.match_provider({"X-Hub-Signature-256": "sha256=abc"})
     assert provider is not None and provider.name == "github"

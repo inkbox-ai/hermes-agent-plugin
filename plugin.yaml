@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.7
+version: 0.2.8
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
@@ -34,6 +34,18 @@ optional_env:
     description: "Default Inkbox chat/contact id for cron or notification delivery."
     prompt: "Home channel"
     secret: false
+  - name: INKBOX_VOICE_STACK
+    description: "Phone call stack: inkbox_voice_ai, openai_realtime, or inkbox_tts_stt."
+    prompt: "Phone call voice stack"
+    secret: false
+  - name: INKBOX_VOICE_AI_AUTHORITY_MODE
+    description: "Inkbox Voice AI authority: contact_scoped or yolo."
+    prompt: "Voice AI authority"
+    secret: false
+  - name: INKBOX_VOICEMAIL_DETECTION
+    description: "Outbound call voicemail detection: enabled or disabled. Defaults to enabled."
+    prompt: "Voicemail detection"
+    secret: false
   - name: INKBOX_ALLOWED_USERS
     description: "Comma-separated local allowlist. Usually leave empty and use Inkbox contact rules."
     prompt: "Allowed users"
@@ -43,11 +55,11 @@ optional_env:
     prompt: "Allow all users"
     secret: false
   - name: INKBOX_REALTIME_API_KEY
-    description: "Optional OpenAI Realtime API key. OPENAI_API_KEY is also accepted. If omitted, calls use Inkbox STT/TTS."
+    description: "OpenAI Realtime API key. Required only when INKBOX_VOICE_STACK=openai_realtime."
     prompt: "Realtime API key"
     secret: true
   - name: INKBOX_REALTIME_ENABLED
-    description: "Use raw phone media with OpenAI Realtime when credentials exist. Set false to force Inkbox STT/TTS."
+    description: "Legacy Realtime toggle retained for existing installations. Prefer INKBOX_VOICE_STACK."
     prompt: "Enable Realtime"
     secret: false
   - name: INKBOX_CONTACT_MEMORIES_ENABLED

@@ -91,6 +91,35 @@ def test_send_sms_tool_rejects_text_over_limit(monkeypatch):
     assert identity.sent_texts == []
 
 
+def test_send_sms_tool_preserves_safe_failure_metadata(monkeypatch):
+    class APIError(Exception):
+        status_code = 422
+        detail = {
+            "error_code": "message_blocked_spam_filter",
+            "rule": "emoji_overload",
+        }
+
+    identity = FakeIdentity()
+
+    def _fail_send(**_kwargs):
+        raise APIError("message rejected")
+
+    identity.send_text = _fail_send
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
+
+    out = json.loads(tools.inkbox_send_sms({
+        "to": "+15555550101",
+        "text": "hello",
+    }))
+
+    assert out == {
+        "error": "message rejected",
+        "status_code": 422,
+        "error_code": "message_blocked_spam_filter",
+        "rule": "emoji_overload",
+    }
+
+
 def test_sms_conversation_read_tools_use_conversation_id(monkeypatch):
     identity = FakeIdentity()
     monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))

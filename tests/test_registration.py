@@ -75,6 +75,20 @@ def test_yaml_contact_memories_config_is_forwarded():
     }
 
 
+def test_yaml_voice_config_is_forwarded():
+    module = _load_entry_module()
+
+    assert module._apply_yaml_config({}, {
+        "voiceStack": "inkbox_voice_ai",
+        "voiceAiAuthorityMode": "yolo",
+        "voicemailDetection": "disabled",
+    }) == {
+        "voice_stack": "inkbox_voice_ai",
+        "voice_ai_authority_mode": "yolo",
+        "voicemail_detection": "disabled",
+    }
+
+
 def test_registers_inkbox_platform_tools_commands_and_skills():
     entry = _load_entry_module()
     ctx = DummyContext()
@@ -131,6 +145,8 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
     assert ctx.hooks[0][0][0] == "pre_llm_call"
+    assert ctx.hooks[1][0][0] == "pre_tool_call"
+    assert ctx.hooks[2][0][0] == "post_tool_call"
 
 
 def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):

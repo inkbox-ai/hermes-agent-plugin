@@ -35,12 +35,17 @@ def _reply_text(req: dict) -> str:
 
 def _messages(req: dict[str, Any]) -> list[dict[str, Any]]:
     messages = req.get("messages")
-    return messages if isinstance(messages, list) else []
+    if isinstance(messages, list):
+        return messages
+    response_input = req.get("input")
+    return response_input if isinstance(response_input, list) else []
 
 
 def _tool_names(req: dict[str, Any]) -> list[str]:
     names = []
     for message in _messages(req):
+        if message.get("type") == "function_call" and message.get("name"):
+            names.append(str(message["name"]))
         for call in message.get("tool_calls") or []:
             function = call.get("function") if isinstance(call, dict) else None
             if isinstance(function, dict) and function.get("name"):
@@ -51,6 +56,18 @@ def _tool_names(req: dict[str, Any]) -> list[str]:
 def _effective_tool_names(req: dict[str, Any]) -> list[str]:
     names = []
     for message in _messages(req):
+        if message.get("type") == "function_call" and message.get("name"):
+            name = str(message["name"])
+            if name != "tool_call":
+                names.append(name)
+            else:
+                try:
+                    arguments = json.loads(str(message.get("arguments") or "{}"))
+                except ValueError:
+                    arguments = {}
+                underlying = str(arguments.get("name") or "")
+                if underlying:
+                    names.append(underlying)
         for call in message.get("tool_calls") or []:
             function = call.get("function") if isinstance(call, dict) else None
             if not isinstance(function, dict):
@@ -73,6 +90,12 @@ def _effective_tool_names(req: dict[str, Any]) -> list[str]:
 def _available_tool_names(req: dict[str, Any]) -> set[str]:
     names = set()
     for tool in req.get("tools") or []:
+        if (
+            isinstance(tool, dict)
+            and tool.get("type") == "function"
+            and tool.get("name")
+        ):
+            names.add(str(tool["name"]))
         function = tool.get("function") if isinstance(tool, dict) else None
         if isinstance(function, dict) and function.get("name"):
             names.add(str(function["name"]))
@@ -100,9 +123,12 @@ def _task_id(req: dict[str, Any]) -> str:
         return ""
 
     for message in reversed(_messages(req)):
-        if message.get("role") != "tool":
+        if message.get("role") == "tool":
+            content = message.get("content")
+        elif message.get("type") == "function_call_output":
+            content = message.get("output")
+        else:
             continue
-        content = message.get("content")
         try:
             payload = json.loads(content) if isinstance(content, str) else content
         except ValueError:
@@ -288,6 +314,79 @@ def _tool_call(response: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _responses_output(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate one deterministic decision to Responses API output items."""
+    name = response.get("name")
+    if name:
+        return [{
+            "id": str(response["id"]),
+            "type": "function_call",
+            "call_id": str(response["id"]),
+            "name": str(name),
+            "arguments": json.dumps(response.get("arguments") or {}),
+            "status": "completed",
+        }]
+    return [{
+        "id": "msg-mock",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{
+            "type": "output_text",
+            "text": str(response.get("text") or ""),
+            "annotations": [],
+            "logprobs": [],
+        }],
+    }]
+
+
+def _responses_object(
+    response: dict[str, Any],
+    model: str,
+) -> dict[str, Any]:
+    return {
+        "id": "resp-mock",
+        "object": "response",
+        "created_at": 0.0,
+        "status": "completed",
+        "model": model,
+        "output": _responses_output(response),
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+
+
+def _responses_events(
+    response: dict[str, Any],
+    model: str,
+) -> list[dict[str, Any]]:
+    output = _responses_output(response)
+    events: list[dict[str, Any]] = []
+    if not response.get("name"):
+        events.append({
+            "type": "response.output_text.delta",
+            "sequence_number": 0,
+            "item_id": "msg-mock",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": str(response.get("text") or ""),
+            "logprobs": [],
+        })
+    events.append({
+        "type": "response.output_item.done",
+        "sequence_number": len(events),
+        "output_index": 0,
+        "item": output[0],
+    })
+    events.append({
+        "type": "response.completed",
+        "sequence_number": len(events),
+        "response": _responses_object(response, model),
+    })
+    return events
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):  # quiet
         pass
@@ -323,6 +422,22 @@ class Handler(BaseHTTPRequestHandler):
         text = str(response.get("text") or "")
         tool_call = _tool_call(response)
         model = req.get("model", "mock-model")
+        if self.path.rstrip("/").endswith("/responses"):
+            if req.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in _responses_events(response, model):
+                    self.wfile.write(
+                        (
+                            f"event: {event['type']}\n"
+                            f"data: {json.dumps(event)}\n\n"
+                        ).encode()
+                    )
+                self.wfile.flush()
+            else:
+                self._send_json(200, _responses_object(response, model))
+            return
         if req.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
