@@ -143,7 +143,7 @@ jobs:
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             # This value crosses TTS -> PSTN -> STT before Voice AI records the
-            # follow-up. Encode the run as distinct NATO words so the assertion
+            # follow-up. Encode the run as distinct everyday words so the assertion
             # does not depend on punctuation/long digits or let an action
             # summarizer collapse an adjacent repeated word.
             # Five distinct words is enough current-run entropy while staying

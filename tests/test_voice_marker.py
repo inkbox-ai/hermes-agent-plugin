@@ -5,33 +5,33 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKER_HELPER = ROOT / "tests" / "live" / "voice_marker.py"
-NATO_WORDS = {
-    "alpha",
-    "bravo",
-    "charlie",
-    "delta",
-    "echo",
-    "foxtrot",
-    "golf",
-    "hotel",
-    "india",
-    "juliett",
-    "kilo",
-    "lima",
-    "mike",
-    "november",
-    "oscar",
-    "papa",
-    "quebec",
-    "romeo",
-    "sierra",
-    "tango",
-    "uniform",
-    "victor",
-    "whiskey",
-    "xray",
-    "yankee",
-    "zulu",
+SPEECH_WORDS = {
+    "apple",
+    "basket",
+    "candle",
+    "dragon",
+    "engine",
+    "forest",
+    "garden",
+    "hammer",
+    "island",
+    "jacket",
+    "kettle",
+    "lemon",
+    "meadow",
+    "napkin",
+    "orange",
+    "pencil",
+    "rabbit",
+    "silver",
+    "tiger",
+    "umbrella",
+    "velvet",
+    "window",
+    "yellow",
+    "zebra",
+    "coffee",
+    "sunset",
 }
 
 
@@ -45,13 +45,21 @@ def _marker(token: str) -> list[str]:
     return result.stdout.strip().split()
 
 
-def test_live_voice_marker_is_deterministic_distinct_and_nato_only():
+def test_live_voice_marker_is_deterministic_distinct_and_speech_safe():
+    for digit in range(10):
+        token = str(digit) * 5
+        words = _marker(token)
+
+        assert words == _marker(token)
+        assert len(words) == 5
+        assert len(set(words)) == len(words)
+        assert set(words) <= SPEECH_WORDS
+
+
+def test_live_voice_marker_mapping_is_stable():
     words = _marker("55071")
 
-    assert words == _marker("55071")
-    assert len(words) == 5
-    assert len(set(words)) == len(words)
-    assert set(words) <= NATO_WORDS
+    assert words == ["forest", "pencil", "velvet", "lemon", "rabbit"]
 
 
 def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
