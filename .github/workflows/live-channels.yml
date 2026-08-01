@@ -42,6 +42,7 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 1          # legs share the AUT identity → must run one at a time
@@ -167,7 +168,7 @@ jobs:
       # Failure-only: these logs carry live phone/email/message content and this repo
       # (and its Action logs/artifacts) is public.
       - name: Dump logs (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== send intents ==="; cat "$SPY_FILE" || true
@@ -181,7 +182,7 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
 
       - name: Upload artifacts (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: live-logs-${{ matrix.mode }}

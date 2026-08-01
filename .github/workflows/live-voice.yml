@@ -185,7 +185,7 @@ jobs:
 
       # Failure-only: these logs carry live call content and this repo is public.
       - name: Dump logs (on failure only)
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
           echo "=== driver.log ==="; cat "$DRIVER_LOG" || true
