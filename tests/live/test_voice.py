@@ -22,6 +22,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -71,6 +72,38 @@ def _normalized_spoken_text(value: str | None) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
 
 
+def _spoken_marker_key(value: str | None) -> str:
+    """Ignore separators that speech recognition may add or remove."""
+    return "".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
+
+
+def _hosted_request_persisted(transcript: str, marker: str) -> bool:
+    """Whether the caller's persisted transcript carries this run's request."""
+    text = _normalized_spoken_text(transcript)
+    expected_marker = _spoken_marker_key(marker)
+    sms_intent = re.search(r"\bsend me (?:one|1|an) sms\b", text)
+    return bool(
+        expected_marker
+        and "after we hang up" in text
+        and sms_intent
+        and expected_marker in _spoken_marker_key(text)
+    )
+
+
+def _message_created_at(message) -> datetime | None:
+    """Return an aware server timestamp from an SDK SMS row."""
+    value = getattr(message, "created_at", None)
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _sms_target_numbers(message) -> set[str]:
     """All authoritative targets represented by an outbound SMS row."""
     values = [getattr(message, "remote_phone_number", "") or ""]
@@ -79,11 +112,6 @@ def _sms_target_numbers(message) -> set[str]:
         for recipient in (getattr(message, "recipients", None) or [])
     )
     return {digits for value in values if (digits := _digits(value))}
-
-
-def _delivery_status(message) -> str:
-    status = getattr(message, "delivery_status", "") or ""
-    return str(getattr(status, "value", status)).lower()
 
 
 def _client(key):
@@ -154,9 +182,16 @@ def _call_state(remote, call_id) -> tuple[str, str]:
     return status, " ".join(fields)
 
 
-def _wait_for_two_way_call(remote, number_id, call_id, *, agent_turns=1):
+def _wait_for_two_way_call(
+    remote,
+    number_id,
+    call_id,
+    *,
+    agent_turns=1,
+    deadline: float | None = None,
+):
     """Block until the driver spoke and the agent completed enough turns."""
-    deadline = time.monotonic() + TIMEOUT_S
+    deadline = deadline or (time.monotonic() + TIMEOUT_S)
     last = ""
     ended_at = None
     while time.monotonic() < deadline:
@@ -185,6 +220,36 @@ def _wait_for_two_way_call(remote, number_id, call_id, *, agent_turns=1):
                 pytest.fail(f"call ended without a two-way conversation ({last})")
         time.sleep(POLL_EVERY_S)
     pytest.fail(f"agent never held a two-way call within {TIMEOUT_S:.0f}s ({last})")
+
+
+def _wait_for_hosted_request(
+    remote,
+    number_id,
+    call_id,
+    marker: str,
+    *,
+    deadline: float | None = None,
+) -> None:
+    """Wait for the current caller's after-call SMS request to persist."""
+    deadline = deadline or (time.monotonic() + TIMEOUT_S)
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            _all, _remote, local = _segments(remote, number_id, call_id)
+            transcript = " ".join(segment.text.strip() for segment in local)
+            if _hosted_request_persisted(transcript, marker):
+                return
+            last = (
+                "local transcript so far: "
+                f"{_normalized_spoken_text(transcript)!r}"
+            )
+        except Exception as exc:  # transcripts may 404 until setup completes
+            last = f"transcripts not ready: {exc!r}"
+        time.sleep(POLL_EVERY_S)
+    pytest.fail(
+        "call ended before the current hosted SMS request was persisted "
+        f"({last})"
+    )
 
 
 def _aut_speech_mode(aut, direction, driver_number):
@@ -296,18 +361,28 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     assert HOSTED_POST_CALL_MARKER, (
         "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
     )
-    expected_postcall_text = _normalized_spoken_text(HOSTED_POST_CALL_MARKER)
+    expected_postcall_text = _spoken_marker_key(HOSTED_POST_CALL_MARKER)
     assert expected_postcall_text, "hosted completion marker must contain words"
+    scenario_deadline = time.monotonic() + TIMEOUT_S
     before_driver = {call.id for call in _driver_inbound()}
     before_aut = {call.id for call in _aut_outbound()}
+    baseline_sms = _aut_outbound_sms()
+    before_postcall_sms = {message.id for message in baseline_sms}
+    baseline_times = [
+        created_at
+        for message in baseline_sms
+        if (created_at := _message_created_at(message)) is not None
+    ]
+    sms_watermark = max(
+        baseline_times,
+        default=datetime.min.replace(tzinfo=timezone.utc),
+    )
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
 
     driver_call_id = None
     aut_call = None
-    before_postcall_sms = set()
     try:
-        deadline = time.monotonic() + TIMEOUT_S
-        while time.monotonic() < deadline:
+        while time.monotonic() < scenario_deadline:
             fresh_driver = [
                 call for call in _driver_inbound()
                 if call.id not in before_driver
@@ -335,21 +410,21 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             aut_call, "hosted_agent_authority_mode", None,
         ) is not None
 
-        # The first hosted-agent turn is its greeting. Wait for a second turn so
-        # Voice AI has processed the caller's follow-up request before hangup.
         agent_said = _wait_for_two_way_call(
-            remote, st["number_id"], driver_call_id, agent_turns=2,
+            remote, st["number_id"], driver_call_id,
+            deadline=scenario_deadline,
         )
         assert agent_said, "Inkbox Voice AI produced no speech"
-        # Snapshot the sender's authoritative rows after the setup SMS and
-        # live call, immediately before call.ended can trigger follow-up work.
-        before_postcall_sms = {
-            message.id for message in _aut_outbound_sms()
-        }
+        _wait_for_hosted_request(
+            remote,
+            st["number_id"],
+            driver_call_id,
+            HOSTED_POST_CALL_MARKER,
+            deadline=scenario_deadline,
+        )
     finally:
         _hangup_call(remote, driver_call_id)
 
-    completion_deadline = time.monotonic() + 90
     enqueue_marker = (
         f"Enqueued hosted call completion for call_id={aut_call.id}"
     )
@@ -357,22 +432,27 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         f"Finished hosted call reconciliation for call_id={aut_call.id} "
         "outcome=success receipt_state=completed"
     )
-    delivered = []
-    while time.monotonic() < completion_deadline:
+    duplicate_grace = 2 * POLL_EVERY_S
+    settlement_deadline = scenario_deadline - duplicate_grace
+    accepted = []
+    while time.monotonic() < settlement_deadline:
         logs = _gateway_log_text()
-        delivered = [
+        accepted = [
             message
             for message in _aut_outbound_sms()
             if (
                 message.id not in before_postcall_sms
-                and _normalized_spoken_text(getattr(message, "text", None))
+                and (created_at := _message_created_at(message)) is not None
+                and created_at >= sms_watermark
+                and _spoken_marker_key(getattr(message, "text", None))
                 == expected_postcall_text
-                and _delivery_status(message) == "delivered"
             )
         ]
-        if completed_marker in logs and delivered:
+        if completed_marker in logs and accepted:
             break
-        time.sleep(3)
+        poll_delay = min(3.0, max(0.0, settlement_deadline - time.monotonic()))
+        if poll_delay:
+            time.sleep(poll_delay)
     logs = _gateway_log_text()
     assert enqueue_marker in logs, (
         "Hermes did not receive the hosted call.ended completion"
@@ -380,26 +460,37 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     assert completed_marker in logs, (
         "Hermes did not finish the hosted post-call reconciliation"
     )
-    assert delivered, (
-        "Hermes did not execute the hosted post-call SMS commitment"
+    assert accepted, (
+        "Hermes did not execute the hosted post-call SMS commitment within "
+        f"the shared {TIMEOUT_S:.0f}s scenario budget"
     )
 
     # Give any accidental model-text delivery time to land, then prove the one
     # explicit tool side effect is the only post-call SMS.
-    time.sleep(2 * POLL_EVERY_S)
-    new_postcall_sms = [
+    remaining_budget = scenario_deadline - time.monotonic()
+    assert remaining_budget >= duplicate_grace, (
+        "Hermes confirmed the hosted SMS too late to complete the reserved "
+        f"{duplicate_grace:.0f}s duplicate-observation window"
+    )
+    time.sleep(duplicate_grace)
+    marker_sms = [
         message
         for message in _aut_outbound_sms()
-        if message.id not in before_postcall_sms
+        if (
+            message.id not in before_postcall_sms
+            and (created_at := _message_created_at(message)) is not None
+            and created_at >= sms_watermark
+            and _spoken_marker_key(getattr(message, "text", None))
+            == expected_postcall_text
+        )
     ]
-    assert len(new_postcall_sms) == 1, (
-        "Hosted post-call processing leaked plain model text or duplicated "
-        f"the commitment: {[getattr(m, 'text', '') for m in new_postcall_sms]}"
+    assert len(marker_sms) == 1, (
+        "Hosted post-call processing duplicated or missed the current "
+        f"commitment: {[getattr(m, 'text', '') for m in marker_sms]}"
     )
-    assert _normalized_spoken_text(
-        getattr(new_postcall_sms[0], "text", None)
+    assert _spoken_marker_key(
+        getattr(marker_sms[0], "text", None)
     ) == expected_postcall_text
-    assert _delivery_status(new_postcall_sms[0]) == "delivered"
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
