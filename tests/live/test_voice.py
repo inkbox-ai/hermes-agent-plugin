@@ -66,6 +66,26 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+def _normalized_spoken_text(value: str | None) -> str:
+    """Compare speech-carried markers without punctuation/case artifacts."""
+    return " ".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
+
+
+def _sms_target_numbers(message) -> set[str]:
+    """All authoritative targets represented by an outbound SMS row."""
+    values = [getattr(message, "remote_phone_number", "") or ""]
+    values.extend(
+        getattr(recipient, "recipient_phone_number", "") or ""
+        for recipient in (getattr(message, "recipients", None) or [])
+    )
+    return {digits for value in values if (digits := _digits(value))}
+
+
+def _delivery_status(message) -> str:
+    status = getattr(message, "delivery_status", "") or ""
+    return str(getattr(status, "value", status)).lower()
+
+
 def _client(key):
     from inkbox import Inkbox
 
@@ -242,7 +262,8 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
     assert aut_numbers, "AUT identity has no phone number"
     aut_phone = aut_numbers[0].number
     aut_tail = _digits(aut_phone)[-10:]
-    driver_tail = _digits(st["number"])[-10:]
+    driver_number = _digits(st["number"])
+    driver_tail = driver_number[-10:]
 
     def _driver_inbound():
         return [
@@ -269,14 +290,14 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             message
             for message in aut.texts.list(aut_number_id, limit=200)
             if (getattr(message, "direction", "") or "").lower() == "outbound"
-            and _digits(
-                getattr(message, "remote_phone_number", "") or ""
-            )[-10:] == driver_tail
+            and driver_number in _sms_target_numbers(message)
         ]
 
     assert HOSTED_POST_CALL_MARKER, (
         "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
     )
+    expected_postcall_text = _normalized_spoken_text(HOSTED_POST_CALL_MARKER)
+    assert expected_postcall_text, "hosted completion marker must contain words"
     before_driver = {call.id for call in _driver_inbound()}
     before_aut = {call.id for call in _aut_outbound()}
     remote.texts.send(st["number_id"], to=aut_phone, text=_call_me_text())
@@ -344,8 +365,9 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             for message in _aut_outbound_sms()
             if (
                 message.id not in before_postcall_sms
-                and HOSTED_POST_CALL_MARKER
-                in (getattr(message, "text", "") or "")
+                and _normalized_spoken_text(getattr(message, "text", None))
+                == expected_postcall_text
+                and _delivery_status(message) == "delivered"
             )
         ]
         if completed_marker in logs and delivered:
@@ -374,9 +396,10 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         "Hosted post-call processing leaked plain model text or duplicated "
         f"the commitment: {[getattr(m, 'text', '') for m in new_postcall_sms]}"
     )
-    assert HOSTED_POST_CALL_MARKER in (
-        getattr(new_postcall_sms[0], "text", "") or ""
-    )
+    assert _normalized_spoken_text(
+        getattr(new_postcall_sms[0], "text", None)
+    ) == expected_postcall_text
+    assert _delivery_status(new_postcall_sms[0]) == "delivered"
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the
