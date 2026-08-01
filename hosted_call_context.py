@@ -81,19 +81,12 @@ def _binding_failure_matches(args: Any) -> bool:
     if isinstance(target, list):
         target = target[0] if len(target) == 1 else ""
     target = str(target or "").strip()
-    has_conversation = bool(
-        arguments.get("conversationId") or arguments.get("conversation_id")
-    )
     target_digest = _digest(target) if target else ""
     with _LOCK:
         active_targets = set(_BINDING_FAILURES.values())
-    if has_conversation and active_targets:
-        return True
     if target_digest and target_digest in active_targets:
         return True
     for path in _root().glob("binding-*.json"):
-        if has_conversation:
-            return True
         try:
             value = json.loads(path.read_text())
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -303,10 +296,17 @@ def observe_hosted_tool_start(
     target = arguments.get("to")
     if isinstance(target, list):
         target = target[0] if len(target) == 1 else ""
+    target_matches = (
+        str(target or "").strip()
+        == str(context.get("remote_phone") or "").strip()
+        and not (
+            arguments.get("conversationId")
+            or arguments.get("conversation_id")
+        )
+    )
     observation = {
         "tool_call_id": _digest(str(tool_call_id or "missing")),
-        "target_matches": str(target or "").strip()
-        == str(context.get("remote_phone") or "").strip(),
+        "target_matches": target_matches,
         "pending": True,
     }
     path = _settlement_path(call_id, attempt)
@@ -316,6 +316,30 @@ def observe_hosted_tool_start(
             observations = loaded if isinstance(loaded, list) else []
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             observations = []
+        if observations:
+            observations.append({
+                **observation,
+                "pending": False,
+                "ok": False,
+                "error_kind": "terminal",
+            })
+            _atomic_write(path, observations[:10])
+            return {
+                "action": "block",
+                "message": "Hosted-call SMS already attempted; duplicate blocked.",
+            }
+        if not target_matches:
+            observation.update({
+                "pending": False,
+                "ok": False,
+                "error_kind": "terminal",
+            })
+            observations.append(observation)
+            _atomic_write(path, observations[:10])
+            return {
+                "action": "block",
+                "message": "Hosted-call SMS recipient mismatch; send blocked safely.",
+            }
         observations.append(observation)
         _atomic_write(path, observations[:10])
 

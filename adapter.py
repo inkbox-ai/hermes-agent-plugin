@@ -275,6 +275,35 @@ _OPEN_ACTION_SMS_COMMITMENT_PATTERNS = (
 )
 
 
+def _sms_candidate_clauses(text: str) -> list[str]:
+    """Build clause windows without widening a negation to later intent."""
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"(?:[.!?;]+|\s+\bbut\b\s+)", str(text or ""), flags=re.IGNORECASE)
+        if clause.strip()
+    ]
+    candidates = list(clauses)
+    candidates.extend(
+        f"{left}; {right}"
+        for left, right in zip(clauses, clauses[1:])
+        if not _TRANSCRIPT_NEGATED_SMS_ACTION.search(left)
+        and not _TRANSCRIPT_NEGATED_SMS_ACTION.search(right)
+    )
+    return candidates
+
+
+def _positive_sms_clauses(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+) -> list[str]:
+    return [
+        clause
+        for clause in _sms_candidate_clauses(text)
+        if not _TRANSCRIPT_NEGATED_SMS_ACTION.search(clause)
+        and any(pattern.search(clause) for pattern in patterns)
+    ]
+
+
 def _write_private_json_atomic(path: Path, value: Any) -> None:
     """Write JSON without exposing a permissive temporary-file window."""
     tmp = path.with_suffix(f"{path.suffix}.tmp")
@@ -3989,10 +4018,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 str(action.get(field) or "")
                 for field in ("action", "description", "details")
             )
-            negated = _TRANSCRIPT_NEGATED_SMS_ACTION.search(action_text)
-            if not negated and any(
-                pattern.search(action_text)
-                for pattern in _OPEN_ACTION_SMS_COMMITMENT_PATTERNS
+            if _positive_sms_clauses(
+                action_text,
+                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
             ):
                 return True
 
@@ -4005,14 +4033,41 @@ class InkboxAdapter(BasePlatformAdapter):
                 if isinstance(entry, dict)
             ]
         for text in transcript_texts:
-            if _TRANSCRIPT_NEGATED_SMS_ACTION.search(text):
-                continue
-            if any(
-                pattern.search(text)
-                for pattern in _TRANSCRIPT_SMS_COMMITMENT_PATTERNS
+            if _positive_sms_clauses(
+                text,
+                _TRANSCRIPT_SMS_COMMITMENT_PATTERNS,
             ):
                 return True
         return False
+
+    @staticmethod
+    def _hosted_sms_context_from_data(
+        data: Dict[str, Any],
+        transcript_texts: list[str],
+    ) -> list[str]:
+        """Keep only the positive SMS clauses needed by a correction turn."""
+        context: list[str] = []
+        actions = data.get("post_call_action_items")
+        for action in actions if isinstance(actions, list) else []:
+            if (
+                not isinstance(action, dict)
+                or str(action.get("status") or "open").strip().lower() != "open"
+            ):
+                continue
+            action_text = " ".join(
+                str(action.get(field) or "")
+                for field in ("action", "description", "details")
+            )
+            context.extend(_positive_sms_clauses(
+                action_text,
+                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
+            ))
+        for text in transcript_texts:
+            context.extend(_positive_sms_clauses(
+                text,
+                _TRANSCRIPT_SMS_COMMITMENT_PATTERNS,
+            ))
+        return [value[:4_000] for value in context[:20]]
 
     @classmethod
     def _hosted_sms_required(cls, event: MessageEvent) -> bool:
@@ -4030,8 +4085,9 @@ class InkboxAdapter(BasePlatformAdapter):
         call_id: str,
         remote_phone: str,
         attempt: int,
-    ) -> None:
+    ) -> bool:
         """Bind verified call data to the Hermes session observed by tools."""
+        sms_required = self._hosted_sms_required(event)
         handler_owner = getattr(
             getattr(self, "_message_handler", None),
             "__self__",
@@ -4039,14 +4095,14 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         session_store = getattr(handler_owner, "session_store", None)
         if session_store is None:
-            if self._hosted_sms_required(event):
+            if sms_required:
                 mark_hosted_binding_failure(call_id, attempt, remote_phone)
                 logger.error(
                     "[Inkbox] Hosted SMS context unavailable for call_id=%s; "
                     "tool sends will be blocked",
                     call_id,
                 )
-            return
+            return not sms_required
         try:
             entry = session_store.get_or_create_session(event.source)
             enqueue_hosted_turn_context(
@@ -4058,13 +4114,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     "attempt": attempt,
                 },
             )
+            return True
         except Exception:
-            if self._hosted_sms_required(event):
+            if sms_required:
                 mark_hosted_binding_failure(call_id, attempt, remote_phone)
             logger.exception(
                 "[Inkbox] Could not bind hosted call tool context for call_id=%s",
                 call_id,
             )
+            return not sms_required
 
     def _hosted_sms_correction_event(
         self,
@@ -4081,17 +4139,24 @@ class InkboxAdapter(BasePlatformAdapter):
             if settlement == "missing"
             else "The required SMS tool had a deterministic pre-send error"
         )
+        sms_context = raw.get("_inkbox_hosted_sms_context")
+        context_lines = [
+            f"- {str(value)[:4_000]}"
+            for value in (sms_context if isinstance(sms_context, list) else [])[:20]
+            if str(value).strip()
+        ]
         text = "\n".join([
             "[hosted_post_call_sms_correction]",
             f"{reason}. This is the only correction attempt.",
             "Call inkbox_send_sms exactly once with `to` set to the exact "
             f"authoritative remote number `{remote_phone}` and `text` set to "
-            "the still-needed SMS body from the original reconciliation below.",
+            "the still-needed SMS body from the SMS-only context below.",
             "Do not use conversationId, another recipient, or plain prose. "
             "Do not reply [SILENT] or skip the tool in this correction turn. "
-            "Stop after the tool result.",
+            "Do not execute any non-SMS post-call action. Stop after the tool result.",
             "",
-            event.text,
+            "Still-needed SMS context:",
+            *(context_lines or ["- Use the SMS commitment from the completed call context."]),
         ])
         return MessageEvent(
             text=text,
@@ -4286,12 +4351,25 @@ class InkboxAdapter(BasePlatformAdapter):
             raw = event.raw_message if isinstance(event.raw_message, dict) else {}
             data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
-            self._bind_hosted_turn_context(
+            bound = self._bind_hosted_turn_context(
                 event,
                 call_id=call_id,
                 remote_phone=str(call.get("remote_phone_number") or "").strip(),
                 attempt=int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1),
             )
+            if not bound:
+                raw["_inkbox_hosted_binding_failed"] = True
+                self._write_hosted_call_registry(
+                    call_id,
+                    event_id=event_id,
+                    state="failed",
+                    outcome="failure",
+                    retryable=False,
+                )
+                clear_hosted_call_context(call_id)
+                raise RuntimeError(
+                    "Hosted-call SMS context could not be bound safely"
+                )
             chat_id = str(event.source.chat_id)
             self._hosted_post_call_active_chats[chat_id] = (
                 self._hosted_post_call_active_chats.get(chat_id, 0) + 1
@@ -4330,6 +4408,16 @@ class InkboxAdapter(BasePlatformAdapter):
             data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
             call = data.get("call") if isinstance(data.get("call"), dict) else {}
             attempt = int(raw.get("_inkbox_hosted_reconciliation_attempt") or 1)
+            if raw.get("_inkbox_hosted_binding_failed") is True:
+                self._write_hosted_call_registry(
+                    call_id,
+                    event_id=event_id,
+                    state="failed",
+                    outcome="failure",
+                    retryable=False,
+                )
+                clear_hosted_call_context(call_id)
+                return
             outcome_value = str(
                 getattr(outcome, "value", outcome)
             ).strip().lower()
@@ -6679,6 +6767,10 @@ class InkboxAdapter(BasePlatformAdapter):
             data,
             [text for _role, text in transcript],
         )
+        hosted_sms_context = self._hosted_sms_context_from_data(
+            data,
+            [text for _role, text in transcript],
+        )
         transcript_block = "\n".join(
             f"  - {_escape_contact_memory_tokens(role)}: "
             f"{_escape_contact_memory_tokens(text)}"
@@ -6783,6 +6875,7 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         event_envelope = dict(envelope)
         event_envelope["_inkbox_hosted_sms_required"] = hosted_sms_required
+        event_envelope["_inkbox_hosted_sms_context"] = hosted_sms_context
         event = MessageEvent(
             text="\n".join(body_parts),
             message_type=MessageType.TEXT,

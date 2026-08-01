@@ -257,6 +257,8 @@ def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
     "text",
     [
         "After we hang up, send me one SMS containing release-ready.",
+        "After this call ends; text me the release code.",
+        "Text me the release code. After this call ends.",
         "After this call ends, text the release status to the team.",
         "When the call ends, send her an SMS with the confirmation.",
         "I will text you once this call is over.",
@@ -285,6 +287,23 @@ def test_hosted_sms_commitment_uses_fetched_authoritative_transcript(tmp_path):
     payload = _payload()
     payload["data"]["post_call_action_items"] = []
     payload["data"].pop("transcript")
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is True
+
+
+def test_mixed_negated_and_positive_transcript_keeps_sms_commitment(tmp_path):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = []
+    payload["data"]["transcript"]["entries"] = [{
+        "party": "remote",
+        "text": (
+            "Don't text me now; after this call ends, "
+            "text me the release code."
+        ),
+    }]
 
     asyncio.run(instance._on_call_ended(payload))
 
@@ -391,7 +410,24 @@ def test_send_open_action_creates_sms_commitment(tmp_path, action):
     assert instance._hosted_sms_required(events[0]) is True
 
 
-def test_hosted_sms_binding_failure_blocks_only_affected_target(
+def test_mixed_negated_and_positive_open_action_keeps_sms_commitment(tmp_path):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": (
+            "Don't text me now; after this call ends, "
+            "text me the release code."
+        ),
+        "status": "open",
+    }]
+    payload["data"]["transcript"]["entries"] = []
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is True
+
+
+def test_hosted_sms_binding_failure_aborts_turn_without_affecting_other_sessions(
     tmp_path,
     monkeypatch,
 ):
@@ -412,13 +448,9 @@ def test_hosted_sms_binding_failure_blocks_only_affected_target(
     asyncio.run(instance._on_call_ended(payload))
     event = events[0]
 
-    asyncio.run(instance.on_processing_start(event))
-    blocked = observe_hosted_tool_start(
-        tool_name="inkbox_send_sms",
-        args={"to": "+15551112222", "text": "release-ready"},
-        session_id="unbound-session",
-        tool_call_id="blocked-call",
-    )
+    with pytest.raises(RuntimeError, match="could not be bound safely"):
+        asyncio.run(instance.on_processing_start(event))
+    asyncio.run(instance.on_processing_complete(event, "failure"))
     unrelated = observe_hosted_tool_start(
         tool_name="inkbox_send_sms",
         args={"to": "+15559990000", "text": "unrelated"},
@@ -426,12 +458,7 @@ def test_hosted_sms_binding_failure_blocks_only_affected_target(
         tool_call_id="unrelated-call",
     )
 
-    assert blocked == {
-        "action": "block",
-        "message": "Hosted-call SMS context is unavailable; send blocked safely.",
-    }
     assert unrelated is None
-    asyncio.run(instance.on_processing_complete(event, "success"))
     assert len(events) == 1
     receipt = instance._read_hosted_call_registry()["call-1"]
     assert receipt["state"] == "failed"
@@ -457,16 +484,8 @@ def test_hosted_sms_context_persist_failure_blocks_send(
     asyncio.run(instance._on_call_ended(payload))
     event = events[0]
 
-    asyncio.run(instance.on_processing_start(event))
-    directive = observe_hosted_tool_start(
-        tool_name="inkbox_send_sms",
-        args={"to": "+15551112222", "text": "release-ready"},
-        session_id="bound-session",
-        tool_call_id="blocked-call",
-    )
-
-    assert directive and directive["action"] == "block"
-    asyncio.run(instance.on_processing_complete(event, "success"))
+    with pytest.raises(RuntimeError, match="could not be bound safely"):
+        asyncio.run(instance.on_processing_start(event))
     assert instance._read_hosted_call_registry()["call-1"]["state"] == "failed"
 
 
@@ -516,7 +535,36 @@ def test_queued_hosted_sms_correction_replays_as_correction_after_restart(
     assert len(restarted_events) == 1
     replay = restarted_events[0]
     assert "only correction attempt" in replay.text
+    assert "Email the release details" not in replay.text
+    assert "Do not execute any non-SMS post-call action" in replay.text
     assert replay.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
+
+
+def test_restarted_sms_correction_does_not_replay_completed_non_sms_action(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [
+        {"action": "Email the release details", "status": "open"},
+        {"action": "Text release-ready", "status": "open"},
+    ]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+
+    correction = events[1]
+    assert "Text release-ready" in correction.text
+    assert "Email the release details" not in correction.text
+
+    restarted, restarted_events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+
+    assert len(restarted_events) == 1
+    assert "Text release-ready" in restarted_events[0].text
+    assert "Email the release details" not in restarted_events[0].text
 
 
 def test_clean_running_hosted_sms_correction_replays_after_restart(
@@ -858,6 +906,7 @@ def test_queued_hosted_completion_recovers_once_after_adapter_restart(tmp_path):
     assert first._hosted_call_registry_path.stat().st_mode & 0o777 == 0o600
     assert receipt["envelope"]["data"]["call"]["id"] == "call-1"
     assert "transcript" not in receipt["envelope"]["data"]
+    assert "_inkbox_hosted_sms_context" not in receipt["envelope"]
     assert "memories" not in receipt["envelope"]["data"]["contacts"][0]
 
     restarted, restarted_events = _adapter(tmp_path)

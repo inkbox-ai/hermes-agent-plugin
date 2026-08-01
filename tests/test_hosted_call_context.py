@@ -15,6 +15,7 @@ from inkbox_plugin.hosted_call_context import (
     clear_hosted_call_context,
     enqueue_hosted_turn_context,
     hosted_sms_settlement,
+    mark_hosted_binding_failure,
     observe_hosted_tool_call,
     observe_hosted_tool_start,
 )
@@ -105,6 +106,55 @@ def test_two_pre_and_post_tool_calls_are_terminal_duplicates():
             status="ok",
         )
     assert hosted_sms_settlement("call-1", 1) == "terminal"
+
+
+def test_wrong_target_is_blocked_before_provider_execution():
+    _activate()
+
+    directive = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15559990000", "text": "release-ready"},
+        session_id="session-1",
+        tool_call_id="wrong-target",
+    )
+
+    assert directive and directive["action"] == "block"
+    assert hosted_sms_settlement("call-1", 1) == "terminal"
+
+
+def test_distinct_second_sms_is_blocked_before_provider_execution():
+    _activate()
+    first = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": "release-ready"},
+        session_id="session-1",
+        tool_call_id="call-tool-1",
+    )
+    second = observe_hosted_tool_start(
+        tool_name="inkbox_send_sms",
+        args={"to": "+15551112222", "text": "release-ready again"},
+        session_id="session-1",
+        tool_call_id="call-tool-2",
+    )
+
+    assert first is None
+    assert second and second["action"] == "block"
+    assert hosted_sms_settlement("call-1", 1) == "terminal"
+
+
+def test_binding_failure_does_not_block_unrelated_conversation_send():
+    mark_hosted_binding_failure("call-1", 1, "+15551112222")
+    try:
+        directive = observe_hosted_tool_start(
+            tool_name="inkbox_send_sms",
+            args={"conversationId": "unrelated-conversation", "text": "hello"},
+            session_id="unrelated-session",
+            tool_call_id="unrelated-call",
+        )
+
+        assert directive is None
+    finally:
+        clear_hosted_call_context("call-1")
 
 
 def test_missing_wrong_target_and_duplicate_are_not_success():
