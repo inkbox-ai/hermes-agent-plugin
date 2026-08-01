@@ -329,7 +329,8 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         f"Enqueued hosted call completion for call_id={aut_call.id}"
     )
     completed_marker = (
-        f"Completed hosted call reconciliation for call_id={aut_call.id}"
+        f"Finished hosted call reconciliation for call_id={aut_call.id} "
+        "outcome=success receipt_state=completed"
     )
     delivered = []
     while time.monotonic() < completion_deadline:
