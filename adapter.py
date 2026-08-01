@@ -269,6 +269,10 @@ _TRANSCRIPT_SMS_COMMITMENT_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_OPEN_ACTION_SMS_COMMITMENT_PATTERNS = (
+    re.compile(rf"\b{_TRANSCRIPT_TEXT_VERB}", re.IGNORECASE),
+    re.compile(rf"\b{_TRANSCRIPT_SEND_SMS}", re.IGNORECASE),
+)
 
 
 def _write_private_json_atomic(path: Path, value: Any) -> None:
@@ -3986,10 +3990,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 for field in ("action", "description", "details")
             )
             negated = _TRANSCRIPT_NEGATED_SMS_ACTION.search(action_text)
-            if not negated and re.search(
-                r"\b(?:sms|text|texted|texting)\b",
-                action_text,
-                re.IGNORECASE,
+            if not negated and any(
+                pattern.search(action_text)
+                for pattern in _OPEN_ACTION_SMS_COMMITMENT_PATTERNS
             ):
                 return True
 

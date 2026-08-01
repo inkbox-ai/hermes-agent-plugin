@@ -335,6 +335,7 @@ def test_hosted_sms_history_does_not_create_a_commitment(tmp_path, text):
     "Don't text me after this call.",
     "Don’t text me after this call.",
     "Dont text me after this call.",
+    "Never text me after this call.",
 ])
 def test_negated_open_action_does_not_create_sms_commitment(tmp_path, action):
     instance, events = _adapter(tmp_path)
@@ -348,6 +349,46 @@ def test_negated_open_action_does_not_create_sms_commitment(tmp_path, action):
     asyncio.run(instance._on_call_ended(payload))
 
     assert instance._hosted_sms_required(events[0]) is False
+
+
+@pytest.mark.parametrize("action", [
+    "Review the text exchange.",
+    "Search SMS history for the release details.",
+    "Summarize the text conversation.",
+    "Read the SMS thread.",
+])
+def test_noun_only_open_action_does_not_create_sms_commitment(tmp_path, action):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": action,
+        "status": "open",
+    }]
+    payload["data"]["transcript"]["entries"] = []
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is False
+
+
+@pytest.mark.parametrize("action", [
+    "Text Alex the release status.",
+    "Please text me release-ready.",
+    "Send one SMS containing exactly: release-ready.",
+    "Send Alex a text message with the confirmation.",
+])
+def test_send_open_action_creates_sms_commitment(tmp_path, action):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": action,
+        "status": "open",
+    }]
+    payload["data"]["transcript"]["entries"] = []
+
+    asyncio.run(instance._on_call_ended(payload))
+
+    assert instance._hosted_sms_required(events[0]) is True
 
 
 def test_hosted_sms_binding_failure_blocks_only_affected_target(
