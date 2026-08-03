@@ -471,6 +471,7 @@ OUTBOUND_FAILURE_MAX_ATTEMPTS = 3
 OUTBOUND_FAILURE_STATE_TTL_SECONDS = 30 * 60.0
 # How much of the undelivered body to echo back into the wake-up turn.
 OUTBOUND_FAILURE_BODY_SNIPPET_CHARS = 400
+_HOST_PLAINTEXT_FALLBACK_PREFIX = "(Response formatting failed, plain text:)\n\n"
 
 # Per-channel fix-it guidance embedded in the delivery-failure wake-up
 # turn. Text channels are usually fixable by rewriting; a mail bounce
@@ -5852,6 +5853,14 @@ class InkboxAdapter(BasePlatformAdapter):
                 about them too would produce double sends.
         """
         if failure.retryable:
+            return
+        keys = _outbound_failure_keys(mode, conversation_id, target, chat_id=chat_id)
+        now = time.time()
+        if content.startswith(_HOST_PLAINTEXT_FALLBACK_PREFIX) and any(
+            (entry := self._outbound_failure_store().get(key))
+            and now - float(entry.get("at", 0.0)) <= OUTBOUND_FAILURE_STATE_TTL_SECONDS
+            for key in keys
+        ):
             return
         fields = failure.raw_response if isinstance(failure.raw_response, dict) else {}
         error_code = str(fields.get("error_code") or "").strip() or None
