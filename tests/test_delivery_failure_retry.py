@@ -301,6 +301,7 @@ def test_sms_spam_block_wakes_agent_with_rule():
     )
     assert "message_blocked_spam_filter rule=markdown_artifacts" in event.text
     assert "reads as bot traffic in SMS" in event.text
+    assert "zero emoji" in event.text
     assert "«**Jane Doe** is on file.»" in event.text
     assert "SMS failure classification: FIRST SAFE RETRY REQUIRED" in event.text
     assert "MUST now send exactly one safe, materially rephrased SMS" in event.text

@@ -480,7 +480,7 @@ _DELIVERY_FAILURE_CHANNEL_GUIDANCE: Dict[str, str] = {
     "sms": (
         "Rewrite the message so it no longer trips the stated rule and it "
         "reads like a human text: plain conversational prose, no markdown "
-        "(**bold**, # headers, ``` fences), at most one emoji, no profanity, "
+        "(**bold**, # headers, ``` fences), zero emoji, no profanity, "
         "no test/probe phrasing."
     ),
     "imessage": (
