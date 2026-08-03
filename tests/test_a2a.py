@@ -44,7 +44,26 @@ def _adapter(tmp_path):
     adapter._a2a_session_by_chat = {}
     adapter._a2a_session_key_by_chat = {}
     adapter._a2a_suppress_next_reply_by_chat = set()
+    adapter._a2a_ingest_lock = asyncio.Lock()
     adapter._enqueued = []
+    adapter._a2a_receipts = []
+
+    task = types.SimpleNamespace(state="submitted", messages=[])
+
+    class Identity:
+        def a2a_task(self, _task_id):
+            return task
+
+        def a2a_reply(self, task_id, **kwargs):
+            adapter._a2a_receipts.append((task_id, kwargs))
+            task.messages.append(types.SimpleNamespace(
+                parts=[{"text": kwargs["text"]}],
+            ))
+
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: Identity(),
+    )
+    adapter._bind_a2a_turn_context = lambda *_args, **_kwargs: True
 
     async def enqueue(event):
         adapter._enqueued.append(event)
@@ -99,7 +118,179 @@ def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
     assert adapter._enqueued[0].source.chat_id == "a2a:identity-1:context-1"
     assert adapter._a2a_registry_path.exists()
     registry = json.loads(adapter._a2a_registry_path.read_text())
-    assert registry["task-1:message-1"]["state"] == "queued"
+    entry = registry["task-1:message-1"]
+    assert entry["state"] == "enqueued"
+    assert list(entry["phases"]) == [
+        "acknowledged",
+        "bound",
+        "enqueued",
+        "received",
+    ]
+    assert adapter._a2a_receipts == [(
+        "task-1",
+        {
+            "intent": "progress",
+            "text": "Task task-1 received. Work is queued and starting.",
+        },
+    )]
+
+
+def test_concurrent_duplicate_a2a_delivery_sends_one_receipt(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def deliver_duplicates():
+        return await asyncio.gather(
+            adapter._on_a2a_event(_event("evt-1")),
+            adapter._on_a2a_event(_event("evt-2")),
+        )
+
+    responses = asyncio.run(deliver_duplicates())
+
+    assert {response.text for response in responses} == {"ok", "duplicate"}
+    assert len(adapter._enqueued) == 1
+    assert len(adapter._a2a_receipts) == 1
+
+
+def test_a2a_bind_failure_is_retryable_before_enqueue(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._bind_a2a_turn_context = lambda *_args, **_kwargs: False
+
+    failed = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert failed.status == 503
+    assert adapter._enqueued == []
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["last_error"] == {
+        "at": registry["task-1:message-1"]["last_error"]["at"],
+        "code": "session_unavailable",
+        "phase": "binding",
+    }
+
+    adapter._bind_a2a_turn_context = lambda *_args, **_kwargs: True
+    retried = asyncio.run(adapter._on_a2a_event(_event("evt-retry")))
+
+    assert retried.status == 200
+    assert len(adapter._enqueued) == 1
+    assert len(adapter._a2a_receipts) == 1
+
+
+def test_a2a_enqueue_failure_rolls_back_and_retries(tmp_path):
+    adapter = _adapter(tmp_path)
+    attempts = 0
+
+    async def flaky_enqueue(event):
+        nonlocal attempts
+        attempts += 1
+        registry = json.loads(adapter._a2a_registry_path.read_text())
+        assert "acknowledged" in registry["task-1:message-1"]["phases"]
+        if attempts == 1:
+            raise RuntimeError("queue unavailable")
+        adapter._enqueued.append(event)
+
+    adapter._enqueue = flaky_enqueue
+
+    failed = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert failed.status == 503
+    assert adapter._a2a_tasks_by_chat == {}
+    assert adapter._a2a_events_by_chat == {}
+    assert adapter._a2a_active_chats == set()
+
+    retried = asyncio.run(adapter._on_a2a_event(_event("evt-retry")))
+
+    assert retried.status == 200
+    assert attempts == 2
+    assert len(adapter._enqueued) == 1
+    assert len(adapter._a2a_receipts) == 1
+
+
+def test_a2a_enqueue_cancellation_rolls_back_before_propagating(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def canceled_enqueue(_event):
+        raise asyncio.CancelledError
+
+    adapter._enqueue = canceled_enqueue
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert adapter._a2a_tasks_by_chat == {}
+    assert adapter._a2a_events_by_chat == {}
+    assert adapter._a2a_active_chats == set()
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["last_error"]["code"] == (
+        "queue_activation_canceled"
+    )
+
+
+def test_a2a_receipt_failure_retries_without_reenqueue(tmp_path):
+    adapter = _adapter(tmp_path)
+    attempts = 0
+
+    class Identity:
+        task = types.SimpleNamespace(state="submitted", messages=[])
+
+        def a2a_task(self, _task_id):
+            return self.task
+
+        def a2a_reply(self, task_id, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("receipt unavailable")
+            adapter._a2a_receipts.append((task_id, kwargs))
+
+    identity = Identity()
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: identity,
+    )
+
+    failed = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert adapter._enqueued == []
+
+    retried = asyncio.run(adapter._on_a2a_event(_event("evt-retry")))
+
+    assert failed.status == 503
+    assert retried.status == 200
+    assert len(adapter._enqueued) == 1
+    assert attempts == 2
+    assert len(adapter._a2a_receipts) == 1
+
+
+def test_a2a_receipt_is_idempotent_when_response_is_lost(tmp_path):
+    adapter = _adapter(tmp_path)
+    attempts = 0
+    receipt = "Task task-1 received. Work is queued and starting."
+    task = types.SimpleNamespace(state="submitted", messages=[])
+
+    class Identity:
+        def a2a_task(self, _task_id):
+            return task
+
+        def a2a_reply(self, _task_id, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            task.messages.append(types.SimpleNamespace(
+                parts=[{"text": receipt}],
+            ))
+            raise RuntimeError("response lost")
+
+    identity = Identity()
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: identity,
+    )
+
+    failed = asyncio.run(adapter._on_a2a_event(_event()))
+    retried = asyncio.run(adapter._on_a2a_event(_event("evt-retry")))
+
+    assert failed.status == 503
+    assert retried.status == 200
+    assert len(adapter._enqueued) == 1
+    assert attempts == 1
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["state"] == "enqueued"
 
 
 def test_a2a_cancel_removes_only_the_addressed_task(tmp_path):
@@ -159,6 +350,66 @@ def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
     assert [event.message_id for event in handed_off] == ["message-2"]
 
 
+def test_a2a_running_and_turn_failure_are_durable(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+
+    asyncio.run(adapter.on_processing_start(event))
+
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    entry = registry["task-1:message-1"]
+    assert entry["state"] == "running"
+    assert "running" in entry["phases"]
+
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    entry = registry["task-1:message-1"]
+    assert entry["state"] == "turn_failed"
+    assert entry["last_error"]["phase"] == "execution"
+    assert entry["last_error"]["code"] == "turn_failed"
+
+
+def test_late_receipt_cannot_regress_running_or_failed_state(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def start_before_enqueue_returns(event):
+        adapter._enqueued.append(event)
+        await adapter.on_processing_start(event)
+
+    adapter._enqueue = start_before_enqueue_returns
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.status == 200
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    entry = registry["task-1:message-1"]
+    assert entry["state"] == "running"
+    assert "acknowledged" in entry["phases"]
+
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "turn_failed",
+        error_phase="execution",
+        error_code="turn_failed",
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "acknowledged",
+    )
+
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    entry = registry["task-1:message-1"]
+    assert entry["state"] == "turn_failed"
+    assert entry["last_error"]["phase"] == "execution"
+
+
 def test_failed_a2a_turn_cannot_default_complete(tmp_path):
     adapter = _adapter(tmp_path)
     chat_id = "a2a:identity-1:context-1"
@@ -189,7 +440,7 @@ def test_a2a_home_channel_notice_does_not_complete_task(tmp_path):
     assert adapter._a2a_tasks_by_chat[chat_id] == ["task-1"]
 
 
-def test_default_a2a_reply_completes_oldest_task(monkeypatch, tmp_path):
+def test_generic_a2a_reply_cannot_complete_task(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     chat_id = "a2a:identity-1:context-1"
     adapter._a2a_tasks_by_chat[chat_id] = ["task-1", "task-2"]
@@ -213,8 +464,40 @@ def test_default_a2a_reply_completes_oldest_task(monkeypatch, tmp_path):
     result = asyncio.run(adapter._send_a2a_reply(chat_id, "Done."))
 
     assert result.success is True
-    assert replies == [("task-1", {"intent": "complete", "text": "Done."})]
-    assert adapter._a2a_tasks_by_chat[chat_id] == ["task-2"]
+    assert result.message_id == "a2a-explicit-outcome-required"
+    assert replies == []
+    assert adapter._a2a_tasks_by_chat[chat_id] == ["task-1", "task-2"]
+
+
+def test_explicit_a2a_intent_finalizes_with_outcome(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _adapter(tmp_path)
+    chat_id = "a2a:identity-1:context-1"
+    adapter._a2a_tasks_by_chat[chat_id] = ["task-1"]
+    adapter._a2a_session_by_chat[chat_id] = "session-1"
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+    )
+    write_a2a_turn_context(
+        "session-1",
+        {
+            "task_id": "task-1",
+            "context_id": "context-1",
+            "message_id": "message-1",
+            "reply_intent_committed": True,
+            "reply_intent": "fail",
+        },
+    )
+
+    result = asyncio.run(adapter._send_a2a_reply(chat_id, "[SILENT]"))
+
+    assert result.success is True
+    assert adapter._a2a_tasks_by_chat[chat_id] == []
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["state"] == "finalized"
+    assert registry["task-1:message-1"]["outcome"] == "failed"
 
 
 def test_a2a_intent_tools_require_verified_turn_context(
@@ -258,6 +541,7 @@ def test_a2a_intent_tools_require_verified_turn_context(
         ("task-1", {"intent": "ask_caller", "text": "Which region?"})
     ]
     assert read_a2a_turn_context("session-1")["reply_intent_committed"] is True
+    assert read_a2a_turn_context("session-1")["reply_intent"] == "ask_caller"
 
 
 def test_a2a_delegation_tools_send_check_wait_and_reply(monkeypatch):
@@ -590,6 +874,7 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     )
     identity = types.SimpleNamespace(
         a2a_task=lambda _task_id: task,
+        a2a_reply=lambda *_args, **_kwargs: None,
         iter_a2a_tasks=lambda **_kwargs: iter(()),
     )
     adapter._inkbox = types.SimpleNamespace(
@@ -607,6 +892,9 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     assert adapter._a2a_tasks_by_chat[
         "a2a:identity-1:context-1"
     ] == ["task-1"]
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["state"] == "enqueued"
+    assert registry["task-1:message-1"]["attempt"] == 2
 
 
 def test_a2a_catch_up_skips_sdk_without_task_inbox(

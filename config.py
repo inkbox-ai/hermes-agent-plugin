@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict
 
 
@@ -17,6 +18,18 @@ INKBOX_WS_PATH = "/phone/media/ws"
 USER_AGENT_NAME = "inkbox-hermes"
 DISTRIBUTION_NAME = "hermes-agent-plugin"
 _RUNTIME_EXTRA: Dict[str, Any] = {}
+
+
+def inkbox_state_path() -> Path:
+    """Return the shared path for the plugin's resolved identity state."""
+    try:
+        from hermes_cli.config import get_hermes_home
+
+        home = Path(get_hermes_home())
+    except ImportError:  # pragma: no cover - direct local import/test fallback
+        configured = os.getenv("HERMES_HOME")
+        home = Path(configured).expanduser() if configured else Path.home() / ".hermes"
+    return home / "inkbox_identity_state.json"
 
 
 class VoiceStack(str, Enum):
