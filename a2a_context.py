@@ -131,7 +131,7 @@ def read_a2a_turn_context(session_id: str) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def mark_a2a_reply_committed(session_id: str) -> None:
+def mark_a2a_reply_committed(session_id: str, intent: str) -> None:
     """Record that an explicit A2A intent tool already replied."""
     with _LOCK:
         path = _context_path(session_id)
@@ -142,4 +142,5 @@ def mark_a2a_reply_committed(session_id: str) -> None:
         if not isinstance(context, dict):
             return
         context["reply_intent_committed"] = True
+        context["reply_intent"] = intent
         _atomic_write(path, context)

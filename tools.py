@@ -96,7 +96,7 @@ def _a2a_intent(intent: str, text: str, session_id: str) -> str:
             }:
                 raise
             result = authoritative
-        mark_a2a_reply_committed(session_id)
+        mark_a2a_reply_committed(session_id, intent)
         return _json({"ok": True, "result": _json_safe(result)})
     except Exception as exc:
         return _json({"error": str(exc)})

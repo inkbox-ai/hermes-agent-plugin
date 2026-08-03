@@ -404,12 +404,17 @@ Hermes direct tools:
 - `inkbox_delete_contact`
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
-The three A2A outcome tools are accepted only during a verified inbound A2A
-turn. Outbound delegation tools can create tasks, wait for worker state changes,
-and answer requests for more input. The history tools support direction,
-participant, lifecycle, context, keyword, timestamp, and cursor filters. The
-sent-task tools remain available as outbound-only compatibility aliases. The
-plugin requires Inkbox SDK 0.5.9 or newer.
+After durable binding and queueing, the plugin sends a non-terminal progress
+receipt; generic assistant text never completes the task. The three A2A outcome
+tools are accepted only during a verified inbound A2A turn and are the only way
+to complete, fail, or request input for that task. `hermes inkbox doctor` reports
+the A2A subscription, recent delivery result, and bounded local dispatch phases
+without including task content or webhook response bodies. Outbound delegation
+tools can create tasks, wait for worker state changes, and answer requests for
+more input. The history tools support direction, participant, lifecycle,
+context, keyword, timestamp, and cursor filters. The sent-task tools remain
+available as outbound-only compatibility aliases. The plugin requires Inkbox
+SDK 0.5.9 or newer.
 
 Realtime-only call tools:
 
