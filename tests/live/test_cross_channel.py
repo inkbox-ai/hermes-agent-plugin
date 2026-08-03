@@ -265,8 +265,9 @@ def test_sms_request_gets_call(xc):
         remote_pid,
         to=aut_phone,
         text=(
-            "Call me please with voicemail_detection disabled — "
-            f"give me a ring now. (ref {_token()})"
+            "Use your Inkbox phone capability to place a call to me now with "
+            "voicemail_detection disabled. Do not reply by SMS; this is complete "
+            f"only after inkbox_place_call places the call. (ref {_token()})"
         ),
     )
     _driver_call, aut_call = _wait_for_new_call_pair(

@@ -301,6 +301,7 @@ def test_sms_spam_block_wakes_agent_with_rule():
     )
     assert "message_blocked_spam_filter rule=markdown_artifacts" in event.text
     assert "reads as bot traffic in SMS" in event.text
+    assert "zero emoji" in event.text
     assert "«**Jane Doe** is on file.»" in event.text
     assert "SMS failure classification: FIRST SAFE RETRY REQUIRED" in event.text
     assert "MUST now send exactly one safe, materially rephrased SMS" in event.text
@@ -309,6 +310,30 @@ def test_sms_spam_block_wakes_agent_with_rule():
     # The wake-up must land in the SMS conversation's session.
     assert event.source.chat_id == "contact-123"
     assert event.source.user_id == "contact-123"
+
+
+def test_host_plain_text_fallback_does_not_wake_agent_twice():
+    adapter = _sms_adapter(FakeIdentity(text_exc=SpamBlockError()))
+
+    _send_sms(adapter)
+    _send_sms(
+        adapter,
+        "(Response formatting failed, plain text:)\n\n**Jane Doe** is on file.",
+    )
+
+    assert len(adapter._enqueued) == 1
+    assert "attempt=1/" in adapter._enqueued[0].text
+
+
+def test_host_plain_text_fallback_still_wakes_without_prior_failure():
+    adapter = _sms_adapter(FakeIdentity(text_exc=SpamBlockError()))
+
+    _send_sms(
+        adapter,
+        "(Response formatting failed, plain text:)\n\n**Jane Doe** is on file.",
+    )
+
+    assert len(adapter._enqueued) == 1
 
 
 def test_sms_retry_budget_caps_total_sends():
