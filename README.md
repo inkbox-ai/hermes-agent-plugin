@@ -66,33 +66,6 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel,
 configures mail/text/iMessage webhook subscriptions and incoming-call handling,
 and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
-### Non-interactive bootstrap
-
-For an existing Inkbox identity, an automation harness can configure the plugin
-without stepping through the setup wizard. Pass the API key through standard
-input so it does not appear in the process list:
-
-```bash
-read -rsp "Inkbox API key: " INKBOX_BOOTSTRAP_KEY
-printf '%s' "$INKBOX_BOOTSTRAP_KEY" | hermes inkbox bootstrap \
-  --identity my-agent-handle \
-  --api-key-stdin \
-  --voice-ai \
-  --start-gateway
-unset INKBOX_BOOTSTRAP_KEY
-```
-
-The command validates that the key can access the requested identity, stores an
-agent-scoped key in the active Hermes profile, configures Inkbox Voice AI
-without widening its saved authority, creates the identity's signing key when
-one does not exist, and starts or restarts the gateway. It emits a JSON result
-and is safe to rerun.
-
-If the identity already has a signing key but this Hermes profile does not have
-its plaintext value, bootstrap stops with `requires_human`. Supply the existing
-key as `INKBOX_SIGNING_KEY`, or use `--rotate-signing-key` only when replacing
-the key is intentional.
-
 To update an existing install:
 
 ```bash
