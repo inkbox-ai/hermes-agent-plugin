@@ -7220,7 +7220,7 @@ class InkboxAdapter(BasePlatformAdapter):
             self._call_ws_meta[hash(str(call_id))] = {
                 "call_id": str(call_id),
                 "contact_id": str(contact_id or remote),
-                "contact_name": contact_name or remote,
+                "contact_name": contact_name,
                 "contact": contact,
                 "contact_memories": contact_memories,
                 "remote_phone_number": remote,
@@ -7331,9 +7331,7 @@ class InkboxAdapter(BasePlatformAdapter):
             meta = {
                 "call_id": call_id,
                 "contact_id": (contact["id"] if contact else (remote or call_id or "unknown")),
-                "contact_name": (
-                    contact["name"] if contact and contact.get("name") else (remote or "unknown")
-                ),
+                "contact_name": contact["name"] if contact and contact.get("name") else None,
                 "contact": contact,
                 "contact_memories": contact_memories,
                 "remote_phone_number": remote,
@@ -7341,8 +7339,9 @@ class InkboxAdapter(BasePlatformAdapter):
             }
 
         contact_id = meta.get("contact_id") or call_id or "unknown"
-        contact_name = meta.get("contact_name") or contact_id
         remote_phone_number = (meta.get("remote_phone_number") or "").strip() or None
+        contact_name = meta.get("contact_name") or None
+        contact_label = contact_name or remote_phone_number or str(contact_id)
         direction = (meta.get("direction") or "inbound").strip().lower()
 
         # Direction-aware session keying:
@@ -7408,7 +7407,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 rt_meta = RealtimeCallMeta(
                     call_id=call_id or "unknown",
                     contact_id=str(contact_id),
-                    contact_name=str(contact_name),
+                    contact_name=contact_name,
                     remote_phone_number=remote_phone_number,
                     direction=direction or "inbound",
                     agent_identity_handle=self._identity_handle,
@@ -7579,10 +7578,10 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             source = self.build_source(
                 chat_id=str(contact_id),
-                chat_name=contact_name,
+                chat_name=contact_label,
                 chat_type="dm",
                 user_id=str(contact_id),
-                user_name=contact_name,
+                user_name=contact_label,
                 user_id_alt=remote_phone_number,
                 thread_id=call_thread_id,
                 chat_topic="voice_call",
@@ -7634,10 +7633,10 @@ class InkboxAdapter(BasePlatformAdapter):
                         continue
                     source = self.build_source(
                         chat_id=str(contact_id),
-                        chat_name=contact_name,
+                        chat_name=contact_label,
                         chat_type="dm",
                         user_id=str(contact_id),
-                        user_name=contact_name,
+                        user_name=contact_label,
                         user_id_alt=remote_phone_number,
                         thread_id=call_thread_id,
                         chat_topic="voice_call",
@@ -7718,10 +7717,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 )
                 source = self.build_source(
                     chat_id=str(contact_id),
-                    chat_name=contact_name,
+                    chat_name=contact_label,
                     chat_type="dm",
                     user_id=str(contact_id),
-                    user_name=contact_name,
+                    user_name=contact_label,
                     user_id_alt=remote_phone_number,
                     thread_id=call_thread_id,
                     chat_topic="voice_call",

@@ -235,6 +235,24 @@ def test_unknown_contact_greeting_does_not_use_raw_phone_as_name():
     assert "there" in greeting
 
 
+def test_known_contact_without_name_keeps_context_and_greets_neutrally():
+    meta = _meta(
+        contact_name=None,
+        contact_emails=["caller@example.com"],
+        contact_company="Example Co",
+    )
+
+    instructions = build_realtime_instructions(meta)
+    greeting = build_realtime_greeting(meta)
+
+    assert "matching contact record is loaded" in instructions
+    assert "never use their phone number as a name" in instructions
+    assert "caller@example.com" in instructions
+    assert "Example Co" in instructions
+    assert "+15555550101" not in greeting
+    assert "there" in greeting
+
+
 def test_proactive_greeting_fires_once_without_output_modalities():
     ws = _FakeWS()
     state = _BridgeState()

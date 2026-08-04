@@ -467,7 +467,7 @@ class RealtimeCallMeta:
 
     call_id: str
     contact_id: str
-    contact_name: str
+    contact_name: Optional[str]
     remote_phone_number: Optional[str]
     direction: str  # "inbound" or "outbound"
     agent_identity_handle: Optional[str] = None
@@ -603,12 +603,18 @@ def build_realtime_instructions(
         )
     if meta.remote_phone_number:
         lines.append(f"Caller is calling from: {meta.remote_phone_number}.")
-    if meta.contact_known and meta.contact_name and meta.contact_name not in ("unknown", ""):
-        lines.append(
-            "You already know who this is — do NOT look them up or ask for "
-            "details you already have below.",
-        )
-        lines.append(f"Caller name: {_escape_contact_memory_tokens(meta.contact_name)}.")
+    if meta.contact_known:
+        if meta.contact_name and meta.contact_name not in ("unknown", ""):
+            lines.append(
+                "You already know who this is — do NOT look them up or ask for "
+                "details you already have below.",
+            )
+            lines.append(f"Caller name: {_escape_contact_memory_tokens(meta.contact_name)}.")
+        else:
+            lines.append(
+                "A matching contact record is loaded, but their name is unknown. "
+                "Greet them neutrally and never use their phone number as a name.",
+            )
         if meta.contact_emails:
             lines.append(f"Caller email(s): {', '.join(meta.contact_emails)}.")
         if meta.contact_phones:

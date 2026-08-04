@@ -144,17 +144,19 @@ def test_incoming_call_carries_payload_memories_to_live_call():
     adapter._call_ws_meta = {}
 
     async def _resolve_contact_full(**_kwargs):
-        return {"id": "contact-1", "name": "Alex"}
+        return {"id": "contact-1", "name": None}
 
     adapter._resolve_contact_full = _resolve_contact_full
     response = asyncio.run(adapter._on_incoming_call({
         "id": "call-1",
         "remote_phone_number": "+15555550101",
-        "contacts": [{"id": "contact-1", "name": "Alex", "memories": ["Likes concise calls."]}],
+        "contacts": [{"id": "contact-1", "name": None, "memories": ["Likes concise calls."]}],
     }))
 
     assert response.status == 200
-    assert adapter._call_ws_meta[hash("call-1")]["contact_memories"] == ["Likes concise calls."]
+    meta = adapter._call_ws_meta[hash("call-1")]
+    assert meta["contact_name"] is None
+    assert meta["contact_memories"] == ["Likes concise calls."]
 
 
 def test_contact_resolution_keeps_notes_separate_from_payload_memories():
@@ -316,14 +318,14 @@ def test_auto_accept_call_context_carries_memories_without_webhook_prestash(monk
     adapter._voice_recently_closed = {}
 
     async def resolve_contact(**_kwargs):
-        return {"id": "contact-1", "name": "Alex", "emails": [], "phones": []}
+        return {"id": "contact-1", "name": None, "emails": [], "phones": []}
 
     adapter._resolve_contact_full = resolve_contact
     context = json.dumps({
         "call_id": "call-1",
         "remote_phone_number": "+15555550101",
         "contacts": [
-            {"id": "contact-1", "name": "Alex", "memories": ["Likes concise calls."]}
+            {"id": "contact-1", "name": None, "memories": ["Likes concise calls."]}
         ],
     })
     request = types.SimpleNamespace(
@@ -333,4 +335,6 @@ def test_auto_accept_call_context_carries_memories_without_webhook_prestash(monk
 
     asyncio.run(adapter._handle_call_ws(request))
 
+    assert captured["meta"].contact_known is True
+    assert captured["meta"].contact_name is None
     assert captured["meta"].contact_memories == ["Likes concise calls."]
