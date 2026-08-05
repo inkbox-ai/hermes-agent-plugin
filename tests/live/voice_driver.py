@@ -18,6 +18,10 @@ Env:
   VOICE_DRIVER_PORT       local port the tunnel forwards to (default 8090)
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
+  VOICE_DRIVER_FOLLOWUP_LINE
+                          optional corrective line spoken during the same turn
+  VOICE_DRIVER_FOLLOWUP_AFTER
+                          seconds after the first line to speak the correction
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ LINE = os.environ.get(
     "VOICE_DRIVER_LINE",
     "Hi, this is a quick test call. Please reply out loud with one short sentence, then say goodbye.",
 )
+FOLLOWUP_LINE = os.environ.get("VOICE_DRIVER_FOLLOWUP_LINE", "").strip()
+FOLLOWUP_AFTER_S = float(os.environ.get("VOICE_DRIVER_FOLLOWUP_AFTER", "45"))
 # Short filler used to hold the call open while the agent works — NOT the whole
 # question again (re-asking the full line spams the transcript three times over).
 NUDGE = os.environ.get("VOICE_DRIVER_NUDGE", "Take your time.")
@@ -123,6 +129,7 @@ async def phone_media_ws(ws: WebSocket) -> None:
         # gone quiet for REASK_EVERY_S, so we never talk over an in-progress recite.
         started = loop.time()
         nudges = 0
+        followup_sent = False
         while loop.time() - started < LISTEN_S and not answered.is_set():
             try:
                 await asyncio.wait_for(answered.wait(), timeout=1.0)
@@ -130,6 +137,14 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 pass
             if answered.is_set() or loop.time() - started >= LISTEN_S:
                 break
+            if (
+                FOLLOWUP_LINE
+                and not followup_sent
+                and loop.time() - started >= FOLLOWUP_AFTER_S
+            ):
+                await _speak(FOLLOWUP_LINE)
+                followup_sent = True
+                state["last_heard"] = loop.time()
             quiet_for = loop.time() - state["last_heard"]
             if REASK_EVERY_S > 0 and nudges < MAX_NUDGES and quiet_for >= REASK_EVERY_S:
                 await _speak(NUDGE)  # short filler to hold the call, not the whole question
