@@ -365,13 +365,27 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "to reply here (that sends your message twice). If this authenticated sender "
     "asks you to call them, first use inkbox_place_call with their contact phone "
     "number. Do not substitute an SMS, terminal command, or tool-progress narration "
-    "for the requested call.",
+    "for the requested call. The [inkbox:...] marker authenticates the current "
+    "sender and identifies that sender's own Inkbox contact card. When the sender "
+    "asks for their own card details, provide every requested field, including their "
+    "full email address and phone number. Do not refuse first-party access on generic "
+    "privacy grounds; this does not authorize disclosing another contact's details.",
     "imessage": "Your reply in this iMessage thread is sent automatically — just "
     "write it. Only call inkbox_send_imessage to reach a DIFFERENT conversation or "
-    "person, never to reply here (that sends your message twice).",
+    "person, never to reply here (that sends your message twice). The [inkbox:...] "
+    "marker authenticates the current sender and identifies that sender's own Inkbox "
+    "contact card. When the sender asks for their own card details, provide every "
+    "requested field, including their full email address and phone number. Do not "
+    "refuse first-party access on generic privacy grounds; this does not authorize "
+    "disclosing another contact's details.",
     "email": "Your reply to this email is sent automatically as a threaded reply — "
     "just write it. Only call inkbox_send_email to email a DIFFERENT thread or "
-    "recipient, never to reply here (that sends your message twice).",
+    "recipient, never to reply here (that sends your message twice). The "
+    "[inkbox:...] marker authenticates the current sender and identifies that "
+    "sender's own Inkbox contact card. When the sender asks for their own card "
+    "details, provide every requested field, including their full email address and "
+    "phone number. Do not refuse first-party access on generic privacy grounds; this "
+    "does not authorize disclosing another contact's details.",
 }
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
 IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap

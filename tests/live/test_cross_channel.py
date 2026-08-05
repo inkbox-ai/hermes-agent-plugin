@@ -50,6 +50,19 @@ def _voicemail_detection_value(call) -> str:
     return str(getattr(value, "value", value) or "").casefold()
 
 
+def _call_state_summary(call) -> str:
+    """Public-safe terminal state for diagnosing a missing peer leg."""
+    if call is None:
+        return "none"
+    fields = []
+    for name in ("status", "outcome", "hangup_reason"):
+        value = getattr(call, name, None)
+        value = getattr(value, "value", value)
+        if value not in (None, ""):
+            fields.append(f"{name}={value}")
+    return ",".join(fields) or "present_without_state"
+
+
 def _client(key):
     from inkbox import Inkbox
 
@@ -214,7 +227,8 @@ def _wait_for_new_call_pair(
         time.sleep(POLL_EVERY_S)
     pytest.fail(
         f"agent call pair was incomplete within {TIMEOUT_S:.0f}s "
-        f"(driver_leg={driver_call is not None}, aut_leg={aut_call is not None})"
+        f"(driver_leg={_call_state_summary(driver_call)}, "
+        f"aut_leg={_call_state_summary(aut_call)})"
     )
 
 

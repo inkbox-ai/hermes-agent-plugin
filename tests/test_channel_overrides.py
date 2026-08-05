@@ -75,6 +75,18 @@ def test_sms_directive_requires_call_tool_for_authenticated_call_requests():
     )
 
 
+def test_text_directives_allow_only_first_party_contact_card_disclosure():
+    adapter = _adapter({})
+
+    for modality in ("sms", "imessage", "email"):
+        prompt, _ = adapter._resolve_channel_overrides(modality, "contact_1", None)
+
+        assert prompt is not None
+        assert "marker authenticates the current sender" in prompt
+        assert "full email address and phone number" in prompt
+        assert "does not authorize disclosing another contact's details" in prompt
+
+
 def test_no_builtin_directive_for_voice_or_external():
     """Voice and external events have their own handling — no text directive."""
     adapter = _adapter({})
