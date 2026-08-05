@@ -32,10 +32,18 @@ import pytest
 # cadence. Two identical no-reply sends to the same number trip the
 # duplicate_body rule (422), so every call request must carry a fresh body.
 _CALL_ME_PHRASINGS = (
-    "Please call me right now by phone and set voicemail_detection to disabled.",
-    "Can you ring me now with voicemail_detection disabled?",
-    "Give me a call now, using disabled voicemail_detection.",
-    "Please phone me right away and disable voicemail_detection.",
+    "Call action required: first use inkbox_place_call to call my authenticated "
+    "sender phone number now. Set voicemail_detection to disabled. Do not reply "
+    "by SMS or use the terminal.",
+    "First use inkbox_place_call to ring my authenticated sender phone number now "
+    "with voicemail_detection disabled. Do not send an SMS or use the terminal "
+    "instead.",
+    "Use inkbox_place_call as your first action to call my authenticated sender "
+    "phone number now. Disable voicemail_detection, and do not substitute an SMS "
+    "or terminal command.",
+    "Place a phone call to my authenticated sender phone number now: first call "
+    "inkbox_place_call with voicemail_detection disabled. Do not reply by SMS or "
+    "use the terminal.",
 )
 
 

@@ -362,7 +362,10 @@ EXTERNAL_EVENT_UNVERIFIED_DIRECTIVE = (
 _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "sms": "Your reply in this SMS thread is sent automatically — just write it. "
     "Only call inkbox_send_sms to text a DIFFERENT conversation or number, never "
-    "to reply here (that sends your message twice).",
+    "to reply here (that sends your message twice). If this authenticated sender "
+    "asks you to call them, first use inkbox_place_call with their contact phone "
+    "number. Do not substitute an SMS, terminal command, or tool-progress narration "
+    "for the requested call.",
     "imessage": "Your reply in this iMessage thread is sent automatically — just "
     "write it. Only call inkbox_send_imessage to reach a DIFFERENT conversation or "
     "person, never to reply here (that sends your message twice).",
@@ -3402,9 +3405,10 @@ class InkboxAdapter(BasePlatformAdapter):
             bubbles for this chat, False to skip them entirely.
 
         Voice calls opt out: tool names and argument previews are UI
-        chrome, not speech.  SMS gets a single batched bubble per turn
-        (the gateway's edit-failure handler drops the rest).  Email chats
-        opt out entirely — sending a separate email per tool call
+        chrome, not speech. Carrier SMS and email chats also opt out —
+        they cannot edit a progress bubble in place, so each update becomes
+        a separate external message. iMessage retains progress updates.
+        Sending a separate email per tool call
         ("🖥️ browser_console...") is a UX disaster, and the agent's final
         reply still lands as one email at turn end.
         """
@@ -3412,14 +3416,14 @@ class InkboxAdapter(BasePlatformAdapter):
         if chat_id in self._active_call_ws:
             return False
         modality = self._last_inbound_modality.get(str(chat_id), "")
-        if modality == "email":
+        if modality in ("sms", "email"):
             return False
-        if modality in ("sms", "imessage"):
+        if modality == "imessage":
             return True
         # Unknown modality (agent-initiated outbound, contact-keyed chat
         # we haven't seen inbound yet) — mirror send()'s default heuristic:
-        # E.164 → SMS, otherwise email.  Treat email as opt-out.
-        return str(chat_id).startswith("+")
+        # E.164 → SMS, otherwise email. Both transports opt out.
+        return False
 
     def supports_interim_messages(self, chat_id: str) -> bool:
         """Return True when interim assistant messages should fire on this chat.

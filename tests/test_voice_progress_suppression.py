@@ -70,9 +70,16 @@ def test_voice_calls_still_support_interim_messages():
     assert adapter.supports_interim_messages("contact-voice") is True
 
 
-def test_sms_still_supports_tool_progress():
+def test_sms_does_not_emit_tool_progress_messages():
     adapter = _bare_adapter()
     adapter._last_inbound_modality["+15555550101"] = "sms"
+
+    assert adapter.supports_progress_updates("+15555550101") is False
+
+
+def test_imessage_still_supports_tool_progress():
+    adapter = _bare_adapter()
+    adapter._last_inbound_modality["+15555550101"] = "imessage"
 
     assert adapter.supports_progress_updates("+15555550101") is True
 

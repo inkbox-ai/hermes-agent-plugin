@@ -62,6 +62,19 @@ def test_builtin_directive_present_for_each_text_channel():
         assert "sent automatically" in prompt and tool in prompt
 
 
+def test_sms_directive_requires_call_tool_for_authenticated_call_requests():
+    adapter = _adapter({})
+
+    prompt, _ = adapter._resolve_channel_overrides("sms", "contact_1", None)
+
+    assert prompt is not None
+    assert "first use inkbox_place_call" in prompt
+    assert (
+        "Do not substitute an SMS, terminal command, or tool-progress narration"
+        in prompt
+    )
+
+
 def test_no_builtin_directive_for_voice_or_external():
     """Voice and external events have their own handling — no text directive."""
     adapter = _adapter({})
