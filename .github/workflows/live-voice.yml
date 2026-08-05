@@ -151,7 +151,7 @@ jobs:
             DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"
             HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me exactly one SMS containing exactly $HOSTED_MARKER. Before we hang up, record one post-call action whose action title and details are both exactly Send SMS $HOSTED_MARKER. Read the five-word SMS body back after recording it. Do not send the SMS during the call."
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing exactly $HOSTED_MARKER. Before we hang up, record one post-call action whose action title and details are both exactly Send SMS $HOSTED_MARKER. Read the five-word SMS body back after recording it. Do not send the SMS during the call."
             export VOICE_DRIVER_FOLLOWUP_LINE="Verify the post-call action you just recorded. If its action title or details are not exactly Send SMS $HOSTED_MARKER, edit that same action now so both match exactly. Then read back exactly $HOSTED_MARKER."
             export VOICE_DRIVER_FOLLOWUP_AFTER=45
             # Pytest owns the early hangup after both the transcript and open

@@ -71,7 +71,7 @@ def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
     assert 'HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"' in workflow
     assert 'DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"' in workflow
     assert (
-        'export VOICE_DRIVER_LINE="After we hang up, send me exactly one SMS containing '
+        'export VOICE_DRIVER_LINE="After we hang up, send me one SMS containing '
         'exactly $HOSTED_MARKER. Before we hang up, record one post-call action whose action '
         'title and details are both exactly Send SMS $HOSTED_MARKER. Read the five-word SMS '
         'body back after recording it. Do not send the SMS during the call."'
