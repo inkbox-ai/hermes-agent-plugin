@@ -90,3 +90,11 @@ def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
     assert hosted_proof.index("_wait_for_hosted_request(") < hosted_proof.index("_wait_for_hosted_action(")
     assert hosted_proof.index("_wait_for_hosted_action(") < hosted_proof.index("finally:")
     assert hosted_proof.index("finally:") < hosted_proof.index("_hangup_call(")
+
+
+def test_live_voice_workflow_retries_rate_limited_hermes_installs():
+    workflow = (ROOT / ".github" / "workflows" / "live-voice.yml").read_text()
+
+    assert "for attempt in 1 2 3 4; do" in workflow
+    assert "curl --retry 3 --retry-all-errors --retry-delay 5" in workflow
+    assert "Hermes install failed after 4 attempts" in workflow
