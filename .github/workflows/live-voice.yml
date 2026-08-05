@@ -9,7 +9,7 @@ name: Live — voice calls (Inkbox Voice AI + TTS/STT + realtime)
 #   outbound_realtime_contact — same call-back, but the driver asks for a seeded
 #                       contact's email; the agent must answer via a direct
 #                       contact-read tool and speak the details.
-# Each leg verifies the stored call transcript shows the agent spoke to the caller.
+# Each leg verifies driver-local speech and a two-way paired agent transcript.
 # Real model + real calls, so this runs only on ready (non-draft) PRs + dispatch, and
 # shares the AUT tunnel lock with the other live suites.
 on:
