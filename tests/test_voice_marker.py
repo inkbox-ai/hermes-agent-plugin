@@ -29,6 +29,11 @@ SPEECH_WORDS = {
 }
 
 
+def test_voice_driver_allows_realtime_response_latency():
+    driver = (ROOT / "tests" / "live" / "voice_driver.py").read_text()
+    assert 'VOICE_DRIVER_LISTEN", "30"' in driver
+
+
 def _marker(token: str) -> list[str]:
     result = subprocess.run(
         [sys.executable, str(MARKER_HELPER), token],

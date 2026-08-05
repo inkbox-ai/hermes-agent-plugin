@@ -62,7 +62,7 @@ SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "3"))
 GREETING = os.environ.get("VOICE_DRIVER_GREETING", "Hello?")
 # Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
 # must send an explicit stop or the leg lingers until the server max-duration cap.
-LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
+LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "30"))
 # If the agent stalls (no reply heard), re-ask this often to keep the call alive and
 # nudge it — realtime occasionally drops the first turn. 0 disables re-asking.
 REASK_EVERY_S = float(os.environ.get("VOICE_DRIVER_REASK", "0"))
