@@ -913,3 +913,60 @@ def test_a2a_catch_up_skips_sdk_without_task_inbox(
     asyncio.run(adapter._catch_up_a2a_tasks())
 
     assert adapter._enqueued == []
+
+
+def test_a2a_turn_context_receives_verified_headers(tmp_path):
+    """Verified ``x-inkbox-*`` headers reach the turn-context binding."""
+    adapter = _adapter(tmp_path)
+    captured = {}
+
+    def _capture(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    adapter._bind_a2a_turn_context = _capture
+
+    asyncio.run(
+        adapter._on_a2a_event(
+            _event(),
+            headers={"x-inkbox-example": "value-1", "x-inkbox-other": "value-2"},
+        )
+    )
+
+    assert captured["headers"] == {
+        "x-inkbox-example": "value-1",
+        "x-inkbox-other": "value-2",
+    }
+    assert captured["task_id"] == "task-1"
+
+
+def test_a2a_turn_context_headers_are_optional(tmp_path):
+    """A caller that passes no headers still binds, unchanged."""
+    adapter = _adapter(tmp_path)
+    captured = {}
+
+    def _capture(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    adapter._bind_a2a_turn_context = _capture
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.text == "ok"
+    assert captured["headers"] is None
+
+
+def test_context_headers_filter_to_the_inkbox_namespace():
+    """Unrelated headers are dropped, and the signature is never retained."""
+    selected = adapter_mod._a2a_context_headers(
+        {
+            "Authorization": "Bearer secret",
+            "Cookie": "session=abc",
+            "X-Inkbox-Signature": "sig",
+            "X-Inkbox-Timestamp": "123",
+            "X-Inkbox-Example": "kept",
+        }
+    )
+
+    assert selected == {"x-inkbox-example": "kept"}
