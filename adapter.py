@@ -932,6 +932,32 @@ def _matched_webhook_contact(
     return None
 
 
+#: Inbound headers surfaced to plugins on the A2A turn context. Only the
+#: ``x-inkbox-`` namespace is kept, and the signature header is dropped: it has
+#: already done its job by the time the context is written, and there is no
+#: reason to keep it on disk.
+A2A_CONTEXT_HEADER_PREFIX = "x-inkbox-"
+A2A_CONTEXT_HEADER_EXCLUDE = frozenset({"x-inkbox-signature", "x-inkbox-timestamp"})
+
+
+def _a2a_context_headers(headers: Any) -> Dict[str, str]:
+    """Return the ``x-inkbox-*`` request headers worth carrying into a turn.
+
+    Callers pass headers only once a registered provider has verified the
+    request, so anything returned here is as trustworthy as the payload it
+    arrived with.
+    """
+    selected: Dict[str, str] = {}
+    for name, value in dict(headers or {}).items():
+        lowered = str(name).lower()
+        if not lowered.startswith(A2A_CONTEXT_HEADER_PREFIX):
+            continue
+        if lowered in A2A_CONTEXT_HEADER_EXCLUDE:
+            continue
+        selected[lowered] = str(value)
+    return selected
+
+
 def _split_routing_context(text: str) -> tuple[str, str, str]:
     marker, body = text.split("\n", 1) if "\n" in text else ("[inkbox:sms]", text)
     opening = "[inkbox:contact_memories]\n"
@@ -3606,7 +3632,12 @@ class InkboxAdapter(BasePlatformAdapter):
                 elif event_type and event_type.startswith("text."):
                     response = await self._on_text_lifecycle(envelope)
                 elif event_type and event_type.startswith("a2a."):
-                    response = await self._on_a2a_event(envelope)
+                    response = await self._on_a2a_event(
+                        envelope,
+                        headers=_a2a_context_headers(request.headers)
+                        if source is not None
+                        else None,
+                    )
                 elif event_type == "imessage.received":
                     response = await self._on_imessage_received(envelope)
                 elif event_type == "imessage.reaction_received":
@@ -4315,6 +4346,7 @@ class InkboxAdapter(BasePlatformAdapter):
         task_id: str,
         context_id: str,
         message_id: str,
+        headers: Optional[Dict[str, str]] = None,
     ) -> bool:
         """Bind verified webhook data to the host session used by tool calls."""
         handler_owner = getattr(
@@ -4338,6 +4370,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     "context_id": context_id,
                     "message_id": message_id,
                     "reply_intent_committed": False,
+                    "headers": dict(headers or {}),
                 },
             )
             return True
@@ -4396,14 +4429,21 @@ class InkboxAdapter(BasePlatformAdapter):
         self._write_a2a_registry(key, data, "acknowledged")
         return True
 
-    async def _on_a2a_event(self, envelope: Dict[str, Any]) -> "web.Response":
+    async def _on_a2a_event(
+        self,
+        envelope: Dict[str, Any],
+        *,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> "web.Response":
         """Serialize A2A admission so duplicate receipts cannot race."""
         async with self._a2a_ingest_lock:
-            return await self._on_a2a_event_locked(envelope)
+            return await self._on_a2a_event_locked(envelope, headers=headers)
 
     async def _on_a2a_event_locked(
         self,
         envelope: Dict[str, Any],
+        *,
+        headers: Optional[Dict[str, str]] = None,
     ) -> "web.Response":
         event_type = str(envelope.get("event_type") or "")
         data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
@@ -4507,6 +4547,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 task_id=task_id,
                 context_id=context_id,
                 message_id=message_id,
+                headers=headers,
             ):
                 self._write_a2a_registry(
                     key,
