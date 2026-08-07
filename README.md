@@ -66,32 +66,57 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel,
 configures mail/text/iMessage webhook subscriptions and incoming-call handling,
 and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
-### Non-interactive bootstrap
+### Agent self-setup for an assigned identity
 
-For an existing Inkbox identity, an automation harness can configure the plugin
-without stepping through the setup wizard. Pass the API key through standard
-input so it does not appear in the process list:
+After a human assigns an existing identity and credential, an agent can complete
+the official integration without stepping through the setup wizard. Install the
+official plugin through Hermes' native plugin manager; do not copy plugin files
+or install an unreviewed substitute:
+
+```bash
+hermes plugins install inkbox-ai/hermes-agent-plugin --enable
+```
+
+Use the assigned handle exactly as provided. Do not run `hermes inkbox setup` or
+create another identity. Keep the credential in a transient shell variable and
+pass it through standard input so it does not appear in the process list:
 
 ```bash
 read -rsp "Inkbox API key: " INKBOX_BOOTSTRAP_KEY
 printf '%s' "$INKBOX_BOOTSTRAP_KEY" | hermes inkbox bootstrap \
-  --identity my-agent-handle \
+  --identity '<handle>' \
   --api-key-stdin \
+  --base-url '<url>' \
   --voice-ai \
+  --rotate-signing-key \
   --start-gateway
 unset INKBOX_BOOTSTRAP_KEY
 ```
 
 The command validates that the key can access the requested identity, stores an
 agent-scoped key in the active Hermes profile, configures Inkbox Voice AI
-without widening its saved authority, creates the identity's signing key when
-one does not exist, and starts or restarts the gateway. It emits a JSON result
-and is safe to rerun.
+without widening its saved authority, intentionally rotates the identity's
+signing key, and starts or restarts the gateway. It is non-interactive after the
+credential is supplied, emits a JSON result, preserves the assigned identity,
+and is safe to resume by rerunning the same command.
 
-If the identity already has a signing key but this Hermes profile does not have
-its plaintext value, bootstrap stops with `requires_human`. Supply the existing
-key as `INKBOX_SIGNING_KEY`, or use `--rotate-signing-key` only when replacing
-the key is intentional.
+Read the JSON result before continuing:
+
+- For `configured`, immediately unset the transient credential if it has not
+  already been unset, then run `hermes inkbox doctor` and confirm it reports no
+  errors.
+- For `requires_human`, show the human every entry in `human_actions`, wait for
+  them to complete the requested action, and rerun the exact same bootstrap
+  command with the same assigned handle and credential. Do not choose a new
+  identity during recovery.
+- For `error`, show the `error` value, diagnose and correct that cause, run
+  `hermes inkbox doctor` for current configuration and readiness findings, and
+  retry the exact same bootstrap command. Always unset the transient credential
+  after each attempt.
+
+Never place the credential in source control, a project instruction file, shell
+history, logs, or command-line arguments. Hermes stores the resulting local
+configuration in the active profile.
 
 To update an existing install:
 
