@@ -26,11 +26,17 @@ jobs:
         with:
           version: "latest"
 
+      - name: Check out Hermes main
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: .upstream-hermes
+          fetch-depth: 1
+
       - name: Install test deps + real Hermes host (main)
         run: |
           uv sync --extra test --python 3.12
-          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
-          uv pip install --editable "$RUNNER_TEMP/hermes-agent"
+          uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
       - name: Complete offline suite vs real Hermes main
         run: uv run pytest -q

@@ -12,7 +12,7 @@
 
 ### Voice suite
 
-**Proves:** Each selected voice scenario completes successfully. **Flow:** 1. Run the voice matrix serially. 2. Require success before continuing.
+**Proves:** Each selected voice scenario completes successfully. **Flow:** 1. End matching calls left by interrupted validations. 2. Run the voice matrix serially. 3. Require success before continuing.
 
 ### External-events suite
 
@@ -54,9 +54,9 @@
 
 **Proves:** The real model can report its configured identity fields. **Flow:** 1. Ask for identity details. 2. Compare the response with current product data. 3. Real leg only.
 
-### Email reports sender details
+### Email reports sender name
 
-**Proves:** The real model can use the sender's contact record. **Flow:** 1. Ensure a contact exists. 2. Ask who sent the email. 3. Compare returned contact fields. 4. Real leg only.
+**Proves:** The real model can resolve the sender's synthetic contact without disclosing private fields. **Flow:** 1. Read the seeded contact fixture. 2. Ask for its name and stored contact-method kinds with a per-run reference. 3. Require the stored name, both method kinds, and current reference in the correlated reply. 4. Real leg only.
 
 ### Email names available tools
 
@@ -150,7 +150,7 @@
 
 ### Outbound realtime contact lookup
 
-**Proves:** The realtime stack can consult a directly read contact during a two-way call. **Flow:** 1. Seed a contact. 2. Request a callback about it. 3. Correlate the call and contact-read evidence. 4. Inspect speech mode and voicemail policy.
+**Proves:** The realtime stack can consult a directly read contact and speak its requested details during a two-way call. **Flow:** 1. Seed a contact. 2. Request a callback about it. 3. Correlate the call, contact-read evidence, and persisted AUT speech. 4. Inspect speech mode and voicemail policy.
 
 ### Outbound realtime
 

@@ -89,3 +89,19 @@ def test_base_adapter_methods_present(method):
     assert hasattr(BasePlatformAdapter, method), (
         f"BasePlatformAdapter.{method} is missing — Hermes host interface drifted"
     )
+
+
+def test_live_inkbox_tool_scope_excludes_builtin_and_mcp(monkeypatch):
+    from hermes_cli import tools_config
+
+    monkeypatch.setattr(tools_config, "_get_plugin_toolset_keys", lambda: {"inkbox"})
+    monkeypatch.setattr(tools_config, "enabled_mcp_server_names", lambda _config: {"test-mcp"})
+    enabled = tools_config._get_platform_tools(
+        {"platform_toolsets": {"inkbox": ["inkbox", "no_mcp"]}},
+        "inkbox",
+    )
+
+    assert "inkbox" in enabled
+    assert "test-mcp" not in enabled
+    assert "terminal" not in enabled
+    assert "browser" not in enabled

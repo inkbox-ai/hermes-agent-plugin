@@ -58,6 +58,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check out Hermes main
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: .upstream-hermes
+          fetch-depth: 1
+
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
@@ -69,8 +76,7 @@ jobs:
           uv pip install \
             'inkbox>=0.5.9,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
-          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
-          uv pip install --editable "$RUNNER_TEMP/hermes-agent"
+          uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
       - name: Contract tests vs real Hermes main
         working-directory: ${{ runner.temp }}

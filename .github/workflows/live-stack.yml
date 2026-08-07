@@ -1,7 +1,8 @@
 name: Full stack e2e
 
 # One owner for the shared AUT identity and tunnel. Component suites run in
-# sequence, and the aggregate job is the only live branch-protection context.
+# sequence for pull requests, manual stability checks, and after a successful
+# scheduled canary.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -15,6 +16,8 @@ permissions:
 
 concurrency:
   group: inkbox-live-aut-tunnel
+  # Never cancel a pull-request, scheduled, or manually dispatched stability
+  # cycle that already owns the shared identity.
   cancel-in-progress: false
   queue: max
 
