@@ -69,9 +69,16 @@ jobs:
           echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
           echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
 
+      - name: Check out Hermes main
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes/hermes-agent
+          fetch-depth: 1
+
       - name: Install Hermes (non-interactive)
         run: |
-          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser --no-skills
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin into the gateway
@@ -79,6 +86,8 @@ jobs:
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
+          "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             'inkbox>=0.5.9,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
@@ -146,19 +155,20 @@ jobs:
             # follow-up. Encode the run as distinct everyday words so the assertion
             # does not depend on punctuation/long digits or let an action
             # summarizer collapse an adjacent repeated word.
-            # Five distinct words is enough current-run entropy while staying
-            # within the hosted action summarizer's reliable verbatim span.
-            DIGITS="${GITHUB_RUN_ID: -4}${GITHUB_RUN_ATTEMPT: -1}"
-            HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$DIGITS")"
+            # Hash the full run identity into a three-word code. This keeps the
+            # phrase short without collapsing correlation to a few ID digits.
+            RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS. Create one post-call action now with the title Send SMS and put this exact five-word SMS body in the action details: $HOSTED_MARKER. Wait for the action tool to succeed, then read all five words back to me. Do not paraphrase, omit a word, or send the SMS during the call."
+            export VOICE_DRIVER_LINE="After we hang up, send me one SMS with this exact three-word body: $HOSTED_MARKER. Record that post-call SMS action now. Once the action tool succeeds, read the exact three words back to me. Do not send the SMS during the call."
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
-            export VOICE_DRIVER_LINE="Hi! Quick question: what email address do you have on file for your contact Olivia Parker? Please read the email out loud, then say goodbye."
+            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
             export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email
+            export VOICE_DRIVER_ANSWER_SETTLE=4
             # No driver re-ask (VOICE_DRIVER_REASK defaults to 0): the realtime
             # path now says its own filler during the silent contact read, so the
             # call stays alive without the caller nudging. Set REASK>0 to re-enable.

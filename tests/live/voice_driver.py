@@ -18,6 +18,7 @@ Env:
   VOICE_DRIVER_PORT       local port the tunnel forwards to (default 8090)
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
+  VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
 """
 
 from __future__ import annotations
@@ -69,6 +70,9 @@ REASK_EVERY_S = float(os.environ.get("VOICE_DRIVER_REASK", "0"))
 # Hard cap on nudges. Transcripts reach us ~10-20s late, so silence detection is
 # fuzzy and we can over-nudge while the agent is actually mid-work; this bounds it.
 MAX_NUDGES = int(os.environ.get("VOICE_DRIVER_MAX_NUDGES", "2"))
+# Keep the media stream alive briefly after the requested answer reaches the
+# driver so the same final turn can settle on the AUT-owned call transcript.
+ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
 
 app = FastAPI()
 
@@ -135,6 +139,8 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 await _speak(NUDGE)  # short filler to hold the call, not the whole question
                 nudges += 1
                 state["last_heard"] = loop.time()  # give it room before nudging again
+        if answered.is_set() and ANSWER_SETTLE_S > 0:
+            await asyncio.sleep(ANSWER_SETTLE_S)
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
             log.info("sent stop (hangup)")

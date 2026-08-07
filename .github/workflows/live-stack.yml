@@ -15,6 +15,8 @@ permissions:
 
 concurrency:
   group: inkbox-live-aut-tunnel
+  # Every trigger shares this lock. Never let an incoming PR event cancel a
+  # scheduled or manually dispatched stability cycle that already owns it.
   cancel-in-progress: false
   queue: max
 

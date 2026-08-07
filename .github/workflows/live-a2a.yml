@@ -59,6 +59,13 @@ jobs:
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
+      - name: Check out Hermes main
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes/hermes-agent
+          fetch-depth: 1
+
       - name: Install Hermes
         run: |
           mkdir -p "$RUNNER_TEMP/hermes-ci-bin"
@@ -66,8 +73,7 @@ jobs:
           printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
           chmod +x "$RUNNER_TEMP/hermes-ci-bin/rg" "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
           export PATH="$RUNNER_TEMP/hermes-ci-bin:$PATH"
-          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | \
-            bash -s -- --non-interactive --skip-browser --no-skills
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser --no-skills
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin and protocol driver
@@ -75,6 +81,8 @@ jobs:
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
+          "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install \
             --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'

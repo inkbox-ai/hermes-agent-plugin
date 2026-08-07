@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 
 
@@ -32,27 +33,21 @@ SPEECH_WORDS = (
 
 
 def marker_from_token(token: str) -> str:
-    """Map a short numeric run token to distinct speech-safe words.
+    """Hash a run identity into three distinct speech-safe words.
 
-    Position offsets keep repeated digits distinct, preventing a hosted-agent
-    action summarizer from collapsing an adjacent duplicate while preserving a
-    deterministic marker that has crossed TTS -> PSTN -> STT.
+    The full token contributes to the hash. Sampling without replacement avoids
+    adjacent duplicates that an action summarizer might collapse while providing
+    6,840 possible phrases that can cross TTS -> PSTN -> STT reliably.
     """
-    digits = "".join(character for character in token if character.isdigit())
-    if not digits:
-        raise ValueError("the live voice marker token must contain a digit")
-    if len(digits) > len(SPEECH_WORDS):
-        raise ValueError("the live voice marker token is too long")
-
+    if not token.strip():
+        raise ValueError("the live voice marker token must not be empty")
+    value = int.from_bytes(hashlib.sha256(token.encode()).digest(), "big")
+    available = list(SPEECH_WORDS)
     selected: list[str] = []
-    used: set[str] = set()
-    for position, digit in enumerate(digits):
-        index = (int(digit) + position * 10) % len(SPEECH_WORDS)
-        while SPEECH_WORDS[index] in used:
-            index = (index + 1) % len(SPEECH_WORDS)
-        word = SPEECH_WORDS[index]
-        selected.append(word)
-        used.add(word)
+    for _ in range(3):
+        index = value % len(available)
+        value //= len(available)
+        selected.append(available.pop(index))
     return " ".join(selected)
 
 
