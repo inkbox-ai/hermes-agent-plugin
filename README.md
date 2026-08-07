@@ -367,6 +367,7 @@ After the gateway starts:
 | `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, iMessage, and calls. |
 | `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound Inkbox webhooks unless set to `false`. |
 | `INKBOX_EXTERNAL_EVENTS_ENABLED` | no | `false` | Gates whether **unverified/unknown** webhooks reach the agent: a source with no registered provider, or an Inkbox-signed payload with no matching handler. Off by default. **Verified registered third-party providers** (e.g. a configured GitHub secret via `INKBOX_WEBHOOK_SECRET_GITHUB`) are always delivered regardless of this flag; unverified sources are handed to the agent with a directive forbidding irreversible action. |
+| `INKBOX_SKIP_WEBHOOK_RECONCILE` | no | `false` | Leave webhook subscriptions untouched on connect. For deployments that provision them ahead of time, where the destination is fixed or the agent's key may not change it. The subscriptions must already point at this agent's webhook URL, or nothing will arrive. |
 | `INKBOX_BASE_URL` | no | SDK default | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `INKBOX_TUNNEL_NAME` | no | identity handle | Override Inkbox tunnel name. |
