@@ -1,8 +1,11 @@
 name: Full stack e2e
 
 # One owner for the shared AUT identity and tunnel. Component suites run in
-# sequence for manual stability checks and after a successful scheduled canary.
+# sequence for pull requests, manual stability checks, and after a successful
+# scheduled canary.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
   workflow_run:
     workflows: ["Canary — plugin vs Hermes main"]
@@ -13,14 +16,17 @@ permissions:
 
 concurrency:
   group: inkbox-live-aut-tunnel
-  # Never cancel a scheduled or manually dispatched stability cycle that
-  # already owns the shared identity.
+  # Never cancel a pull-request, scheduled, or manually dispatched stability
+  # cycle that already owns the shared identity.
   cancel-in-progress: false
   queue: max
 
 jobs:
   channels:
     if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
@@ -34,7 +40,10 @@ jobs:
     needs: channels
     if: >
       !cancelled() &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
@@ -47,7 +56,10 @@ jobs:
     needs: a2a
     if: >
       !cancelled() &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
@@ -63,7 +75,10 @@ jobs:
     needs: voice
     if: >
       !cancelled() &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))
@@ -77,7 +92,10 @@ jobs:
     needs: [channels, a2a, voice, external-events]
     if: >
       !cancelled() &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'))

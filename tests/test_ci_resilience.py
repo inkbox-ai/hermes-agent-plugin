@@ -52,10 +52,10 @@ def test_live_runs_never_cancel_an_existing_shared_cycle():
     assert "cancel-in-progress: false" in workflow
 
 
-def test_full_stack_live_validation_is_not_a_pull_request_gate():
+def test_full_stack_live_validation_runs_for_pull_requests():
     workflow = ROOT.joinpath(".github", "workflows", "live-stack.yml").read_text()
-    assert "pull_request:" not in workflow
-    assert "github.event_name == 'pull_request'" not in workflow
+    assert "pull_request:" in workflow
+    assert "github.event_name == 'pull_request'" in workflow
     assert "workflow_dispatch:" in workflow
     assert "workflow_run:" in workflow
 
