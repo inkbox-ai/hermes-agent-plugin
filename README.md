@@ -66,32 +66,55 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel,
 configures mail/text/iMessage webhook subscriptions and incoming-call handling,
 and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
-### Non-interactive bootstrap
+### Non-interactive bootstrap for an assigned identity
 
-For an existing Inkbox identity, an automation harness can configure the plugin
-without stepping through the setup wizard. Pass the API key through standard
-input so it does not appear in the process list:
+After a human gives the agent an existing identity handle, API base URL, and API
+key, the agent can complete setup without the interactive wizard. Install the
+official plugin first if it is not already installed:
 
 ```bash
-read -rsp "Inkbox API key: " INKBOX_BOOTSTRAP_KEY
-printf '%s' "$INKBOX_BOOTSTRAP_KEY" | hermes inkbox bootstrap \
-  --identity my-agent-handle \
-  --api-key-stdin \
-  --voice-ai \
-  --start-gateway
-unset INKBOX_BOOTSTRAP_KEY
+hermes plugins install inkbox-ai/hermes-agent-plugin --enable
 ```
 
-The command validates that the key can access the requested identity, stores an
-agent-scoped key in the active Hermes profile, configures Inkbox Voice AI
-without widening its saved authority, creates the identity's signing key when
-one does not exist, and starts or restarts the gateway. It emits a JSON result
-and is safe to rerun.
+Keep the API key private. Do not put it in source control, project instructions,
+shell history, command arguments, or chat. Read it without echoing, export it
+only for bootstrap, and replace `<handle>` and `<url>` with the assigned values:
 
-If the identity already has a signing key but this Hermes profile does not have
-its plaintext value, bootstrap stops with `requires_human`. Supply the existing
-key as `INKBOX_SIGNING_KEY`, or use `--rotate-signing-key` only when replacing
-the key is intentional.
+```bash
+read -rsp "Inkbox API key: " INKBOX_API_KEY
+export INKBOX_API_KEY
+hermes inkbox bootstrap \
+  --identity '<handle>' \
+  --base-url '<url>' \
+  --voice-ai \
+  --rotate-signing-key \
+  --start-gateway
+unset INKBOX_API_KEY
+```
+
+Bootstrap validates that the credential can access the requested identity,
+stores private configuration in the active Hermes profile, configures Inkbox
+Voice AI, rotates the identity's signing key, and starts or restarts the gateway.
+It is non-interactive, emits JSON, and is safe to resume by running the same
+command again. Always reuse the assigned handle; do not create or select a
+different identity during recovery.
+
+Inspect the JSON result. If `status` is `requires_human`, show the human every
+entry in `human_actions`, wait for them to complete the requested action, and
+then resume the exact same bootstrap command. If `status` is `error`, inspect
+the reported error, diagnose and correct its cause, and retry that same command
+instead of starting a separate setup flow. Do not print the credential while
+diagnosing either case.
+
+`--rotate-signing-key` intentionally transfers verified webhook delivery to
+this Hermes profile. Any previous gateway for the identity must be set up again
+before it can receive events.
+
+After bootstrap reports `configured`, verify the installation:
+
+```bash
+hermes inkbox doctor
+```
 
 To update an existing install:
 
