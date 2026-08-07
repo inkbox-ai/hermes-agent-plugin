@@ -1,3 +1,4 @@
+import inspect
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -135,3 +136,14 @@ def test_pretest_sweep_ends_matching_calls():
     test_voice._sweep_matching_calls(client, lambda: [old_a, old_b])
 
     assert calls.hung_up == ["old-a", "old-b"]
+
+
+def test_inbound_voice_sweeps_both_call_owners_before_placement():
+    lines = inspect.getsource(test_voice.test_inbound_call_inkbox_tts_stt)
+
+    assert lines.index("_sweep_matching_calls(remote, _driver_outbound)") < lines.index(
+        "call = remote.calls.place("
+    )
+    assert lines.index("_sweep_matching_calls(aut, _aut_inbound)") < lines.index(
+        "call = remote.calls.place("
+    )

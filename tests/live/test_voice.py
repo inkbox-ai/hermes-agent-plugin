@@ -502,7 +502,16 @@ def test_inbound_call_inkbox_tts_stt():
     st = _driver_state()
     remote, aut = _client(REMOTE_KEY), _client(AUT_KEY)
     aut_phone = _aut_phone(aut)
+    aut_tail = _digits(aut_phone)[-10:]
     driver_tail = _digits(st["number"])[-10:]
+
+    def _driver_outbound():
+        return [
+            candidate
+            for candidate in remote.calls.list(limit=200)
+            if (getattr(candidate, "direction", "") or "").lower() == "outbound"
+            and _digits(getattr(candidate, "remote_phone_number", "") or "")[-10:] == aut_tail
+        ]
 
     def _aut_inbound():
         return [
@@ -518,6 +527,7 @@ def test_inbound_call_inkbox_tts_stt():
     _ensure_driver_allowed(aut, st["number"])
 
     # Place the call to the agent, handing Inkbox the driver's own media WS.
+    _sweep_matching_calls(remote, _driver_outbound)
     _sweep_matching_calls(aut, _aut_inbound)
     before_aut = {candidate.id for candidate in _aut_inbound()}
     not_before = datetime.now(timezone.utc) - timedelta(seconds=10)
