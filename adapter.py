@@ -2002,6 +2002,11 @@ class InkboxAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 4096  # email/voice are unbounded; SMS chunked separately in send()
 
+    #: Reconciling subscriptions on connect is the default. Declared here as
+    #: well as in __init__ so the safe behavior holds for instances built
+    #: without it.
+    _skip_webhook_reconcile: bool = False
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, _inkbox_platform())
         extra = config.extra or {}
@@ -2059,6 +2064,17 @@ class InkboxAdapter(BasePlatformAdapter):
         else:
             raw_require_signature = os.getenv("INKBOX_REQUIRE_SIGNATURE", "true")
         self._require_signature = str(raw_require_signature).lower() not in ("false", "0", "no")
+
+        # Whether this process installs its own webhook subscriptions on
+        # connect. Deployments that provision subscriptions ahead of time can
+        # set this, either because the destination is fixed or because the
+        # agent's API key is not permitted to change it. Same config-over-env
+        # precedence as above, so an explicit False is not coalesced away.
+        if "skip_webhook_reconcile" in extra:
+            raw_skip_reconcile = extra["skip_webhook_reconcile"]
+        else:
+            raw_skip_reconcile = os.getenv("INKBOX_SKIP_WEBHOOK_RECONCILE", "false")
+        self._skip_webhook_reconcile = str(raw_skip_reconcile).lower() in ("true", "1", "yes")
 
         # Whether non-Inkbox ("external") webhooks are passed through to the
         # agent at all.  These are signed by the source (Stripe/GitHub/...),
@@ -2491,6 +2507,14 @@ class InkboxAdapter(BasePlatformAdapter):
 
     def _patch_identity_objects(self) -> None:
         """Point every mailbox + phone number on the identity at this server."""
+        if self._skip_webhook_reconcile:
+            logger.info(
+                "[Inkbox] Leaving webhook subscriptions alone; expecting them "
+                "to already deliver to %s%s",
+                self._public_url, self._webhook_path,
+            )
+            return
+
         webhook_url = f"{self._public_url}{self._webhook_path}"
         ws_url = f"wss://{self._public_host}{self._ws_path}"
 
