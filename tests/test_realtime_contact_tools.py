@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -11,6 +12,7 @@ pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin import tools as tools_mod
+from inkbox_plugin import realtime as realtime_mod
 from inkbox_plugin.adapter import InkboxAdapter
 from inkbox_plugin.realtime import (
     CONTACT_LIST_TOOL_NAME,
@@ -68,7 +70,7 @@ def _dispatch(name: str, arguments: dict) -> _FakeWS:
             meta=_meta(),
             on_agent_consult=_noop_consult,
         )
-        if state.pending_response_create is not None:
+        if state.pending_response_creates:
             state.response_active = False
             await _flush_pending_realtime_response(ws, state)
 
@@ -163,6 +165,21 @@ def test_contact_lookup_dispatch_passes_errors_through(monkeypatch):
     assert output["error"].startswith("Specify exactly one")
 
 
+def test_contact_read_timeout_submits_a_spoken_fallback(monkeypatch):
+    def _slow_read(*_args, **_kwargs):
+        time.sleep(0.05)
+        return {"contacts": []}
+
+    monkeypatch.setattr(realtime_mod, "_run_contact_read_sync", _slow_read)
+    monkeypatch.setattr(realtime_mod, "REALTIME_CONTACT_READ_TIMEOUT_S", 0.001)
+
+    ws = _dispatch(CONTACT_LIST_TOOL_NAME, {"q": "alex"})
+
+    output = _submitted_output(ws)
+    assert output["error"] == "contact read timed out"
+    assert "couldn't complete the lookup" in output["message"]
+
+
 def test_contact_read_waits_for_active_response_before_creating_another(
     monkeypatch,
 ):
@@ -188,7 +205,7 @@ def test_contact_read_waits_for_active_response_before_creating_another(
         assert [frame["type"] for frame in ws.sent] == [
             "conversation.item.create",
         ]
-        assert state.pending_response_create == {}
+        assert state.pending_response_creates == [({}, None)]
 
         state.response_active = False
         await _flush_pending_realtime_response(ws, state)

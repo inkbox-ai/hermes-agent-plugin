@@ -156,6 +156,12 @@ HANGUP_CLOSE_DELAY_S = 2.0
 # grace window unless the caller barges in (which disarms the hangup).
 HANGUP_AUTO_CONFIRM_DELAY_S = 2.5
 
+# Once a response-bearing background tool has submitted its result, allow the
+# corresponding spoken response a bounded window to finish before a requested
+# hangup is forced through. Tool execution keeps its own timeout.
+REALTIME_RESPONSE_DRAIN_TIMEOUT_S = 30.0
+REALTIME_CONTACT_READ_TIMEOUT_S = 30.0
+
 # OpenAI Realtime must be reachable before the Inkbox websocket is accepted in
 # raw-media mode. If this preflight fails, the adapter can still accept the
 # same phone call with Inkbox STT/TTS enabled.
@@ -538,7 +544,14 @@ class _BridgeState:
     pending_consult_keys: Dict[str, str] = field(default_factory=dict)
     last_response_id: Optional[str] = None
     response_active: bool = False
-    pending_response_create: Optional[Dict[str, Any]] = None
+    # Responses are serialized by the realtime API. Keep every accepted tool's
+    # result response queued rather than allowing a later request to overwrite
+    # an earlier one.
+    pending_response_creates: List[Tuple[Dict[str, Any], Optional[str]]] = field(
+        default_factory=list,
+    )
+    active_response_owner: Optional[str] = None
+    active_response_id: Optional[str] = None
     closed: bool = False
     greeting_triggered: bool = False
     # Inkbox-assigned stream id from the `start` event; echoed on outbound
@@ -558,7 +571,12 @@ class _BridgeState:
     # the OpenAI→Inkbox audio pump flowing; we track the tasks here so they can
     # be cancelled when the call tears down.
     consult_tasks: Set["asyncio.Task[None]"] = field(default_factory=set)
-
+    # Async tool call id -> response-drain state. A tool remains here from
+    # acceptance until its own result response and audio both finish.
+    tool_response_drains: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    tool_lifecycle_changed: "asyncio.Event" = field(default_factory=asyncio.Event)
+    hangup_close_task: Optional["asyncio.Task[None]"] = None
+    stop_sent: bool = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Instruction builder
@@ -825,6 +843,7 @@ class OpenedRealtimeBridge:
                     )
         finally:
             state.closed = True
+            _cancel_hangup_close(state)
             # The call is over, so any consult still mid-flight can no longer be
             # spoken to the caller — cancel the background tasks and let them
             # settle before we close the sockets.
@@ -934,6 +953,60 @@ async def _cancel_consult_tasks(state: _BridgeState) -> None:
             await task
 
 
+def _register_response_bearing_tool(state: _BridgeState, call_id: str) -> None:
+    state.tool_response_drains[call_id] = {
+        "result_submitted": False,
+        "response_id": None,
+        "response_done": False,
+        "audio_done": False,
+        "transcript_done": False,
+    }
+    state.tool_lifecycle_changed.set()
+
+
+def _mark_tool_result_submitted(state: _BridgeState, call_id: str) -> None:
+    drain = state.tool_response_drains.get(call_id)
+    if drain is not None:
+        drain["result_submitted"] = True
+        state.tool_lifecycle_changed.set()
+
+
+def _mark_tool_response_event(
+    state: _BridgeState,
+    *,
+    event: str,
+    response_id: Optional[str],
+    fallback_call_id: Optional[str],
+) -> None:
+    call_id = fallback_call_id
+    if response_id:
+        call_id = next(
+            (
+                candidate
+                for candidate, drain in state.tool_response_drains.items()
+                if drain.get("response_id") == response_id
+            ),
+            call_id,
+        )
+    if not call_id:
+        return
+    drain = state.tool_response_drains.get(call_id)
+    if drain is None:
+        return
+    if response_id and drain.get("response_id") is None:
+        drain["response_id"] = response_id
+    drain[event] = True
+    if drain["response_done"] and drain["audio_done"] and drain["transcript_done"]:
+        state.tool_response_drains.pop(call_id, None)
+        state.tool_lifecycle_changed.set()
+
+
+def _cancel_hangup_close(state: _BridgeState) -> None:
+    task = state.hangup_close_task
+    if task is not None and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+
+
 async def _dispatch_post_call(
     state: _BridgeState,
     meta: RealtimeCallMeta,
@@ -1007,21 +1080,39 @@ async def _request_realtime_response(
     *,
     response: Optional[Dict[str, Any]] = None,
     supersede_pending: bool = False,
+    owner_call_id: Optional[str] = None,
 ) -> bool:
     requested = dict(response or {})
     if state.response_active:
-        if state.pending_response_create is None or supersede_pending:
-            state.pending_response_create = requested
+        if owner_call_id is not None:
+            # A result response for every accepted tool must be retained. It may
+            # replace a queued best-effort filler, but never another tool result.
+            state.pending_response_creates = [
+                queued
+                for queued in state.pending_response_creates
+                if queued[1] is not None
+            ]
+            state.pending_response_creates.append((requested, owner_call_id))
+        elif not state.pending_response_creates:
+            state.pending_response_creates.append((requested, None))
+        elif supersede_pending and all(
+            owner is None for _, owner in state.pending_response_creates
+        ):
+            state.pending_response_creates[:] = [(requested, None)]
         return False
 
     payload: Dict[str, Any] = {"type": "response.create"}
     if requested:
         payload["response"] = requested
     state.response_active = True
+    state.active_response_owner = owner_call_id
+    state.active_response_id = None
     try:
         await openai_ws.send_str(json.dumps(payload))
     except Exception:
         state.response_active = False
+        state.active_response_owner = None
+        state.active_response_id = None
         raise
     return True
 
@@ -1030,14 +1121,14 @@ async def _flush_pending_realtime_response(
     openai_ws: Any,
     state: _BridgeState,
 ) -> None:
-    pending = state.pending_response_create
-    if state.response_active or pending is None:
+    if state.response_active or not state.pending_response_creates:
         return
-    state.pending_response_create = None
+    pending, owner_call_id = state.pending_response_creates.pop(0)
     await _request_realtime_response(
         openai_ws,
         state,
         response=pending or None,
+        owner_call_id=owner_call_id,
     )
 
 
@@ -1193,15 +1284,115 @@ async def _send_stop_and_close(
     *,
     delay: float,
 ) -> None:
+    if state.closed or state.stop_sent:
+        return
     try:
         if delay > 0:
             await asyncio.sleep(delay)
+        if state.closed or state.stop_sent:
+            return
+        state.stop_sent = True
         await inkbox_ws.send_str(json.dumps(stop_frame))
     except Exception as exc:
         logger.debug("[Inkbox realtime] hangup frame send failed: %s", exc)
     state.closed = True
     await _maybe_close_ws(inkbox_ws)
     await _maybe_close_ws(openai_ws)
+
+
+async def _close_after_response_drain(
+    state: _BridgeState,
+    inkbox_ws: Any,
+    openai_ws: Any,
+    stop_frame: Dict[str, Any],
+    *,
+    delay: float,
+) -> None:
+    if delay > 0:
+        await asyncio.sleep(delay)
+    logged = False
+    drain_deadline: Optional[float] = None
+    while state.tool_response_drains and not state.closed:
+        if not logged:
+            logged = True
+            logger.info(
+                "[Inkbox realtime] deferring requested hangup for %d pending tool response(s)",
+                len(state.tool_response_drains),
+            )
+        # Tool execution is governed by its own timeout. The response-drain
+        # deadline begins only after every currently accepted tool has
+        # submitted a success or fallback result.
+        if any(
+            not drain["result_submitted"]
+            for drain in state.tool_response_drains.values()
+        ):
+            drain_deadline = None
+            state.tool_lifecycle_changed.clear()
+            if any(
+                not drain["result_submitted"]
+                for drain in state.tool_response_drains.values()
+            ):
+                await state.tool_lifecycle_changed.wait()
+            continue
+        if drain_deadline is None:
+            drain_deadline = (
+                asyncio.get_running_loop().time()
+                + REALTIME_RESPONSE_DRAIN_TIMEOUT_S
+            )
+        remaining = drain_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            logger.warning(
+                "[Inkbox realtime] forcing requested hangup after response drain timeout",
+            )
+            break
+        state.tool_lifecycle_changed.clear()
+        if not state.tool_response_drains:
+            break
+        try:
+            await asyncio.wait_for(
+                state.tool_lifecycle_changed.wait(),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[Inkbox realtime] forcing requested hangup after response drain timeout",
+            )
+            break
+    await _send_stop_and_close(
+        state,
+        inkbox_ws,
+        openai_ws,
+        stop_frame,
+        delay=0,
+    )
+
+
+async def _request_stop_after_response_drain(
+    state: _BridgeState,
+    inkbox_ws: Any,
+    openai_ws: Any,
+    stop_frame: Dict[str, Any],
+    *,
+    delay: float,
+) -> None:
+    if state.closed or state.stop_sent:
+        return
+    if not state.tool_response_drains:
+        await _send_stop_and_close(
+            state, inkbox_ws, openai_ws, stop_frame, delay=delay,
+        )
+        return
+    if state.hangup_close_task is None or state.hangup_close_task.done():
+        state.hangup_close_task = asyncio.create_task(
+            _close_after_response_drain(
+                state,
+                inkbox_ws,
+                openai_ws,
+                stop_frame,
+                delay=delay,
+            ),
+            name="realtime-hangup-response-drain",
+        )
 
 
 async def _auto_confirm_hangup(
@@ -1225,7 +1416,11 @@ async def _auto_confirm_hangup(
     stop_frame: Dict[str, Any] = {"event": "stop", "reason": "goodbye complete"}
     if state.stream_id:
         stop_frame["stream_id"] = state.stream_id
-    await _send_stop_and_close(state, inkbox_ws, openai_ws, stop_frame, delay=0)
+    # Keep the drain wait in this auto-confirm task so caller barge-in can
+    # still cancel the armed hangup while a tool result is pending.
+    await _close_after_response_drain(
+        state, inkbox_ws, openai_ws, stop_frame, delay=0,
+    )
 
 
 async def _openai_to_inkbox_pump(
@@ -1275,6 +1470,7 @@ async def _openai_to_inkbox_pump(
         # go to the background too. Every other tool is an instant in-memory
         # op and stays inline.
         if name == AGENT_CONSULT_TOOL_NAME or name in REALTIME_CONTACT_READ_TOOLS:
+            _register_response_bearing_tool(state, cid)
             task = asyncio.create_task(coro, name=f"realtime-tool-{cid}")
             state.consult_tasks.add(task)
             task.add_done_callback(state.consult_tasks.discard)
@@ -1341,6 +1537,13 @@ async def _openai_to_inkbox_pump(
                 await inkbox_ws.send_str(json.dumps(done))
             except Exception:
                 pass
+            response_id = frame.get("response_id") or state.active_response_id
+            _mark_tool_response_event(
+                state,
+                event="audio_done",
+                response_id=response_id,
+                fallback_call_id=state.active_response_owner,
+            )
             # A hangup is armed and the (goodbye) response just finished
             # playing. The model has no further turn in which to issue the
             # confirming hang_up_call, so confirm it ourselves after a grace
@@ -1374,6 +1577,12 @@ async def _openai_to_inkbox_pump(
             if text:
                 state.transcript.append(("agent", text))
                 await _relay_transcript("local", text)
+                _mark_tool_response_event(
+                    state,
+                    event="transcript_done",
+                    response_id=frame.get("response_id") or state.active_response_id,
+                    fallback_call_id=state.active_response_owner,
+                )
 
         elif ftype == "conversation.item.input_audio_transcription.completed":
             text = (frame.get("transcript") or "").strip()
@@ -1426,11 +1635,38 @@ async def _openai_to_inkbox_pump(
             rid = resp.get("id")
             if rid:
                 state.last_response_id = rid
+            _mark_tool_response_event(
+                state,
+                event="response_done",
+                response_id=rid or state.active_response_id,
+                fallback_call_id=state.active_response_owner,
+            )
+            if str(resp.get("status") or "completed") not in {"completed", "success"}:
+                _mark_tool_response_event(
+                    state,
+                    event="audio_done",
+                    response_id=rid or state.active_response_id,
+                    fallback_call_id=state.active_response_owner,
+                )
+                _mark_tool_response_event(
+                    state,
+                    event="transcript_done",
+                    response_id=rid or state.active_response_id,
+                    fallback_call_id=state.active_response_owner,
+                )
             state.response_active = False
+            state.active_response_owner = None
+            state.active_response_id = None
             await _flush_pending_realtime_response(openai_ws, state)
 
         elif ftype == "response.created":
             state.response_active = True
+            resp = frame.get("response") or {}
+            state.active_response_id = resp.get("id") or frame.get("response_id")
+            if state.active_response_owner:
+                drain = state.tool_response_drains.get(state.active_response_owner)
+                if drain is not None and state.active_response_id:
+                    drain["response_id"] = state.active_response_id
 
         elif ftype == "error":
             err = frame.get("error") or frame
@@ -1553,7 +1789,26 @@ async def _dispatch_tool_call(
         # short filler first so the call keeps audio flowing during the otherwise
         # silent read (else the caller's line can idle-end before the recite).
         await _say_interim_filler(openai_ws, state)
-        output = await asyncio.to_thread(_run_contact_read_sync, name, args)
+        try:
+            output = await asyncio.wait_for(
+                asyncio.to_thread(_run_contact_read_sync, name, args),
+                timeout=REALTIME_CONTACT_READ_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            output = {
+                "error": "contact read timed out",
+                "message": (
+                    "Tell the caller you couldn't complete the lookup right now."
+                ),
+            }
+        except Exception:
+            logger.warning("[Inkbox realtime] direct contact read failed")
+            output = {
+                "error": "contact read failed",
+                "message": (
+                    "Tell the caller you couldn't complete the lookup right now."
+                ),
+            }
         # Tool name only — args/results carry contact PII and live-suite logs
         # can end up in CI output.
         logger.info(
@@ -1710,7 +1965,7 @@ async def _dispatch_tool_call(
             },
             create_response=False,
         )
-        await _send_stop_and_close(
+        await _request_stop_after_response_drain(
             state, inkbox_ws, openai_ws, stop_frame, delay=HANGUP_CLOSE_DELAY_S,
         )
         return
@@ -1878,9 +2133,14 @@ async def _submit_tool_result(
             openai_ws,
             state,
             supersede_pending=True,
+            owner_call_id=(
+                call_id if call_id in state.tool_response_drains else None
+            ),
         )
     except Exception as exc:
         logger.debug("[Inkbox realtime] submit_tool_result failed: %s", exc)
+    finally:
+        _mark_tool_result_submitted(state, call_id)
 
 
 async def _maybe_close_ws(ws: Any) -> None:
