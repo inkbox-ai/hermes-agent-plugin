@@ -341,7 +341,7 @@ def test_response_done_flushes_a_queued_tool_response():
     ])
     state = _BridgeState(
         response_active=True,
-        pending_response_create={},
+        pending_response_creates=[({}, None)],
     )
 
     async def _noop(*_args, **_kwargs):
@@ -359,7 +359,7 @@ def test_response_done_flushes_a_queued_tool_response():
     assert openai_ws.sent == [{"type": "response.create"}]
     assert state.last_response_id == "response-tool-call"
     assert state.response_active is True
-    assert state.pending_response_create is None
+    assert state.pending_response_creates == []
 
 
 def test_ga_function_call_events_dispatch_once_with_buffered_name():
@@ -1012,3 +1012,170 @@ def test_manual_confirm_cancels_pending_auto_confirm(monkeypatch):
     assert state.hangup_auto_task is None
     stop_frames = [f for f in inkbox_ws.sent if f.get("event") == "stop"]
     assert len(stop_frames) == 1
+
+
+def test_hangup_waits_for_delayed_tool_result_response_and_audio(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "HANGUP_CLOSE_DELAY_S", 0)
+
+    async def _run():
+        state = _BridgeState()
+        state.stream_id = "stream-drain"
+        openai_ws = _FakeWS()
+        inkbox_ws = _FakeWS()
+        release = asyncio.Event()
+
+        async def _delayed_consult(*_args, **_kwargs):
+            await release.wait()
+            return "The requested detail is available."
+
+        realtime_mod._register_response_bearing_tool(state, "consult-delayed")
+        tool_task = asyncio.create_task(_dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id="consult-delayed",
+            name=AGENT_CONSULT_TOOL_NAME,
+            arguments_json=json.dumps({"query": "look up the requested detail"}),
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_delayed_consult,
+            inkbox_ws=inkbox_ws,
+        ))
+        await asyncio.sleep(0)
+
+        await _dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id="hangup-arm",
+            name=HANG_UP_CALL_TOOL_NAME,
+            arguments_json='{"reason":"done"}',
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+            inkbox_ws=inkbox_ws,
+        )
+        await _dispatch_tool_call(
+            openai_ws=openai_ws,
+            call_id="hangup-confirm",
+            name=HANG_UP_CALL_TOOL_NAME,
+            arguments_json='{"reason":"done"}',
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+            inkbox_ws=inkbox_ws,
+        )
+
+        assert not any(frame.get("event") == "stop" for frame in inkbox_ws.sent)
+        assert state.hangup_close_task is not None
+
+        release.set()
+        await tool_task
+        # Finish the filler/goodbye response so the specifically owned tool
+        # result response can start.
+        await _openai_to_inkbox_pump(
+            openai_ws=_FakeOpenAIWS([
+                {
+                    "type": "response.output_audio.done",
+                    "response_id": "response-filler",
+                },
+                {"type": "response.done", "response": {"id": "response-filler"}},
+            ]),
+            inkbox_ws=inkbox_ws,
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+        )
+        assert state.active_response_owner == "consult-delayed"
+        assert not any(frame.get("event") == "stop" for frame in inkbox_ws.sent)
+
+        await _openai_to_inkbox_pump(
+            openai_ws=_FakeOpenAIWS([
+                {"type": "response.created", "response": {"id": "response-result"}},
+                {
+                    "type": "response.output_audio_transcript.done",
+                    "response_id": "response-result",
+                    "transcript": "The requested detail is available.",
+                },
+                {
+                    "type": "response.output_audio.done",
+                    "response_id": "response-result",
+                },
+                {"type": "response.done", "response": {"id": "response-result"}},
+            ]),
+            inkbox_ws=inkbox_ws,
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+        )
+        await state.hangup_close_task
+
+        stop_frames = [frame for frame in inkbox_ws.sent if frame.get("event") == "stop"]
+        assert len(stop_frames) == 1
+        assert state.closed is True
+
+    asyncio.run(_run())
+
+
+def test_barge_in_cancels_auto_hangup_while_tool_response_is_pending(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "HANGUP_AUTO_CONFIRM_DELAY_S", 0)
+
+    async def _run():
+        state = _BridgeState()
+        state.hangup_armed_at = 1.0
+        realtime_mod._register_response_bearing_tool(state, "consult-pending")
+        openai_ws = _FakeWS()
+        inkbox_ws = _FakeWS()
+
+        state.hangup_auto_task = asyncio.create_task(
+            realtime_mod._auto_confirm_hangup(
+                state, inkbox_ws, openai_ws, _meta(),
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not state.hangup_auto_task.done()
+
+        await _openai_to_inkbox_pump(
+            openai_ws=_FakeOpenAIWS([
+                {"type": "input_audio_buffer.speech_started"},
+            ]),
+            inkbox_ws=inkbox_ws,
+            state=state,
+            config=RealtimeConfig(enabled=True, api_key="sk-test"),
+            meta=_meta(),
+            on_agent_consult=_noop_consult,
+        )
+        await asyncio.sleep(0)
+
+        assert state.hangup_armed_at is None
+        assert state.hangup_auto_task is None
+        assert not any(frame.get("event") == "stop" for frame in inkbox_ws.sent)
+
+    asyncio.run(_run())
+
+
+def test_response_drain_timeout_does_not_cut_off_tool_execution(monkeypatch):
+    monkeypatch.setattr(realtime_mod, "REALTIME_RESPONSE_DRAIN_TIMEOUT_S", 0)
+
+    async def _run():
+        state = _BridgeState()
+        realtime_mod._register_response_bearing_tool(state, "consult-running")
+        close_task = asyncio.create_task(realtime_mod._close_after_response_drain(
+            state,
+            _FakeWS(),
+            _FakeWS(),
+            {"event": "stop"},
+            delay=0,
+        ))
+        await asyncio.sleep(0)
+
+        assert not close_task.done()
+
+        close_task.cancel()
+        try:
+            await close_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
