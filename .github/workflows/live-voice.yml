@@ -120,7 +120,7 @@ jobs:
           # the chat model; send it straight to OpenAI as-is.
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true
-          hermes config set model.default gpt-5.6-terra || true
+          hermes config set model.default gpt-5.6-sol || true
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             echo "INKBOX_VOICE_STACK=inkbox_voice_ai" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
@@ -130,6 +130,7 @@ jobs:
           else
             echo "INKBOX_VOICE_STACK=openai_realtime" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
+            echo "INKBOX_REALTIME_MODEL=gpt-realtime-2" >> "$HERMES_HOME/.env"
           fi
 
       - name: Start gateway and wait for readiness
