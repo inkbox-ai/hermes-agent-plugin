@@ -202,6 +202,19 @@ def test_inbound_progress_sequence_waits_twice_and_returns_total(monkeypatch) ->
     }
 
 
+def test_inbound_progress_stream_waits_emit_five_second_heartbeats(monkeypatch) -> None:
+    sleeps = []
+    heartbeats = []
+    monkeypatch.setattr(mock.time, "sleep", sleeps.append)
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_WAIT_SECONDS", "12")
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "1")
+
+    mock._wait_for_progress_result(lambda: heartbeats.append(True))
+
+    assert sleeps == [5.0, 5.0, 2.0, 5.0, 5.0, 2.0, 1.0]
+    assert len(heartbeats) == len(sleeps)
+
+
 def test_inbound_progress_auxiliary_summary_does_not_block(monkeypatch) -> None:
     monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-progress")
     req = _request("Write one concise progress update for the requester.")
@@ -247,6 +260,7 @@ def test_inbound_progress_stream_opens_before_delayed_completion(monkeypatch) ->
     assert stream.index("event: response.created") < stream.index(
         "event: response.output_item.done"
     )
+    assert stream.count("event: response.in_progress") == 2
     assert stream.index("event: response.output_item.done") < stream.index(
         "event: response.completed"
     )

@@ -21,6 +21,7 @@ import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Callable
 from typing import Any
 
 _NONCE = re.compile(r"smoke-[0-9a-f]{6,}")
@@ -250,15 +251,25 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
     raise ValueError(f"Unknown MOCK_A2A_SCENARIO: {scenario}")
 
 
-def _wait_for_progress_result() -> None:
+def _wait_for_progress_result(
+    heartbeat: Callable[[], None] | None = None,
+) -> None:
     wait_seconds = float(
         os.environ.get("MOCK_A2A_PROGRESS_WAIT_SECONDS", "60")
     )
-    time.sleep(wait_seconds)
-    time.sleep(wait_seconds)
-    time.sleep(float(
+    waits = [wait_seconds, wait_seconds, float(
         os.environ.get("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "5")
-    ))
+    )]
+    for wait in waits:
+        if heartbeat is None:
+            time.sleep(wait)
+            continue
+        remaining = wait
+        while remaining > 0:
+            pause = min(5.0, remaining)
+            time.sleep(pause)
+            remaining -= pause
+            heartbeat()
 
 
 def _inbound_progress_result(tokens: list[str]) -> dict[str, Any]:
@@ -473,11 +484,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_streaming_progress(self, req: dict[str, Any]) -> None:
         model = req.get("model", "mock-model")
+        is_responses = self.path.rstrip("/").endswith("/responses")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
 
-        if self.path.rstrip("/").endswith("/responses"):
+        if is_responses:
             pending = {
                 **_responses_object({"text": ""}, model),
                 "status": "in_progress",
@@ -507,7 +519,37 @@ class Handler(BaseHTTPRequestHandler):
             )
             self.wfile.flush()
 
-        _wait_for_progress_result()
+        sequence_number = 1
+
+        def send_heartbeat() -> None:
+            nonlocal sequence_number
+            if is_responses:
+                self._send_sse_event({
+                    "type": "response.in_progress",
+                    "sequence_number": sequence_number,
+                    "response": pending,
+                })
+                sequence_number += 1
+                return
+            self.wfile.write(
+                (
+                    "data: "
+                    + json.dumps({
+                        "id": "chatcmpl-mock",
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": None,
+                        }],
+                    })
+                    + "\n\n"
+                ).encode()
+            )
+            self.wfile.flush()
+
+        _wait_for_progress_result(send_heartbeat)
         tokens = _A2A_TOKEN.findall(_request_text(req))
         response = _finalize_model_response(
             req,
@@ -516,8 +558,12 @@ class Handler(BaseHTTPRequestHandler):
         )
         tool_call = _tool_call(response)
 
-        if self.path.rstrip("/").endswith("/responses"):
-            for event in _responses_events(response, model, sequence_start=1):
+        if is_responses:
+            for event in _responses_events(
+                response,
+                model,
+                sequence_start=sequence_number,
+            ):
                 self._send_sse_event(event)
             return
 
