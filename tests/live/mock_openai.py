@@ -187,25 +187,8 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
 
     if scenario == "inbound-progress":
         if not names:
-            wait_seconds = float(
-                os.environ.get("MOCK_A2A_PROGRESS_WAIT_SECONDS", "60")
-            )
-            first = 2 + 2
-            time.sleep(wait_seconds)
-            second = 3 + 3
-            time.sleep(wait_seconds)
-            total = first + second
-            time.sleep(float(
-                os.environ.get("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "5")
-            ))
-            return _a2a_tool(
-                "inkbox_a2a_complete",
-                text=(
-                    f"2 + 2 = {first}; 3 + 3 = {second}; "
-                    f"{first} + {second} = {total}. "
-                    f"{_a2a_token(tokens, 'inbound-progress')}"
-                ),
-            )
+            _wait_for_progress_result()
+            return _inbound_progress_result(tokens)
         return {"text": "[SILENT]"}
 
     card_url = _matched(_A2A_CARD_URL, req, "Agent Card URL")
@@ -267,6 +250,45 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
     raise ValueError(f"Unknown MOCK_A2A_SCENARIO: {scenario}")
 
 
+def _wait_for_progress_result() -> None:
+    wait_seconds = float(
+        os.environ.get("MOCK_A2A_PROGRESS_WAIT_SECONDS", "60")
+    )
+    time.sleep(wait_seconds)
+    time.sleep(wait_seconds)
+    time.sleep(float(
+        os.environ.get("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "5")
+    ))
+
+
+def _inbound_progress_result(tokens: list[str]) -> dict[str, Any]:
+    first = 2 + 2
+    second = 3 + 3
+    total = first + second
+    return _a2a_tool(
+        "inkbox_a2a_complete",
+        text=(
+            f"2 + 2 = {first}; 3 + 3 = {second}; "
+            f"{first} + {second} = {total}. "
+            f"{_a2a_token(tokens, 'inbound-progress')}"
+        ),
+    )
+
+
+def _is_streaming_progress_turn(req: dict[str, Any]) -> bool:
+    available = _available_tool_names(req)
+    return (
+        os.environ.get("MOCK_A2A_SCENARIO", "").strip() == "inbound-progress"
+        and bool(req.get("stream"))
+        and not _effective_tool_names(req)
+        and (
+            "inkbox_a2a_complete" in available
+            or "tool_call" in available
+        )
+        and "Write one concise progress update" not in _request_text(req)
+    )
+
+
 def _model_response(req: dict[str, Any]) -> dict[str, Any]:
     scenario = os.environ.get("MOCK_A2A_SCENARIO", "").strip()
     available = _available_tool_names(req)
@@ -285,6 +307,15 @@ def _model_response(req: dict[str, Any]) -> dict[str, Any]:
             if scenario and is_a2a_turn
             else {"text": _reply_text(req)}
         )
+    return _finalize_model_response(req, scenario, response)
+
+
+def _finalize_model_response(
+    req: dict[str, Any],
+    scenario: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    available = _available_tool_names(req)
     if (
         response.get("name", "").startswith("inkbox_")
         and response["name"] not in available
@@ -391,13 +422,14 @@ def _responses_object(
 def _responses_events(
     response: dict[str, Any],
     model: str,
+    sequence_start: int = 0,
 ) -> list[dict[str, Any]]:
     output = _responses_output(response)
     events: list[dict[str, Any]] = []
     if not response.get("name"):
         events.append({
             "type": "response.output_text.delta",
-            "sequence_number": 0,
+            "sequence_number": sequence_start,
             "item_id": "msg-mock",
             "output_index": 0,
             "content_index": 0,
@@ -406,13 +438,13 @@ def _responses_events(
         })
     events.append({
         "type": "response.output_item.done",
-        "sequence_number": len(events),
+        "sequence_number": sequence_start + len(events),
         "output_index": 0,
         "item": output[0],
     })
     events.append({
         "type": "response.completed",
-        "sequence_number": len(events),
+        "sequence_number": sequence_start + len(events),
         "response": _responses_object(response, model),
     })
     return events
@@ -430,6 +462,81 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse_event(self, event: dict[str, Any]) -> None:
+        self.wfile.write(
+            (
+                f"event: {event['type']}\n"
+                f"data: {json.dumps(event)}\n\n"
+            ).encode()
+        )
+        self.wfile.flush()
+
+    def _send_streaming_progress(self, req: dict[str, Any]) -> None:
+        model = req.get("model", "mock-model")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+
+        if self.path.rstrip("/").endswith("/responses"):
+            pending = {
+                **_responses_object({"text": ""}, model),
+                "status": "in_progress",
+                "output": [],
+            }
+            self._send_sse_event({
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": pending,
+            })
+        else:
+            self.wfile.write(
+                (
+                    "data: "
+                    + json.dumps({
+                        "id": "chatcmpl-mock",
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }],
+                    })
+                    + "\n\n"
+                ).encode()
+            )
+            self.wfile.flush()
+
+        _wait_for_progress_result()
+        tokens = _A2A_TOKEN.findall(_request_text(req))
+        response = _finalize_model_response(
+            req,
+            "inbound-progress",
+            _inbound_progress_result(tokens),
+        )
+        tool_call = _tool_call(response)
+
+        if self.path.rstrip("/").endswith("/responses"):
+            for event in _responses_events(response, model, sequence_start=1):
+                self._send_sse_event(event)
+            return
+
+        delta = {"role": "assistant"}
+        finish_reason = "stop"
+        if tool_call:
+            delta["tool_calls"] = [{"index": 0, **tool_call}]
+            finish_reason = "tool_calls"
+        chunks = [
+            {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "model": model,
+             "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+            {"id": "chatcmpl-mock", "object": "chat.completion.chunk", "model": model,
+             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]},
+        ]
+        for chunk in chunks:
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
     def do_GET(self):  # noqa: N802  (model-probe + health)
         if self.path.rstrip("/").endswith("/models"):
             self._send_json(200, {"object": "list", "data": [
@@ -444,6 +551,16 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             req = {}
+        if _is_streaming_progress_turn(req):
+            try:
+                self._send_streaming_progress(req)
+            except Exception as exc:
+                print(
+                    f"Mock progress stream failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return
         try:
             response = _model_response(req)
         except Exception as exc:
