@@ -434,6 +434,7 @@ def test_a2a_progress_summary_uses_auxiliary_task_and_safe_activity():
     messages, kwargs = calls[0]
     assert "Inspect the worker implementation." in messages[1]["content"]
     assert "reviewing the relevant material" in messages[1]["content"]
+    assert "Do not copy the previous update's wording" in messages[0]["content"]
     assert kwargs == {
         "task": "inkbox_a2a_progress",
         "purpose": "inbound_a2a_progress",
@@ -454,7 +455,44 @@ def test_a2a_progress_summary_rejects_terminal_claim():
         activities=["validating the work"],
     ))
 
-    assert update == "I'm validating the work; work on the task is continuing."
+    assert update == "I'm validating the work."
+
+
+def test_a2a_progress_activity_describes_records_and_data_queries():
+    assert (
+        progress_mod._activity_for_tool("list_directory_users")
+        == "reviewing the requested records"
+    )
+    assert (
+        progress_mod._activity_for_tool("run_sql_query")
+        == "checking the requested data"
+    )
+    assert (
+        progress_mod._fallback_update(
+            ["reviewing the requested records", "checking the requested data"]
+        )
+        == "I'm reviewing the requested records and checking the requested data."
+    )
+
+
+def test_a2a_progress_summary_enforces_short_word_limit():
+    class Llm:
+        async def acomplete(self, _messages, **_kwargs):
+            return types.SimpleNamespace(
+                text=(
+                    "I am carefully reviewing all of the requested records while also "
+                    "checking the relevant data and preparing a concise summary for you."
+                )
+            )
+
+    update = asyncio.run(progress_mod.build_a2a_progress_update(
+        Llm(),
+        task_text="Review the requested records.",
+        activities=["reviewing the requested records"],
+    ))
+
+    assert len(update.split()) == progress_mod.A2A_PROGRESS_MAX_WORDS
+    assert update.endswith("…")
 
 
 def test_a2a_progress_activity_does_not_retain_tool_inputs(monkeypatch, tmp_path):
@@ -505,7 +543,7 @@ def test_a2a_progress_update_is_durable_and_nonterminal(tmp_path):
     assert keep_running is True
     assert adapter._a2a_receipts[-1][0] == "task-1"
     assert adapter._a2a_receipts[-1][1]["intent"] == "progress"
-    assert "continuing to work" in adapter._a2a_receipts[-1][1]["text"]
+    assert "continuing the requested work" in adapter._a2a_receipts[-1][1]["text"]
     registry = json.loads(adapter._a2a_registry_path.read_text())
     progress = registry["task-1:message-1"]["progress"]
     assert progress["delivered_count"] == 1
