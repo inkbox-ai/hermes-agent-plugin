@@ -657,7 +657,6 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
     "a2a.task.created",
     "a2a.task.message",
     "a2a.task.canceled",
-    "a2a.sent_task.updated",
 )
 _A2A_RECEIPT_TEMPLATE = "Task {task_id} received. Work is queued and starting."
 _A2A_PROGRESS_INTERVAL_SECONDS = 60.0
@@ -1098,9 +1097,20 @@ def _reconcile_subscription(
     list_kwargs = {owner_kwarg: owner_id}
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
-    # Same URL + same event set: adopt verbatim, no writes.
+    # Same URL + a compatible event superset: adopt verbatim, no writes. A
+    # provisioner may attach newer events from this channel before the plugin
+    # knows how to consume them; stripping those events can collide with a
+    # legacy duplicate before cleanup gets a chance to run.
     for row in existing:
-        if row.url == desired_url and set(row.event_types) == desired_set:
+        row_set = set(row.event_types)
+        row_families = {
+            event_type.split(".", 1)[0] for event_type in row.event_types
+        }
+        if (
+            row.url == desired_url
+            and desired_set.issubset(row_set)
+            and row_families == desired_families
+        ):
             active_id = row.id
             break
     else:
