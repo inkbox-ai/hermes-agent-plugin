@@ -694,6 +694,15 @@ def _is_unsupported_a2a_event_types(exc: Exception) -> bool:
     )
 
 
+def _a2a_receipt_text(task_id: str, progress_interval_seconds: float) -> str:
+    receipt = _A2A_RECEIPT_TEMPLATE.format(task_id=task_id)
+    if progress_interval_seconds <= 0:
+        return f"{receipt} Periodic progress updates are disabled."
+    interval = f"{progress_interval_seconds:g}"
+    unit = "second" if progress_interval_seconds == 1 else "seconds"
+    return f"{receipt} Expect progress updates about every {interval} {unit}."
+
+
 def _inkbox_state_path():
     """Return the on-disk path used for the Inkbox identity state file.
 
@@ -4494,7 +4503,10 @@ class InkboxAdapter(BasePlatformAdapter):
         state = str(
             getattr(authoritative.state, "value", authoritative.state)
         )
-        receipt = _A2A_RECEIPT_TEMPLATE.format(task_id=task_id)
+        receipt = _a2a_receipt_text(
+            task_id,
+            self._a2a_progress_interval_seconds,
+        )
         if state in _A2A_SETTLED_SERVER_STATES:
             return
         if self._a2a_task_has_receipt(authoritative, receipt):

@@ -459,8 +459,9 @@ Hermes direct tools:
 - `inkbox_delete_contact`
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
-After durable binding, the plugin immediately sends a non-terminal receipt, then
-sends a concise update every 60 seconds while the worker turn remains active.
+After durable binding, the plugin immediately sends a non-terminal receipt that
+states the configured progress cadence, then sends a concise update every 60
+seconds while the worker turn remains active.
 Periodic summaries use the task text and sanitized activity categories; raw tool
 inputs, tool results, and model reasoning are excluded. Configure the interval
 under `platforms.inkbox.a2a_progress_interval_seconds`, or set it to `0` to

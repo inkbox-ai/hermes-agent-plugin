@@ -178,6 +178,37 @@ def test_inbound_a2a_sequences(monkeypatch) -> None:
     assert "a2a-ci-answer-012345abcdef" in response["arguments"]["text"]
 
 
+def test_inbound_progress_sequence_waits_twice_and_returns_total(monkeypatch) -> None:
+    sleeps = []
+    monkeypatch.setattr(mock.time, "sleep", sleeps.append)
+    req = _request(
+        "Add two pairs of numbers and return "
+        "`a2a-ci-inbound-progress-012345abcdef`."
+    )
+
+    response = mock._a2a_response(req, "inbound-progress")
+
+    assert sleeps == [60.0, 60.0, 5.0]
+    assert response == {
+        "name": "inkbox_a2a_complete",
+        "arguments": {
+            "text": (
+                "2 + 2 = 4; 3 + 3 = 6; 4 + 6 = 10. "
+                "a2a-ci-inbound-progress-012345abcdef"
+            ),
+        },
+    }
+
+
+def test_inbound_progress_auxiliary_summary_does_not_block(monkeypatch) -> None:
+    monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-progress")
+    req = _request("Write one concise progress update for the requester.")
+
+    response = mock._model_response(req)
+
+    assert response == {"text": mock._A2A_PROGRESS_SUMMARY}
+
+
 def test_outbound_single_a2a_sequence() -> None:
     req = _request(
         "Delegate `a2a-ci-outbound-single-task-012345abcdef` to "

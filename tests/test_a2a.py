@@ -137,9 +137,37 @@ def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
         "task-1",
         {
             "intent": "progress",
-            "text": "Task task-1 received. Work is queued and starting.",
+            "text": (
+                "Task task-1 received. Work is queued and starting. "
+                "Periodic progress updates are disabled."
+            ),
         },
     )]
+
+
+@pytest.mark.parametrize(
+    ("interval", "expectation"),
+    [
+        (60, "Expect progress updates about every 60 seconds."),
+        (1, "Expect progress updates about every 1 second."),
+        (0.5, "Expect progress updates about every 0.5 seconds."),
+        (0, "Periodic progress updates are disabled."),
+    ],
+)
+def test_a2a_receipt_reports_configured_progress_frequency(
+    tmp_path,
+    interval,
+    expectation,
+):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = interval
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.status == 200
+    receipt = adapter._a2a_receipts[0][1]["text"]
+    assert receipt.startswith("Task task-1 received. Work is queued and starting.")
+    assert receipt.endswith(expectation)
 
 
 def test_concurrent_duplicate_a2a_delivery_sends_one_receipt(tmp_path):
@@ -269,7 +297,10 @@ def test_a2a_receipt_failure_retries_without_reenqueue(tmp_path):
 def test_a2a_receipt_is_idempotent_when_response_is_lost(tmp_path):
     adapter = _adapter(tmp_path)
     attempts = 0
-    receipt = "Task task-1 received. Work is queued and starting."
+    receipt = (
+        "Task task-1 received. Work is queued and starting. "
+        "Periodic progress updates are disabled."
+    )
     task = types.SimpleNamespace(state="submitted", messages=[])
 
     class Identity:

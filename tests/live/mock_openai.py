@@ -19,12 +19,14 @@ import json
 import os
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 _NONCE = re.compile(r"smoke-[0-9a-f]{6,}")
 _A2A_CARD_URL = re.compile(r"https://[^\s`\"\\]+/a2a/[^\s`\"\\]+/card")
 _A2A_TOKEN = re.compile(r"a2a-ci-[a-z-]+-[0-9a-f]{12}")
+_A2A_PROGRESS_SUMMARY = "I'm working through the requested calculation."
 
 
 def _reply_text(req: dict) -> str:
@@ -183,6 +185,29 @@ def _a2a_response(req: dict[str, Any], scenario: str) -> dict[str, Any]:
             )
         return {"text": "[SILENT]"}
 
+    if scenario == "inbound-progress":
+        if not names:
+            wait_seconds = float(
+                os.environ.get("MOCK_A2A_PROGRESS_WAIT_SECONDS", "60")
+            )
+            first = 2 + 2
+            time.sleep(wait_seconds)
+            second = 3 + 3
+            time.sleep(wait_seconds)
+            total = first + second
+            time.sleep(float(
+                os.environ.get("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "5")
+            ))
+            return _a2a_tool(
+                "inkbox_a2a_complete",
+                text=(
+                    f"2 + 2 = {first}; 3 + 3 = {second}; "
+                    f"{first} + {second} = {total}. "
+                    f"{_a2a_token(tokens, 'inbound-progress')}"
+                ),
+            )
+        return {"text": "[SILENT]"}
+
     card_url = _matched(_A2A_CARD_URL, req, "Agent Card URL")
     call_count = names.count("inkbox_a2a_call")
     check_count = names.count("inkbox_a2a_check")
@@ -249,11 +274,17 @@ def _model_response(req: dict[str, Any]) -> dict[str, Any]:
         "inkbox_a2a_complete" in available
         or "tool_call" in available
     )
-    response = (
-        _a2a_response(req, scenario)
-        if scenario and is_a2a_turn
-        else {"text": _reply_text(req)}
-    )
+    if (
+        scenario == "inbound-progress"
+        and "Write one concise progress update" in _request_text(req)
+    ):
+        response = {"text": _A2A_PROGRESS_SUMMARY}
+    else:
+        response = (
+            _a2a_response(req, scenario)
+            if scenario and is_a2a_turn
+            else {"text": _reply_text(req)}
+        )
     if (
         response.get("name", "").startswith("inkbox_")
         and response["name"] not in available
