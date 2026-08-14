@@ -12,6 +12,7 @@ pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
 from inkbox_plugin import adapter as adapter_mod
+from inkbox_plugin import a2a_progress as progress_mod
 from inkbox_plugin import tools as tools_mod
 from inkbox_plugin.a2a_context import (
     activate_next_a2a_turn_context,
@@ -44,11 +45,15 @@ def _adapter(tmp_path):
     adapter._a2a_session_by_chat = {}
     adapter._a2a_session_key_by_chat = {}
     adapter._a2a_suppress_next_reply_by_chat = set()
+    adapter._a2a_progress_tasks = {}
+    adapter._a2a_progress_interval_seconds = 0
+    adapter._a2a_progress_llm = None
     adapter._a2a_ingest_lock = asyncio.Lock()
     adapter._enqueued = []
     adapter._a2a_receipts = []
 
     task = types.SimpleNamespace(state="submitted", messages=[])
+    adapter._a2a_authoritative_task = task
 
     class Identity:
         def a2a_task(self, _task_id):
@@ -56,6 +61,8 @@ def _adapter(tmp_path):
 
         def a2a_reply(self, task_id, **kwargs):
             adapter._a2a_receipts.append((task_id, kwargs))
+            if kwargs.get("intent") == "progress":
+                task.state = "working"
             task.messages.append(types.SimpleNamespace(
                 parts=[{"text": kwargs["text"]}],
             ))
@@ -372,6 +379,250 @@ def test_a2a_running_and_turn_failure_are_durable(tmp_path):
     assert entry["state"] == "turn_failed"
     assert entry["last_error"]["phase"] == "execution"
     assert entry["last_error"]["code"] == "turn_failed"
+
+
+def test_a2a_progress_summary_uses_auxiliary_task_and_safe_activity():
+    calls = []
+
+    class Llm:
+        async def acomplete(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return types.SimpleNamespace(
+                text="I'm reviewing the worker lifecycle and validating its behavior."
+            )
+
+    update = asyncio.run(progress_mod.build_a2a_progress_update(
+        Llm(),
+        task_text="Inspect the worker implementation.",
+        activities=["reviewing the relevant material", "validating the work"],
+    ))
+
+    assert update == (
+        "I'm reviewing the worker lifecycle and validating its behavior."
+    )
+    messages, kwargs = calls[0]
+    assert "Inspect the worker implementation." in messages[1]["content"]
+    assert "reviewing the relevant material" in messages[1]["content"]
+    assert kwargs == {
+        "task": "inkbox_a2a_progress",
+        "purpose": "inbound_a2a_progress",
+        "temperature": 0.1,
+        "max_tokens": 64,
+        "timeout": 10,
+    }
+
+
+def test_a2a_progress_summary_rejects_terminal_claim():
+    class Llm:
+        async def acomplete(self, _messages, **_kwargs):
+            return types.SimpleNamespace(text="Done — the task is complete.")
+
+    update = asyncio.run(progress_mod.build_a2a_progress_update(
+        Llm(),
+        task_text="Inspect the worker implementation.",
+        activities=["validating the work"],
+    ))
+
+    assert update == "I'm validating the work; work on the task is continuing."
+
+
+def test_a2a_progress_activity_does_not_retain_tool_inputs(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    progress_mod.start_a2a_progress("task-1")
+    write_a2a_turn_context(
+        "session-1",
+        {
+            "task_id": "task-1",
+            "context_id": "context-1",
+            "message_id": "message-1",
+            "reply_intent_committed": False,
+        },
+    )
+
+    progress_mod.observe_a2a_tool_start(
+        tool_name="browser_search",
+        args={"query": "private-value"},
+        task_id="session-1",
+        session_id="session-1",
+    )
+
+    snapshot = progress_mod.a2a_activity_snapshot("task-1")
+    progress_mod.stop_a2a_progress("task-1")
+    assert snapshot == ["researching the relevant information"]
+    assert "private-value" not in json.dumps(snapshot)
+
+
+def test_a2a_progress_update_is_durable_and_nonterminal(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    adapter._a2a_progress_llm = types.SimpleNamespace(
+        acomplete=lambda *_args, **_kwargs: None,
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
+    progress_mod.start_a2a_progress("task-1")
+
+    keep_running = asyncio.run(adapter._emit_a2a_progress_update(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert keep_running is True
+    assert adapter._a2a_receipts[-1][0] == "task-1"
+    assert adapter._a2a_receipts[-1][1]["intent"] == "progress"
+    assert "continuing to work" in adapter._a2a_receipts[-1][1]["text"]
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    progress = registry["task-1:message-1"]["progress"]
+    assert progress["delivered_count"] == 1
+    assert "pending" not in progress
+    assert registry["task-1:message-1"]["state"] == "running"
+
+
+def test_a2a_progress_retry_recovers_accepted_reply_without_duplicate(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    update = "I'm validating the work. (60s elapsed)"
+    adapter._a2a_authoritative_task.messages.append(
+        types.SimpleNamespace(parts=[{"text": update}])
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+        progress_text=update,
+    )
+    receipt_count = len(adapter._a2a_receipts)
+
+    keep_running = asyncio.run(adapter._emit_a2a_progress_update(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert keep_running is True
+    assert len(adapter._a2a_receipts) == receipt_count
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    progress = registry["task-1:message-1"]["progress"]
+    assert progress["last_delivered_text"] == update
+    assert "pending" not in progress
+
+
+def test_a2a_progress_elapsed_time_continues_across_caller_follow_up(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
+    first = json.loads(adapter._a2a_registry_path.read_text())
+    started_at = first["task-1:message-1"]["progress"]["started_at"]
+    follow_up = _event()["data"] | {"message_id": "message-2"}
+
+    adapter._write_a2a_registry(
+        "task-1:message-2",
+        follow_up,
+        "running",
+        progress_started=True,
+    )
+
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-2"]["progress"]["started_at"] == started_at
+
+
+def test_a2a_progress_stops_for_terminal_task(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    adapter._a2a_authoritative_task.state = "completed"
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+        progress_text="I'm validating the work. (60s elapsed)",
+    )
+    receipt_count = len(adapter._a2a_receipts)
+
+    keep_running = asyncio.run(adapter._emit_a2a_progress_update(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert keep_running is False
+    assert len(adapter._a2a_receipts) == receipt_count
+
+
+def test_a2a_progress_runner_waits_configured_interval(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    sleeps = []
+    emissions = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def stop_after_one(**kwargs):
+        emissions.append(kwargs)
+        return False
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", fake_sleep)
+    adapter._emit_a2a_progress_update = stop_after_one
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert sleeps == [60]
+    assert emissions == [{"task_id": "task-1", "message_id": "message-1"}]
+
+
+def test_a2a_progress_runner_retries_local_preparation_failure(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    attempts = 0
+
+    async def fake_sleep(_delay):
+        return None
+
+    async def fail_once_then_stop(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary local failure")
+        return False
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", fake_sleep)
+    adapter._emit_a2a_progress_update = fail_once_then_stop
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert attempts == 2
+
+
+def test_a2a_processing_completion_cancels_progress_timer(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+
+    async def scenario():
+        await adapter._on_a2a_event(_event())
+        event = adapter._enqueued[0]
+        await adapter.on_processing_start(event)
+        assert "task-1" in adapter._a2a_progress_tasks
+        await adapter.on_processing_complete(
+            event,
+            types.SimpleNamespace(value="success"),
+        )
+        assert adapter._a2a_progress_tasks == {}
+
+    asyncio.run(scenario())
 
 
 def test_late_receipt_cannot_regress_running_or_failed_state(tmp_path):
