@@ -657,6 +657,7 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
     "a2a.task.created",
     "a2a.task.message",
     "a2a.task.canceled",
+    "a2a.sent_task.updated",
 )
 _A2A_RECEIPT_TEMPLATE = "Task {task_id} received. Work is queued and starting."
 _A2A_PROGRESS_INTERVAL_SECONDS = 60.0
