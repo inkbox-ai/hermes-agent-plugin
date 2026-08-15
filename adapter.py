@@ -143,7 +143,7 @@ try:
         remove_queued_a2a_turn_context,
     )
     from .a2a_progress import (
-        a2a_activity_snapshot,
+        a2a_tool_snapshot,
         build_a2a_progress_update,
         start_a2a_progress,
         stop_a2a_progress,
@@ -183,7 +183,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         remove_queued_a2a_turn_context,
     )
     from a2a_progress import (
-        a2a_activity_snapshot,
+        a2a_tool_snapshot,
         build_a2a_progress_update,
         start_a2a_progress,
         stop_a2a_progress,
@@ -4627,7 +4627,7 @@ class InkboxAdapter(BasePlatformAdapter):
             summary = await build_a2a_progress_update(
                 self._a2a_progress_llm,
                 task_text=task_text,
-                activities=a2a_activity_snapshot(task_id),
+                tool_names=a2a_tool_snapshot(task_id),
                 previous_update=str(progress.get("last_delivered_text") or ""),
             )
             try:

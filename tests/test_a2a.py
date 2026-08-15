@@ -413,7 +413,7 @@ def test_a2a_running_and_turn_failure_are_durable(tmp_path):
     assert entry["last_error"]["code"] == "turn_failed"
 
 
-def test_a2a_progress_summary_uses_auxiliary_task_and_safe_activity():
+def test_a2a_progress_summary_uses_auxiliary_task_and_safe_tool_names():
     calls = []
 
     class Llm:
@@ -426,7 +426,7 @@ def test_a2a_progress_summary_uses_auxiliary_task_and_safe_activity():
     update = asyncio.run(progress_mod.build_a2a_progress_update(
         Llm(),
         task_text="Inspect the worker implementation.",
-        activities=["reviewing the relevant material", "validating the work"],
+        tool_names=["read_file", "run_tests"],
     ))
 
     assert update == (
@@ -434,7 +434,7 @@ def test_a2a_progress_summary_uses_auxiliary_task_and_safe_activity():
     )
     messages, kwargs = calls[0]
     assert "Inspect the worker implementation." in messages[1]["content"]
-    assert "reviewing the relevant material" in messages[1]["content"]
+    assert "read_file; run_tests" in messages[1]["content"]
     assert "Do not copy the previous update's wording" in messages[0]["content"]
     assert kwargs == {
         "task": "inkbox_a2a_progress",
@@ -453,27 +453,30 @@ def test_a2a_progress_summary_rejects_terminal_claim():
     update = asyncio.run(progress_mod.build_a2a_progress_update(
         Llm(),
         task_text="Inspect the worker implementation.",
-        activities=["validating the work"],
+        tool_names=["run_tests"],
     ))
 
-    assert update == "I'm validating the work."
+    assert update == "I'm continuing the requested work."
 
 
-def test_a2a_progress_activity_describes_records_and_data_queries():
-    assert (
-        progress_mod._activity_for_tool("list_directory_users")
-        == "reviewing the requested records"
-    )
-    assert (
-        progress_mod._activity_for_tool("run_sql_query")
-        == "checking the requested data"
-    )
-    assert (
-        progress_mod._fallback_update(
-            ["reviewing the requested records", "checking the requested data"]
-        )
-        == "I'm reviewing the requested records and checking the requested data."
-    )
+def test_a2a_progress_summary_rejects_echoed_tool_identifier():
+    class Llm:
+        async def acomplete(self, _messages, **_kwargs):
+            return types.SimpleNamespace(text="I'm using browser search to investigate.")
+
+    update = asyncio.run(progress_mod.build_a2a_progress_update(
+        Llm(),
+        task_text="Research the requested topic.",
+        tool_names=["browser_search"],
+    ))
+
+    assert update == "I'm continuing the requested work."
+
+
+def test_a2a_progress_normalizes_tool_names_without_classifying_them():
+    assert progress_mod._safe_tool_name(" List Directory Users ") == "list_directory_users"
+    assert progress_mod._safe_tool_name("run/sql query\n") == "run_sql_query"
+    assert progress_mod._fallback_update() == "I'm continuing the requested work."
 
 
 def test_a2a_progress_summary_enforces_short_word_limit():
@@ -489,14 +492,14 @@ def test_a2a_progress_summary_enforces_short_word_limit():
     update = asyncio.run(progress_mod.build_a2a_progress_update(
         Llm(),
         task_text="Review the requested records.",
-        activities=["reviewing the requested records"],
+        tool_names=["list_directory_users"],
     ))
 
     assert len(update.split()) == progress_mod.A2A_PROGRESS_MAX_WORDS
     assert update.endswith("…")
 
 
-def test_a2a_progress_activity_does_not_retain_tool_inputs(monkeypatch, tmp_path):
+def test_a2a_progress_tool_capture_does_not_retain_inputs(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     progress_mod.start_a2a_progress("task-1")
     write_a2a_turn_context(
@@ -516,9 +519,9 @@ def test_a2a_progress_activity_does_not_retain_tool_inputs(monkeypatch, tmp_path
         session_id="session-1",
     )
 
-    snapshot = progress_mod.a2a_activity_snapshot("task-1")
+    snapshot = progress_mod.a2a_tool_snapshot("task-1")
     progress_mod.stop_a2a_progress("task-1")
-    assert snapshot == ["researching the relevant information"]
+    assert snapshot == ["browser_search"]
     assert "private-value" not in json.dumps(snapshot)
 
 
