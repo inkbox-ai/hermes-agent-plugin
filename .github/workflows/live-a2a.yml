@@ -106,6 +106,7 @@ jobs:
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
             echo "INKBOX_VOICEMAIL_DETECTION=disabled"
+            echo "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=60"
             echo "OPENAI_API_KEY=sk-mock-not-used"
             echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
           } >> "$HERMES_HOME/.env"

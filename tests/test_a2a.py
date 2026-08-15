@@ -148,7 +148,8 @@ def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
 @pytest.mark.parametrize(
     ("interval", "expectation"),
     [
-        (60, "Expect progress updates about every 60 seconds."),
+        (180, "Expect progress updates about every 3 minutes."),
+        (60, "Expect progress updates about every 1 minute."),
         (1, "Expect progress updates about every 1 second."),
         (0.5, "Expect progress updates about every 0.5 seconds."),
         (0, "Periodic progress updates are disabled."),

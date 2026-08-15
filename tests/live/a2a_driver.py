@@ -19,7 +19,7 @@ STOPPED_WIRE_STATES = {
     "TASK_STATE_INPUT_REQUIRED",
     "TASK_STATE_AUTH_REQUIRED",
 }
-PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 60 seconds."
+PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
 PROGRESS_UPDATE_RE = re.compile(
     r"^I'm working through the requested calculation\. \((\d+)s elapsed\)$"
 )
@@ -65,6 +65,17 @@ def _wire_history_messages(task: Any) -> list[str]:
         _parts_text(message.get("parts", []))
         for message in task.raw.get("history", [])
         if isinstance(message, dict)
+    ]
+
+
+def _wire_worker_messages(task: Any) -> list[str]:
+    return [
+        _parts_text(message.get("parts", []))
+        for message in task.raw.get("history", [])
+        if (
+            isinstance(message, dict)
+            and str(message.get("role", "")).lower() in {"agent", "role_agent"}
+        )
     ]
 
 
@@ -257,7 +268,7 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
         "Add 2 + 2. Wait for one minute. Then add 3 + 3. Wait for another "
         "minute. Finally add the two results together and return the final "
         f"total. Do not finish before both waits elapse. Include `{completion}` "
-        "and the total `10` in the final answer.",
+        "and the exact expression `4 + 6 = 10` in the final answer.",
     )
     try:
         _, receipt = _wait_for_history_message(
@@ -301,7 +312,10 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
         receipt_index = history.index(receipt)
         if not receipt_index < progress[0][0] < progress[1][0]:
             raise AssertionError("A2A acknowledgement and progress updates are out of order")
-        final_text = "\n".join(history)
+        worker_messages = _wire_worker_messages(final)
+        if not worker_messages:
+            raise AssertionError("Long-running A2A task returned no worker message")
+        final_text = worker_messages[-1]
         if completion not in final_text or "4 + 6 = 10" not in final_text:
             raise AssertionError("Long-running A2A task returned the wrong result")
     finally:

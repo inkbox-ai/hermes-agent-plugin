@@ -182,7 +182,7 @@ INKBOX_HOME_CHANNEL=contact-or-phone
 INKBOX_ALLOWED_USERS=contact-or-phone,another-contact
 INKBOX_REQUIRE_SIGNATURE=true
 INKBOX_CONTACT_MEMORIES_ENABLED=true
-INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=60
+INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=180
 ```
 
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
@@ -376,7 +376,7 @@ After the gateway starts:
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
 | `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
-| `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS` | no | `60` | Seconds between progress updates for an active inbound A2A task. Set to `0` to disable periodic updates. `platforms.inkbox.a2a_progress_interval_seconds` takes precedence. |
+| `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS` | no | `180` | Seconds between progress updates for an active inbound A2A task. Set to `0` to disable periodic updates. `platforms.inkbox.a2a_progress_interval_seconds` takes precedence. |
 | `INKBOX_VOICE_STACK` | no | legacy migration | Phone call stack: `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
 | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Voice AI | `contact_scoped` | Voice AI tool authority: `contact_scoped` or `yolo`. |
 | `INKBOX_VOICEMAIL_DETECTION` | no | `enabled` | Outbound call voicemail detection: `enabled` or `disabled`. Live CI sets `disabled`; ordinary calls keep `enabled`. |
@@ -460,8 +460,8 @@ Hermes direct tools:
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
 After durable binding, the plugin immediately sends a non-terminal receipt that
-states the configured progress cadence, then sends a concise update every 60
-seconds while the worker turn remains active.
+states the configured progress cadence, then sends a concise update every three
+minutes by default while the worker turn remains active.
 Periodic summaries use the task text and sanitized activity categories; raw tool
 inputs, tool results, and model reasoning are excluded. Configure the interval
 under `platforms.inkbox.a2a_progress_interval_seconds`, or set it to `0` to

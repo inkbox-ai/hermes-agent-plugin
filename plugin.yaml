@@ -67,7 +67,7 @@ optional_env:
     prompt: "Enable contact memories"
     secret: false
   - name: INKBOX_A2A_PROGRESS_INTERVAL_SECONDS
-    description: "Seconds between progress updates for active inbound A2A tasks. Defaults to 60; set to 0 to disable."
+    description: "Seconds between progress updates for active inbound A2A tasks. Defaults to 180; set to 0 to disable."
     prompt: "A2A progress interval"
     secret: false
   - name: INKBOX_REALTIME_MODEL

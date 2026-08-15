@@ -64,16 +64,16 @@ def test_contact_memories_platform_config_overrides_environment(monkeypatch):
     assert read_config().contact_memories_enabled is True
 
 
-def test_a2a_progress_interval_defaults_to_sixty_seconds(monkeypatch):
+def test_a2a_progress_interval_defaults_to_three_minutes(monkeypatch):
     monkeypatch.delenv("INKBOX_A2A_PROGRESS_INTERVAL_SECONDS", raising=False)
 
-    assert _A2A_PROGRESS_INTERVAL_SECONDS == 60.0
+    assert _A2A_PROGRESS_INTERVAL_SECONDS == 180.0
     assert _float_setting(
         {},
         "a2a_progress_interval_seconds",
         "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS",
         _A2A_PROGRESS_INTERVAL_SECONDS,
-    ) == 60.0
+    ) == 180.0
 
 
 def test_a2a_progress_interval_supports_config_and_disable(monkeypatch):

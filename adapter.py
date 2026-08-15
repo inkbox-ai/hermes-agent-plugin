@@ -659,7 +659,7 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
     "a2a.task.canceled",
 )
 _A2A_RECEIPT_TEMPLATE = "Task {task_id} received. Work is queued and starting."
-_A2A_PROGRESS_INTERVAL_SECONDS = 60.0
+_A2A_PROGRESS_INTERVAL_SECONDS = 180.0
 _A2A_SETTLED_SERVER_STATES = frozenset({
     "completed",
     "failed",
@@ -698,8 +698,13 @@ def _a2a_receipt_text(task_id: str, progress_interval_seconds: float) -> str:
     receipt = _A2A_RECEIPT_TEMPLATE.format(task_id=task_id)
     if progress_interval_seconds <= 0:
         return f"{receipt} Periodic progress updates are disabled."
-    interval = f"{progress_interval_seconds:g}"
-    unit = "second" if progress_interval_seconds == 1 else "seconds"
+    minutes = progress_interval_seconds / 60
+    if progress_interval_seconds >= 60 and minutes.is_integer():
+        interval = f"{minutes:g}"
+        unit = "minute" if minutes == 1 else "minutes"
+    else:
+        interval = f"{progress_interval_seconds:g}"
+        unit = "second" if progress_interval_seconds == 1 else "seconds"
     return f"{receipt} Expect progress updates about every {interval} {unit}."
 
 
