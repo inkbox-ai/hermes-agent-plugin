@@ -20,11 +20,14 @@ STOPPED_WIRE_STATES = {
     "TASK_STATE_AUTH_REQUIRED",
 }
 PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
-PROGRESS_UPDATE_RE = re.compile(r"^.+ \((\d+)s elapsed\)$")
+PROGRESS_UPDATE_RE = re.compile(r"^(.+) \((\d+)s elapsed\)$")
 GENERIC_PROGRESS_FALLBACK = "I'm continuing the requested work."
 TERMINAL_PROGRESS_RE = re.compile(
-    r"\b(?:done|complete|completed|finished|failed|failure|blocked|cannot complete|"
-    r"need(?:ed|s)? (?:your )?input|waiting for (?:you|input))\b",
+    r"\b(?:done|complete|completed|finished|failed|failure|blocked|solved|"
+    r"finalized|ready|succeed(?:ed|s|ing)?|successful(?:ly)?|resolved|"
+    r"final\s+(?:answer|result)|cannot\s+(?:complete|continue)|"
+    r"need(?:ed|s)?\s+(?:your\s+)?input|"
+    r"waiting\s+(?:for\s+)?(?:your\s+)?input|waiting\s+for\s+you)\b",
     re.IGNORECASE,
 )
 
@@ -297,24 +300,24 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             timeout=timeout,
         )
         history = _wire_history_messages(final)
-        progress = [
-            (index, text, match)
-            for index, text in enumerate(history)
-            if (match := PROGRESS_UPDATE_RE.fullmatch(text)) is not None
-        ]
+        progress = []
+        for index, text in enumerate(history):
+            match = PROGRESS_UPDATE_RE.fullmatch(text)
+            if match is None:
+                continue
+            summary = match.group(1).strip()
+            if not summary:
+                raise AssertionError("A periodic progress update had an empty summary")
+            if TERMINAL_PROGRESS_RE.search(summary):
+                raise AssertionError("A periodic progress update claimed a terminal state")
+            if summary == GENERIC_PROGRESS_FALLBACK:
+                raise AssertionError("The auxiliary progress writer used its generic fallback")
+            progress.append((index, int(match.group(2))))
         if len(progress) < 2:
             raise AssertionError(
                 f"Expected at least two periodic progress updates, got {len(progress)}"
             )
-        if any(TERMINAL_PROGRESS_RE.search(text) for _, text, _ in progress):
-            raise AssertionError("A periodic progress message claimed terminal state")
-        if any(
-            text.removesuffix(f" ({match.group(1)}s elapsed)")
-            == GENERIC_PROGRESS_FALLBACK
-            for _, text, match in progress
-        ):
-            raise AssertionError("The auxiliary progress writer used its generic fallback")
-        elapsed = [int(match.group(1)) for _, _, match in progress]
+        elapsed = [seconds for _, seconds in progress]
         first_interval = elapsed[0]
         second_interval = elapsed[1] - elapsed[0]
         if not (50 <= first_interval <= 90 and 50 <= second_interval <= 90):

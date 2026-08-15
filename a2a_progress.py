@@ -23,7 +23,10 @@ _MAX_TOOL_NAMES = 8
 _MAX_TOOL_NAME_CHARS = 80
 _TERMINAL_CLAIM_RE = re.compile(
     r"\b(?:done|complete|completed|finished|failed|failure|blocked|"
-    r"need(?:ed|s)?\s+(?:your\s+)?input|waiting\s+for\s+you)\b",
+    r"solved|finalized|ready|succeed(?:ed|s|ing)?|successful(?:ly)?|resolved|"
+    r"final\s+(?:answer|result)|cannot\s+(?:complete|continue)|"
+    r"need(?:ed|s)?\s+(?:your\s+)?input|"
+    r"waiting\s+(?:for\s+)?(?:your\s+)?input|waiting\s+for\s+you)\b",
     re.IGNORECASE,
 )
 

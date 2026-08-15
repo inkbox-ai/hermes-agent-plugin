@@ -445,10 +445,18 @@ def test_a2a_progress_summary_uses_auxiliary_task_and_safe_tool_names():
     }
 
 
-def test_a2a_progress_summary_rejects_terminal_claim():
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Done — the task is complete.",
+        "The final result is ready.",
+        "I am waiting for your input.",
+    ],
+)
+def test_a2a_progress_summary_rejects_terminal_claim(claim):
     class Llm:
         async def acomplete(self, _messages, **_kwargs):
-            return types.SimpleNamespace(text="Done — the task is complete.")
+            return types.SimpleNamespace(text=claim)
 
     update = asyncio.run(progress_mod.build_a2a_progress_update(
         Llm(),
