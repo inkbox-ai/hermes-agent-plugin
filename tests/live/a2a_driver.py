@@ -20,8 +20,12 @@ STOPPED_WIRE_STATES = {
     "TASK_STATE_AUTH_REQUIRED",
 }
 PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
-PROGRESS_UPDATE_RE = re.compile(
-    r"^I'm working through the requested calculation\. \((\d+)s elapsed\)$"
+PROGRESS_UPDATE_RE = re.compile(r"^.+ \((\d+)s elapsed\)$")
+GENERIC_PROGRESS_FALLBACK = "I'm continuing the requested work."
+TERMINAL_PROGRESS_RE = re.compile(
+    r"\b(?:done|complete|completed|finished|failed|failure|blocked|cannot complete|"
+    r"need(?:ed|s)? (?:your )?input|waiting for (?:you|input))\b",
+    re.IGNORECASE,
 )
 
 
@@ -294,7 +298,7 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
         )
         history = _wire_history_messages(final)
         progress = [
-            (index, match)
+            (index, text, match)
             for index, text in enumerate(history)
             if (match := PROGRESS_UPDATE_RE.fullmatch(text)) is not None
         ]
@@ -302,7 +306,15 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             raise AssertionError(
                 f"Expected at least two periodic progress updates, got {len(progress)}"
             )
-        elapsed = [int(match.group(1)) for _, match in progress]
+        if any(TERMINAL_PROGRESS_RE.search(text) for _, text, _ in progress):
+            raise AssertionError("A periodic progress message claimed terminal state")
+        if any(
+            text.removesuffix(f" ({match.group(1)}s elapsed)")
+            == GENERIC_PROGRESS_FALLBACK
+            for _, text, match in progress
+        ):
+            raise AssertionError("The auxiliary progress writer used its generic fallback")
+        elapsed = [int(match.group(1)) for _, _, match in progress]
         first_interval = elapsed[0]
         second_interval = elapsed[1] - elapsed[0]
         if not (50 <= first_interval <= 90 and 50 <= second_interval <= 90):
