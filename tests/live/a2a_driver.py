@@ -23,8 +23,7 @@ PROGRESS_RECEIPT_SUFFIX = "Expect progress updates about every 1 minute."
 PROGRESS_UPDATE_RE = re.compile(r"^(.+) \((\d+)s elapsed\)$")
 GENERIC_PROGRESS_FALLBACK = "I'm continuing the requested work."
 TERMINAL_PROGRESS_RE = re.compile(
-    r"\b(?:done|complete|completed|finished|failed|failure|blocked|solved|"
-    r"finalized|ready|succeed(?:ed|s|ing)?|successful(?:ly)?|resolved|"
+    r"\b(?:done|complete|completed|finished|failed|failure|blocked|"
     r"final\s+(?:answer|result)|cannot\s+(?:complete|continue)|"
     r"need(?:ed|s)?\s+(?:your\s+)?input|"
     r"waiting\s+(?:for\s+)?(?:your\s+)?input|waiting\s+for\s+you)\b",

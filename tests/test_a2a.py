@@ -481,6 +481,13 @@ def test_a2a_progress_summary_rejects_echoed_tool_identifier():
     assert update == "I'm continuing the requested work."
 
 
+def test_a2a_progress_summary_keeps_nonterminal_intermediate_status():
+    assert progress_mod._clean_update(
+        "The first calculation is ready, and I'm continuing with the second.",
+        [],
+    ) == "The first calculation is ready, and I'm continuing with the second."
+
+
 def test_a2a_progress_normalizes_tool_names_without_classifying_them():
     assert progress_mod._safe_tool_name(" List Directory Users ") == "list_directory_users"
     assert progress_mod._safe_tool_name("run/sql query\n") == "run_sql_query"
