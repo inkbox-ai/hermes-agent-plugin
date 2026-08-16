@@ -25,12 +25,14 @@ def _load_entry_module():
 
 class DummyContext:
     def __init__(self):
+        self.llm = object()
         self.platforms = []
         self.tools = []
         self.cli_commands = []
         self.commands = []
         self.skills = []
         self.hooks = []
+        self.auxiliary_tasks = []
 
     def register_platform(self, **kwargs):
         self.platforms.append(kwargs)
@@ -49,6 +51,9 @@ class DummyContext:
 
     def register_hook(self, *args, **kwargs):
         self.hooks.append((args, kwargs))
+
+    def register_auxiliary_task(self, **kwargs):
+        self.auxiliary_tasks.append(kwargs)
 
 
 def _manifest_provides_tools() -> set[str]:
@@ -89,6 +94,16 @@ def test_yaml_voice_config_is_forwarded():
     }
 
 
+def test_yaml_a2a_progress_interval_is_forwarded():
+    module = _load_entry_module()
+
+    assert module._apply_yaml_config({}, {
+        "a2aProgressIntervalSeconds": 90,
+    }) == {
+        "a2a_progress_interval_seconds": 90,
+    }
+
+
 def test_registers_inkbox_platform_tools_commands_and_skills():
     entry = _load_entry_module()
     ctx = DummyContext()
@@ -102,6 +117,24 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert callable(platform["setup_fn"])
     assert callable(platform["standalone_sender_fn"])
     assert platform["required_env"] == ["INKBOX_API_KEY", "INKBOX_IDENTITY"]
+    captured = {}
+
+    def fake_adapter(config, **kwargs):
+        captured.update({"config": config, **kwargs})
+        return "adapter"
+
+    entry.InkboxAdapter = fake_adapter
+    assert platform["adapter_factory"]("platform-config") == "adapter"
+    assert captured == {
+        "config": "platform-config",
+        "progress_llm": ctx.llm,
+    }
+    assert ctx.auxiliary_tasks == [{
+        "key": "inkbox_a2a_progress",
+        "display_name": "Inkbox A2A progress",
+        "description": "Concise progress updates for active inbound A2A tasks",
+        "defaults": {"provider": "auto", "timeout": 10},
+    }]
 
     tool_names = {args[0] for args, _kwargs in ctx.tools}
     assert tool_names == {
@@ -146,7 +179,8 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert {args[0] for args, _kwargs in ctx.skills}
     assert ctx.hooks[0][0][0] == "pre_llm_call"
     assert ctx.hooks[1][0][0] == "pre_tool_call"
-    assert ctx.hooks[2][0][0] == "post_tool_call"
+    assert ctx.hooks[2][0][0] == "pre_tool_call"
+    assert ctx.hooks[3][0][0] == "post_tool_call"
 
 
 def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):

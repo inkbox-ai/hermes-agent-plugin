@@ -52,6 +52,17 @@ def test_register_platform_accepts_our_call():
     )
 
 
+def test_plugin_context_supports_a2a_progress_llm():
+    from hermes_cli.plugins import PluginContext
+
+    assert isinstance(getattr(PluginContext, "llm", None), property)
+    params = inspect.signature(PluginContext.register_auxiliary_task).parameters
+    for required in ("key", "display_name", "description", "defaults"):
+        assert required in params, (
+            f"register_auxiliary_task dropped '{required}' — A2A progress routing would drift"
+        )
+
+
 def test_message_event_accepts_plugin_fields():
     """Every field the plugin sets on an inbound MessageEvent (adapter.py)."""
     from gateway.platforms.base import MessageEvent, MessageType

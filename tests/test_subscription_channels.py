@@ -121,6 +121,34 @@ def test_reconcile_keeps_one_row_per_channel_and_receiver():
     assert any(row.id == "sub-imessage" for row in subscriptions.rows)
 
 
+def test_reconcile_adopts_a2a_superset_before_removing_legacy_duplicate():
+    base = "https://agent.example/webhook"
+    legacy_a2a = SimpleNamespace(
+        id="sub-a2a-legacy",
+        url=f"{base}?channel=a2a",
+        event_types=[
+            "a2a.task.created",
+            "a2a.task.message",
+            "a2a.task.canceled",
+        ],
+    )
+    provisioned_a2a = SimpleNamespace(
+        id="sub-a2a-provisioned",
+        url=base,
+        event_types=[
+            *adapter._DESIRED_A2A_EVENTS,
+            "a2a.sent_task.updated",
+        ],
+    )
+    client, subscriptions = _client([legacy_a2a, provisioned_a2a])
+
+    active_id = _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
+
+    assert active_id == "sub-a2a-provisioned"
+    assert subscriptions.deleted == ["sub-a2a-legacy"]
+    assert subscriptions.rows == [provisioned_a2a]
+
+
 def _patchable_adapter(monkeypatch, voice_stack):
     incoming_updates = []
     identity = SimpleNamespace(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +178,94 @@ def test_inbound_a2a_sequences(monkeypatch) -> None:
     assert response["name"] == "inkbox_a2a_complete"
     assert "a2a-ci-inbound-multi-012345abcdef" in response["arguments"]["text"]
     assert "a2a-ci-answer-012345abcdef" in response["arguments"]["text"]
+
+
+def test_inbound_progress_sequence_waits_twice_and_returns_total(monkeypatch) -> None:
+    sleeps = []
+    monkeypatch.setattr(mock.time, "sleep", sleeps.append)
+    req = _request(
+        "Add two pairs of numbers and return "
+        "`a2a-ci-inbound-progress-012345abcdef`."
+    )
+
+    response = mock._a2a_response(req, "inbound-progress")
+
+    assert sleeps == [60.0, 60.0, 5.0]
+    assert response == {
+        "name": "inkbox_a2a_complete",
+        "arguments": {
+            "text": (
+                "2 + 2 = 4; 3 + 3 = 6; 4 + 6 = 10. "
+                "a2a-ci-inbound-progress-012345abcdef"
+            ),
+        },
+    }
+
+
+def test_inbound_progress_stream_waits_emit_five_second_heartbeats(monkeypatch) -> None:
+    sleeps = []
+    heartbeats = []
+    monkeypatch.setattr(mock.time, "sleep", sleeps.append)
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_WAIT_SECONDS", "12")
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "1")
+
+    mock._wait_for_progress_result(lambda: heartbeats.append(True))
+
+    assert sleeps == [5.0, 5.0, 2.0, 5.0, 5.0, 2.0, 1.0]
+    assert len(heartbeats) == len(sleeps)
+
+
+def test_inbound_progress_auxiliary_summary_does_not_block(monkeypatch) -> None:
+    monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-progress")
+    req = _request("Write one concise progress update for the requester.")
+
+    response = mock._model_response(req)
+
+    assert response == {"text": mock._A2A_PROGRESS_SUMMARY}
+
+
+def test_inbound_progress_stream_opens_before_delayed_completion(monkeypatch) -> None:
+    monkeypatch.setenv("MOCK_A2A_SCENARIO", "inbound-progress")
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_WAIT_SECONDS", "0.01")
+    monkeypatch.setenv("MOCK_A2A_PROGRESS_FINALIZATION_GRACE_SECONDS", "0")
+    server = mock.ThreadingHTTPServer(("127.0.0.1", 0), mock.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body = json.dumps({
+            "model": "mock-model",
+            "stream": True,
+            "input": [{
+                "role": "user",
+                "content": "Return a2a-ci-inbound-progress-012345abcdef.",
+            }],
+            "tools": [{
+                "type": "function",
+                "name": "inkbox_a2a_complete",
+                "parameters": {"type": "object"},
+            }],
+        }).encode()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/v1/responses",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            stream = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert stream.index("event: response.created") < stream.index(
+        "event: response.output_item.done"
+    )
+    assert stream.count("event: response.in_progress") == 2
+    assert stream.index("event: response.output_item.done") < stream.index(
+        "event: response.completed"
+    )
+    assert "a2a-ci-inbound-progress-012345abcdef" in stream
+    assert "4 + 6 = 10" in stream
 
 
 def test_outbound_single_a2a_sequence() -> None:

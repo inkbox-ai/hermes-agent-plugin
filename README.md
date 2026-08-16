@@ -182,6 +182,7 @@ INKBOX_HOME_CHANNEL=contact-or-phone
 INKBOX_ALLOWED_USERS=contact-or-phone,another-contact
 INKBOX_REQUIRE_SIGNATURE=true
 INKBOX_CONTACT_MEMORIES_ENABLED=true
+INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=180
 ```
 
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
@@ -375,6 +376,7 @@ After the gateway starts:
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
 | `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
+| `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS` | no | `180` | Seconds between progress updates for an active inbound A2A task. Set to `0` to disable periodic updates. `platforms.inkbox.a2a_progress_interval_seconds` takes precedence. |
 | `INKBOX_VOICE_STACK` | no | legacy migration | Phone call stack: `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
 | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Voice AI | `contact_scoped` | Voice AI tool authority: `contact_scoped` or `yolo`. |
 | `INKBOX_VOICEMAIL_DETECTION` | no | `enabled` | Outbound call voicemail detection: `enabled` or `disabled`. Live CI sets `disabled`; ordinary calls keep `enabled`. |
@@ -457,17 +459,26 @@ Hermes direct tools:
 - `inkbox_delete_contact`
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
-After durable binding and queueing, the plugin sends a non-terminal progress
-receipt; generic assistant text never completes the task. The three A2A outcome
-tools are accepted only during a verified inbound A2A turn and are the only way
-to complete, fail, or request input for that task. `hermes inkbox doctor` reports
-the A2A subscription, recent delivery result, and bounded local dispatch phases
-without including task content or webhook response bodies. Outbound delegation
-tools can create tasks, wait for worker state changes, and answer requests for
-more input. The history tools support direction, participant, lifecycle,
-context, keyword, timestamp, and cursor filters. The sent-task tools remain
-available as outbound-only compatibility aliases. The plugin requires Inkbox
-SDK 0.5.9 or newer.
+After durable binding, the plugin immediately sends a non-terminal receipt that
+states the configured progress cadence, then sends a concise update every three
+minutes by default while the worker turn remains active.
+Periodic summaries use the task text and sanitized activity categories; raw tool
+inputs, tool results, and model reasoning are excluded. Configure the interval
+under `platforms.inkbox.a2a_progress_interval_seconds`, or set it to `0` to
+disable periodic updates. Hermes exposes the summarizer as the
+`inkbox_a2a_progress` auxiliary model task; if the auxiliary call is unavailable,
+the plugin sends a deterministic update instead.
+
+Generic assistant text never completes the task. The three A2A outcome tools are
+accepted only during a verified inbound A2A turn and are the only way to complete,
+fail, or request input for that task. `hermes inkbox doctor` reports the A2A
+subscription, recent delivery result, and bounded local dispatch phases without
+including task content or webhook response bodies. Outbound delegation tools can
+create tasks, wait for worker state changes, and answer requests for more input.
+The history tools support direction, participant, lifecycle, context, keyword,
+timestamp, and cursor filters. The sent-task tools remain available as
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.5.9 or
+newer.
 
 Realtime-only call tools:
 

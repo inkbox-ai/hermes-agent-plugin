@@ -9,6 +9,10 @@ from typing import Any
 
 try:
     from .a2a_context import activate_next_a2a_turn_context
+    from .a2a_progress import (
+        A2A_PROGRESS_AUXILIARY_TASK,
+        observe_a2a_tool_start,
+    )
     from .hosted_call_context import (
         activate_next_hosted_turn_context,
         observe_hosted_tool_start,
@@ -52,6 +56,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     activate_next_a2a_turn_context = importlib.import_module(
         f"{_LOCAL_PACKAGE}.a2a_context"
     ).activate_next_a2a_turn_context
+    _a2a_progress = importlib.import_module(f"{_LOCAL_PACKAGE}.a2a_progress")
+    A2A_PROGRESS_AUXILIARY_TASK = _a2a_progress.A2A_PROGRESS_AUXILIARY_TASK
+    observe_a2a_tool_start = _a2a_progress.observe_a2a_tool_start
     _hosted_context = importlib.import_module(
         f"{_LOCAL_PACKAGE}.hosted_call_context"
     )
@@ -168,6 +175,8 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "voicemailDetection": "voicemail_detection",
         "sms_text_batch_delay_seconds": "sms_text_batch_delay_seconds",
         "smsTextBatchDelaySeconds": "sms_text_batch_delay_seconds",
+        "a2a_progress_interval_seconds": "a2a_progress_interval_seconds",
+        "a2aProgressIntervalSeconds": "a2a_progress_interval_seconds",
     }
     for source, target in mapping.items():
         if source in platform_cfg and target not in extra:
@@ -206,10 +215,22 @@ def _register_skills(ctx) -> None:
 
 def register(ctx) -> None:
     """Plugin entry point called by Hermes."""
+    progress_llm = getattr(ctx, "llm", None)
+    register_auxiliary_task = getattr(ctx, "register_auxiliary_task", None)
+    if callable(register_auxiliary_task):
+        register_auxiliary_task(
+            key=A2A_PROGRESS_AUXILIARY_TASK,
+            display_name="Inkbox A2A progress",
+            description="Concise progress updates for active inbound A2A tasks",
+            defaults={"provider": "auto", "timeout": 10},
+        )
     ctx.register_platform(
         name="inkbox",
         label="Inkbox",
-        adapter_factory=lambda cfg: InkboxAdapter(cfg),
+        adapter_factory=lambda cfg: InkboxAdapter(
+            cfg,
+            progress_llm=progress_llm,
+        ),
         check_fn=check_inkbox_requirements,
         validate_config=_validate_config,
         is_connected=_is_connected,
@@ -243,6 +264,7 @@ def register(ctx) -> None:
 
     ctx.register_hook("pre_llm_call", _activate_trusted_turn_contexts)
     ctx.register_hook("pre_tool_call", observe_hosted_tool_start)
+    ctx.register_hook("pre_tool_call", observe_a2a_tool_start)
     ctx.register_hook("post_tool_call", observe_hosted_tool_call)
     ctx.register_cli_command(
         name="inkbox",

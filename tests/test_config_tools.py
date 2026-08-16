@@ -14,7 +14,11 @@ from inkbox_plugin.config import (
     public_call_ws_url,
     read_config,
 )
-from inkbox_plugin.adapter import _bool_setting
+from inkbox_plugin.adapter import (
+    _A2A_PROGRESS_INTERVAL_SECONDS,
+    _bool_setting,
+    _float_setting,
+)
 from inkbox_plugin.tools import _append_query_param
 
 
@@ -58,6 +62,35 @@ def test_contact_memories_platform_config_overrides_environment(monkeypatch):
         True,
     ) is False
     assert read_config().contact_memories_enabled is True
+
+
+def test_a2a_progress_interval_defaults_to_three_minutes(monkeypatch):
+    monkeypatch.delenv("INKBOX_A2A_PROGRESS_INTERVAL_SECONDS", raising=False)
+
+    assert _A2A_PROGRESS_INTERVAL_SECONDS == 180.0
+    assert _float_setting(
+        {},
+        "a2a_progress_interval_seconds",
+        "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS",
+        _A2A_PROGRESS_INTERVAL_SECONDS,
+    ) == 180.0
+
+
+def test_a2a_progress_interval_supports_config_and_disable(monkeypatch):
+    monkeypatch.setenv("INKBOX_A2A_PROGRESS_INTERVAL_SECONDS", "90")
+
+    assert _float_setting(
+        {},
+        "a2a_progress_interval_seconds",
+        "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS",
+        _A2A_PROGRESS_INTERVAL_SECONDS,
+    ) == 90.0
+    assert _float_setting(
+        {"a2a_progress_interval_seconds": 0},
+        "a2a_progress_interval_seconds",
+        "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS",
+        _A2A_PROGRESS_INTERVAL_SECONDS,
+    ) == 0.0
 
 
 def test_voice_stack_preserves_legacy_realtime_auto_detection(monkeypatch):

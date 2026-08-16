@@ -1,9 +1,9 @@
 name: Live — Agent2Agent
 
-# Four real protocol legs cover both roles and conversation lengths:
-# inbound/outbound × single-turn/multi-turn. The plugin and remote identities
-# are preconfigured to allow one another in both directions. A local model
-# fixture chooses tools deterministically while the protocol remains live.
+# Five real protocol scenarios cover both roles, conversation lengths, and a
+# long-running worker turn. The plugin and remote identities are preconfigured
+# to allow one another in both directions. A local model fixture chooses tools
+# deterministically while the protocol remains live.
 on:
   workflow_call:
     inputs:
@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        scenario: ${{ fromJSON(inputs.scenario != '' && format('["{0}"]', inputs.scenario) || '["inbound-single","inbound-multi","outbound-single","outbound-multi"]') }}
+        scenario: ${{ fromJSON(inputs.scenario != '' && format('["{0}"]', inputs.scenario) || '["inbound-single","inbound-multi","outbound-single","outbound-multi","inbound-progress"]') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -106,6 +106,7 @@ jobs:
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
             echo "INKBOX_VOICEMAIL_DETECTION=disabled"
+            echo "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=60"
             echo "OPENAI_API_KEY=sk-mock-not-used"
             echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
           } >> "$HERMES_HOME/.env"
@@ -145,7 +146,7 @@ jobs:
       - name: Run ${{ matrix.scenario }}
         env:
           A2A_SCENARIO: ${{ matrix.scenario }}
-          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '90' }}
+          A2A_TIMEOUT_S: ${{ matrix.scenario == 'inbound-progress' && '210' || (inputs.timeout_s || '90') }}
           AUT_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |
