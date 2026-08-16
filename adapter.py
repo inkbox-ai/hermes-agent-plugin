@@ -4892,6 +4892,8 @@ class InkboxAdapter(BasePlatformAdapter):
     ) -> "web.Response":
         event_type = str(envelope.get("event_type") or "")
         data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        if self._a2a_closing:
+            return web.Response(status=503, text="a2a adapter is stopping")
         task_id = str(data.get("task_id") or "")
         context_id = str(data.get("context_id") or "")
         message_id = str(data.get("message_id") or envelope.get("id") or "")
@@ -4973,8 +4975,6 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
 
-        if self._a2a_closing:
-            return web.Response(status=503, text="a2a adapter is stopping")
         if event_type not in {"a2a.task.created", "a2a.task.message"}:
             return web.Response(status=200, text="ignored")
 
@@ -5440,9 +5440,20 @@ class InkboxAdapter(BasePlatformAdapter):
                     "event_type": "a2a.task.created",
                     "data": dict(data),
                 })
-            tasks = await asyncio.to_thread(
-                lambda: list(identity.iter_a2a_tasks(state="submitted"))
-            )
+            tasks = []
+            discovered_task_ids = set()
+            for task_state in ("submitted", "working"):
+                discovered = await asyncio.to_thread(
+                    lambda state=task_state: list(
+                        identity.iter_a2a_tasks(state=state)
+                    )
+                )
+                for task in discovered:
+                    task_id = str(_field(task, "id") or "")
+                    if not task_id or task_id in discovered_task_ids:
+                        continue
+                    discovered_task_ids.add(task_id)
+                    tasks.append(task)
             for task in tasks:
                 full = await asyncio.to_thread(identity.a2a_task, task.id)
                 message = self._latest_a2a_caller_message(full)

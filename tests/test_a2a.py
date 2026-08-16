@@ -603,6 +603,28 @@ def test_a2a_restart_rejects_delayed_canceled_message_and_uses_authoritative_par
     assert "spoofed" not in adapter._enqueued[0].text
 
 
+def test_a2a_closing_rejects_cancellation_and_sent_update(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_closing = True
+    canceled = _event("evt-cancel", "a2a.task.canceled")
+    sent_update = _event("evt-sent", "a2a.sent_task.updated")
+    sent_update["data"]["state"] = "completed"
+
+    async def scenario():
+        return (
+            await adapter._on_a2a_event(canceled),
+            await adapter._on_a2a_event(sent_update),
+        )
+
+    responses = asyncio.run(scenario())
+
+    assert [response.status for response in responses] == [503, 503]
+    assert all(response.text == "a2a adapter is stopping" for response in responses)
+    assert adapter._a2a_canceled_messages == {}
+    assert adapter._a2a_receipts == []
+    assert adapter._enqueued == []
+
+
 def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
     adapter = _adapter(tmp_path)
 
@@ -1727,7 +1749,9 @@ def test_a2a_restart_does_not_enqueue_outcome_fenced_message(
     identity = types.SimpleNamespace(
         a2a_task=lambda _task_id: task,
         a2a_reply=lambda *_args, **_kwargs: None,
-        iter_a2a_tasks=lambda **_kwargs: iter((task,)),
+        iter_a2a_tasks=lambda *, state: (
+            iter((task,)) if state == "working" else iter(())
+        ),
     )
     adapter._inkbox = types.SimpleNamespace(
         get_identity=lambda _handle: identity,
@@ -2102,7 +2126,9 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     identity = types.SimpleNamespace(
         a2a_task=lambda _task_id: task,
         a2a_reply=lambda *_args, **_kwargs: None,
-        iter_a2a_tasks=lambda **_kwargs: iter((task,)),
+        iter_a2a_tasks=lambda *, state: (
+            iter((task,)) if state == "working" else iter(())
+        ),
     )
     adapter._inkbox = types.SimpleNamespace(
         get_identity=lambda _handle: identity,
@@ -2125,6 +2151,67 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     assert list(registry) == ["task-1:message-1"]
     assert registry["task-1:message-1"]["state"] == "enqueued"
     assert registry["task-1:message-1"]["attempt"] == 2
+
+
+def test_a2a_catch_up_discovers_current_working_message_after_stale_registry(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+    )
+    task = types.SimpleNamespace(
+        id="task-1",
+        context_id="context-1",
+        state="working",
+        caller=types.SimpleNamespace(
+            identity_id="current-caller",
+            organization_id="current-org",
+            handle="current-handle",
+        ),
+        messages=[types.SimpleNamespace(
+            message_id="message-2",
+            role="ROLE_CALLER",
+            parts=[{"text": "Current authoritative request."}],
+        )],
+    )
+    queried_states = []
+
+    def iter_tasks(*, state):
+        queried_states.append(state)
+        return iter((task,)) if state == "working" else iter(())
+
+    identity = types.SimpleNamespace(
+        a2a_task=lambda _task_id: task,
+        a2a_reply=lambda *_args, **_kwargs: None,
+        iter_a2a_tasks=iter_tasks,
+    )
+    adapter._inkbox = types.SimpleNamespace(get_identity=lambda _handle: identity)
+
+    async def inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", inline)
+
+    async def scenario():
+        await adapter._catch_up_a2a_tasks()
+        await adapter._catch_up_a2a_tasks()
+
+    asyncio.run(scenario())
+
+    assert queried_states == ["submitted", "working", "submitted", "working"]
+    assert [event.message_id for event in adapter._enqueued] == ["message-2"]
+    assert adapter._enqueued[0].text.endswith("Current authoritative request.")
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert "task-1:message-1" in registry
+    assert registry["task-1:message-2"]["data"]["caller"] == {
+        "identity_id": "current-caller",
+        "organization_id": "current-org",
+        "handle": "current-handle",
+    }
 
 
 def test_a2a_catch_up_finalizes_auth_required_without_rerun(
@@ -2188,7 +2275,9 @@ def test_a2a_catch_up_new_task_selects_latest_caller_message(
     identity = types.SimpleNamespace(
         a2a_task=lambda _task_id: task,
         a2a_reply=lambda *_args, **_kwargs: None,
-        iter_a2a_tasks=lambda **_kwargs: iter((task,)),
+        iter_a2a_tasks=lambda *, state: (
+            iter((task,)) if state == "submitted" else iter(())
+        ),
     )
     adapter._inkbox = types.SimpleNamespace(get_identity=lambda _handle: identity)
 
