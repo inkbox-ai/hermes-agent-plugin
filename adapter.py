@@ -143,6 +143,7 @@ try:
         remove_queued_a2a_turn_context,
     )
     from .a2a_progress import (
+        a2a_progress_fence_owner,
         a2a_tool_snapshot,
         begin_a2a_progress_delivery,
         build_a2a_progress_update,
@@ -185,6 +186,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         remove_queued_a2a_turn_context,
     )
     from a2a_progress import (
+        a2a_progress_fence_owner,
         a2a_tool_snapshot,
         begin_a2a_progress_delivery,
         build_a2a_progress_update,
@@ -4889,6 +4891,13 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
 
+        if a2a_progress_fence_owner(task_id) == message_id:
+            logger.info(
+                "[Inkbox] Ignored replay of outcome-fenced A2A message %s",
+                message_id,
+            )
+            return web.Response(status=200, text="duplicate")
+
         key = f"{task_id}:{message_id}"
         existing = self._read_a2a_registry().get(key)
         is_resume = str(envelope.get("id") or "").startswith("resume:")
@@ -5244,6 +5253,9 @@ class InkboxAdapter(BasePlatformAdapter):
                     continue
                 task_id = str(entry.get("task_id") or "")
                 if not task_id:
+                    continue
+                message_id = str(entry.get("message_id") or "")
+                if a2a_progress_fence_owner(task_id) == message_id:
                     continue
                 full = await asyncio.to_thread(identity.a2a_task, task_id)
                 state = str(getattr(full.state, "value", full.state))

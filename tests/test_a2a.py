@@ -1416,6 +1416,62 @@ def test_a2a_same_key_restart_with_older_sibling_keeps_fence(
     assert adapter._a2a_receipts == []
 
 
+def test_a2a_restart_does_not_enqueue_outcome_fenced_message(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    data = _event()["data"]
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        data,
+        "running",
+    )
+    progress_mod.fence_a2a_progress_delivery("task-1", "message-1")
+    progress_mod._FENCED_TASKS.clear()
+    progress_mod._FENCE_OWNER_BY_TASK.clear()
+    task = types.SimpleNamespace(
+        id="task-1",
+        context_id="context-1",
+        state="working",
+        caller=types.SimpleNamespace(
+            identity_id="caller-1",
+            organization_id="org-1",
+            handle="caller",
+        ),
+        messages=[types.SimpleNamespace(
+            message_id="message-1",
+            role="ROLE_CALLER",
+            parts=[{"text": "Please investigate."}],
+        )],
+    )
+    identity = types.SimpleNamespace(
+        a2a_task=lambda _task_id: task,
+        a2a_reply=lambda *_args, **_kwargs: None,
+        iter_a2a_tasks=lambda **_kwargs: iter((task,)),
+    )
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: identity,
+    )
+
+    async def inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", inline)
+
+    async def scenario():
+        await adapter._catch_up_a2a_tasks()
+        await adapter._on_a2a_event(_event())
+        follow_up = _event("evt-2")
+        follow_up["data"]["message_id"] = "message-2"
+        await adapter._on_a2a_event(follow_up)
+
+    asyncio.run(scenario())
+
+    assert len(adapter._enqueued) == 1
+    assert adapter._enqueued[0].message_id == "message-2"
+
+
 def test_a2a_delegation_tools_send_check_wait_and_reply(monkeypatch):
     clients = []
 

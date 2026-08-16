@@ -74,7 +74,8 @@ def _fence_path(task_id: str) -> Path:
     return root / f"{digest}.fenced"
 
 
-def _durable_fence_owner(task_id: str) -> str:
+def a2a_progress_fence_owner(task_id: str) -> str:
+    """Return the caller message that owns a durable outcome fence."""
     try:
         return _fence_path(task_id).read_text().strip()
     except (FileNotFoundError, OSError):
@@ -94,7 +95,7 @@ def start_a2a_progress(
         _TOOL_NAMES_BY_TASK[task_id] = []
     if reset_fence:
         with _DELIVERY_CONDITION:
-            owner = _durable_fence_owner(task_id) or _FENCE_OWNER_BY_TASK.get(
+            owner = a2a_progress_fence_owner(task_id) or _FENCE_OWNER_BY_TASK.get(
                 task_id,
                 "",
             )
@@ -115,7 +116,7 @@ def stop_a2a_progress(task_id: str) -> None:
 def begin_a2a_progress_delivery(task_id: str) -> bool:
     """Enter one progress attempt unless an explicit outcome fenced the task."""
     with _DELIVERY_CONDITION:
-        if task_id in _FENCED_TASKS or _durable_fence_owner(task_id):
+        if task_id in _FENCED_TASKS or a2a_progress_fence_owner(task_id):
             return False
         _DELIVERIES_BY_TASK[task_id] = _DELIVERIES_BY_TASK.get(task_id, 0) + 1
         return True
