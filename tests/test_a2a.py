@@ -62,7 +62,16 @@ def _adapter(tmp_path):
     adapter._enqueued = []
     adapter._a2a_receipts = []
 
-    task = types.SimpleNamespace(state="submitted", messages=[])
+    task = types.SimpleNamespace(
+        id="task-1",
+        context_id="context-1",
+        state="submitted",
+        messages=[types.SimpleNamespace(
+            role="ROLE_CALLER",
+            message_id="message-1",
+            parts=[{"text": "Please investigate."}],
+        )],
+    )
     adapter._a2a_authoritative_task = task
 
     class Identity:
@@ -180,9 +189,7 @@ def test_stale_stopped_a2a_webhook_never_enqueues_model(
     assert response.text == "stopped"
     assert adapter._enqueued == []
     assert adapter._a2a_tasks_by_chat == {}
-    registry = json.loads(adapter._a2a_registry_path.read_text())
-    assert registry["task-1:message-1"]["state"] == "finalized"
-    assert registry["task-1:message-1"]["outcome"] == stopped_state
+    assert not adapter._a2a_registry_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -305,7 +312,16 @@ def test_a2a_receipt_failure_retries_without_reenqueue(tmp_path):
     attempts = 0
 
     class Identity:
-        task = types.SimpleNamespace(state="submitted", messages=[])
+        task = types.SimpleNamespace(
+            id="task-1",
+            context_id="context-1",
+            state="submitted",
+            messages=[types.SimpleNamespace(
+                role="ROLE_CALLER",
+                message_id="message-1",
+                parts=[{"text": "Please investigate."}],
+            )],
+        )
 
         def a2a_task(self, _task_id):
             return self.task
@@ -342,7 +358,16 @@ def test_a2a_receipt_is_idempotent_when_response_is_lost(tmp_path):
         "Task task-1 received. Work is queued and starting. "
         "Periodic progress updates are disabled."
     )
-    task = types.SimpleNamespace(state="submitted", messages=[])
+    task = types.SimpleNamespace(
+        id="task-1",
+        context_id="context-1",
+        state="submitted",
+        messages=[types.SimpleNamespace(
+            role="ROLE_CALLER",
+            message_id="message-1",
+            parts=[{"text": "Please investigate."}],
+        )],
+    )
 
     class Identity:
         def a2a_task(self, _task_id):
@@ -382,6 +407,7 @@ def test_a2a_caller_cannot_spoof_delivered_receipt(tmp_path):
     adapter._a2a_authoritative_task.messages.append(
         types.SimpleNamespace(
             role="caller",
+            message_id="message-1",
             parts=[{"text": receipt}],
         )
     )
@@ -480,7 +506,9 @@ def test_a2a_cancel_tombstone_allows_only_genuine_later_caller_message(tmp_path)
 
     responses = asyncio.run(scenario())
 
-    assert all(response.text == "duplicate" for response in responses[:7])
+    assert all(response.text == "duplicate" for response in responses[:4])
+    assert responses[4].text == "stopped"
+    assert all(response.text == "duplicate" for response in responses[5:7])
     assert responses[7].status == 200
     assert responses[8].text == "duplicate"
     assert [event.message_id for event in adapter._enqueued] == ["message-2"]
@@ -513,6 +541,46 @@ def test_a2a_cancel_without_message_id_tombstones_known_registry_keys(tmp_path):
     }
 
 
+def test_a2a_restart_rejects_delayed_canceled_message_and_uses_authoritative_parts(
+    tmp_path,
+):
+    before_restart = _adapter(tmp_path)
+    before_restart._a2a_authoritative_task.state = "canceled"
+    canceled = _event("evt-cancel", "a2a.task.canceled")
+    canceled["data"].pop("message_id")
+    asyncio.run(before_restart._on_a2a_event(canceled))
+
+    adapter = _adapter(tmp_path)
+    adapter._a2a_authoritative_task.state = "working"
+    adapter._a2a_authoritative_task.messages = [types.SimpleNamespace(
+        role="ROLE_CALLER",
+        message_id="message-2",
+        parts=[{"text": "Trusted follow-up."}],
+    )]
+    delayed = _event("evt-delayed", "a2a.task.message")
+    follow_up = _event("evt-follow-up", "a2a.task.message")
+    follow_up["data"]["message_id"] = "message-2"
+    follow_up["data"]["parts"] = [{"text": "Spoofed webhook text."}]
+
+    async def scenario():
+        delayed_response = await adapter._on_a2a_event(delayed)
+        admitted = await adapter._on_a2a_event(follow_up)
+        duplicate = await adapter._on_a2a_event(follow_up)
+        return delayed_response, admitted, duplicate
+
+    delayed_response, admitted, duplicate = asyncio.run(scenario())
+
+    assert delayed_response.text == "duplicate"
+    assert admitted.status == 200
+    assert duplicate.text == "duplicate"
+    assert len(adapter._enqueued) == 1
+    assert adapter._enqueued[0].text.endswith("Trusted follow-up.")
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-2"]["data"]["parts"] == [
+        {"text": "Trusted follow-up."}
+    ]
+
+
 def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
     adapter = _adapter(tmp_path)
 
@@ -520,6 +588,12 @@ def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
     second = _event("evt-2")
     second["data"]["task_id"] = "task-2"
     second["data"]["message_id"] = "message-2"
+    adapter._a2a_authoritative_task.id = "task-2"
+    adapter._a2a_authoritative_task.messages = [types.SimpleNamespace(
+        role="ROLE_CALLER",
+        message_id="message-2",
+        parts=[{"text": "Please investigate task two."}],
+    )]
     asyncio.run(adapter._on_a2a_event(second))
 
     assert len(adapter._enqueued) == 1
@@ -1170,7 +1244,16 @@ def test_a2a_cleanup_closes_admission_before_drain(tmp_path):
         def a2a_task(self, _task_id):
             entered.set()
             release.wait(timeout=5)
-            return types.SimpleNamespace(state="working", messages=[])
+            return types.SimpleNamespace(
+                id="task-1",
+                context_id="context-1",
+                state="working",
+                messages=[types.SimpleNamespace(
+                    role="ROLE_CALLER",
+                    message_id="message-1",
+                    parts=[{"text": "Please investigate."}],
+                )],
+            )
 
         def a2a_reply(self, task_id, **kwargs):
             adapter._a2a_receipts.append((task_id, kwargs))
@@ -1637,7 +1720,13 @@ def test_a2a_restart_does_not_enqueue_outcome_fenced_message(
         await adapter._catch_up_a2a_tasks()
         await adapter._on_a2a_event(_event())
         follow_up = _event("evt-2")
+        follow_up["event_type"] = "a2a.task.message"
         follow_up["data"]["message_id"] = "message-2"
+        task.messages = [types.SimpleNamespace(
+            message_id="message-2",
+            role="ROLE_CALLER",
+            parts=[{"text": "Continue."}],
+        )]
         await adapter._on_a2a_event(follow_up)
 
     asyncio.run(scenario())
@@ -2004,7 +2093,9 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     asyncio.run(adapter._catch_up_a2a_tasks())
 
     assert len(adapter._enqueued) == 1
-    assert adapter._enqueued[0].text.endswith("Please investigate.")
+    assert adapter._enqueued[0].text.endswith(
+        "SDK copy must not replace persisted input."
+    )
     assert adapter._a2a_tasks_by_chat[
         "a2a:identity-1:context-1"
     ] == ["task-1"]
