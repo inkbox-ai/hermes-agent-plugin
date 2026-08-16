@@ -144,7 +144,9 @@ try:
     )
     from .a2a_progress import (
         a2a_tool_snapshot,
+        begin_a2a_progress_delivery,
         build_a2a_progress_update,
+        end_a2a_progress_delivery,
         start_a2a_progress,
         stop_a2a_progress,
     )
@@ -184,7 +186,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     )
     from a2a_progress import (
         a2a_tool_snapshot,
+        begin_a2a_progress_delivery,
         build_a2a_progress_update,
+        end_a2a_progress_delivery,
         start_a2a_progress,
         stop_a2a_progress,
     )
@@ -4387,9 +4391,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 entry["outcome"] = outcome
             progress = entry.get("progress")
             progress = dict(progress) if isinstance(progress, dict) else {}
-            if progress_started and "started_at" not in progress:
-                prior_starts = []
-                for candidate in current.values():
+            if progress_started and not progress:
+                prior_progress = []
+                for candidate_key, candidate in current.items():
+                    if candidate_key == key:
+                        continue
                     if not isinstance(candidate, dict):
                         continue
                     if str(candidate.get("task_id") or "") != str(
@@ -4397,14 +4403,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     ):
                         continue
                     candidate_progress = candidate.get("progress")
-                    candidate_start = (
-                        candidate_progress.get("started_at")
-                        if isinstance(candidate_progress, dict)
-                        else None
-                    )
-                    if isinstance(candidate_start, (int, float)):
-                        prior_starts.append(float(candidate_start))
-                progress["started_at"] = min(prior_starts, default=now)
+                    if isinstance(candidate_progress, dict):
+                        prior_progress.append((
+                            float(candidate.get("updated_at") or 0),
+                            candidate_progress,
+                        ))
+                if prior_progress:
+                    progress = dict(max(prior_progress, key=lambda item: item[0])[1])
+                else:
+                    progress["started_at"] = now
             if progress_text is not None:
                 progress["pending"] = {
                     "text": str(progress_text),
@@ -4423,7 +4430,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     delivered_count = 0
                 progress["delivered_count"] = delivered_count + 1
                 progress.pop("pending", None)
-            if effective_state == "finalized":
+            if effective_state == "finalized" and outcome != "input_required":
                 progress.pop("pending", None)
             if progress:
                 entry["progress"] = progress
@@ -4506,19 +4513,28 @@ class InkboxAdapter(BasePlatformAdapter):
         for message in _list_field(task, "messages"):
             role = _field(message, "role")
             role = getattr(role, "value", role)
-            if str(role or "").strip().lower() != "agent":
+            if str(role or "").strip().lower() not in {"agent", "role_agent"}:
                 continue
             for part in _list_field(message, "parts"):
                 if str(_field(part, "text") or "") == receipt:
                     return True
         return False
 
+    @staticmethod
+    def _latest_a2a_caller_message(task: Any) -> Any:
+        for message in reversed(_list_field(task, "messages")):
+            role = _field(message, "role")
+            role = getattr(role, "value", role)
+            if str(role or "").strip().lower() in {"caller", "role_caller"}:
+                return message
+        return None
+
     def _a2a_progress_delay(
         self,
         *,
         task_id: str,
         message_id: str,
-        retry_pending: bool,
+        pending_delay: Optional[float],
     ) -> float:
         interval = self._a2a_progress_interval_seconds
         entry = self._read_a2a_registry().get(f"{task_id}:{message_id}")
@@ -4526,11 +4542,11 @@ class InkboxAdapter(BasePlatformAdapter):
         progress = progress if isinstance(progress, dict) else {}
         pending = progress.get("pending")
         if (
-            retry_pending
+            pending_delay is not None
             and isinstance(pending, dict)
             and str(pending.get("text") or "").strip()
         ):
-            return 0.0
+            return pending_delay
         try:
             started_at = float(progress.get("started_at"))
         except (TypeError, ValueError):
@@ -4542,6 +4558,15 @@ class InkboxAdapter(BasePlatformAdapter):
         if remainder <= 1e-9 or interval - remainder <= 1e-9:
             return 0.0
         return interval - remainder
+
+    def _a2a_progress_has_pending(self, task_id: str, message_id: str) -> bool:
+        entry = self._read_a2a_registry().get(f"{task_id}:{message_id}")
+        progress = entry.get("progress") if isinstance(entry, dict) else None
+        pending = progress.get("pending") if isinstance(progress, dict) else None
+        return (
+            isinstance(pending, dict)
+            and bool(str(pending.get("text") or "").strip())
+        )
 
     async def _acknowledge_a2a_task(self, task_id: str) -> None:
         """Advance the caller-visible task once local work is durably queued."""
@@ -4593,7 +4618,13 @@ class InkboxAdapter(BasePlatformAdapter):
             "running",
             progress_started=True,
         )
-        start_a2a_progress(task_id)
+        is_follow_up = any(
+            candidate_key != key
+            and isinstance(candidate, dict)
+            and str(candidate.get("task_id") or "") == task_id
+            for candidate_key, candidate in self._read_a2a_registry().items()
+        )
+        start_a2a_progress(task_id, reset_fence=is_follow_up)
         self._a2a_progress_tasks[task_id] = asyncio.create_task(
             self._run_a2a_progress_updates(
                 task_id=task_id,
@@ -4609,15 +4640,14 @@ class InkboxAdapter(BasePlatformAdapter):
         message_id: str,
     ) -> None:
         current = asyncio.current_task()
-        retry_pending = True
+        pending_delay: Optional[float] = 0.0
         try:
             while True:
                 delay = self._a2a_progress_delay(
                     task_id=task_id,
                     message_id=message_id,
-                    retry_pending=retry_pending,
+                    pending_delay=pending_delay,
                 )
-                retry_pending = False
                 if delay > 0:
                     await asyncio.sleep(delay)
                 try:
@@ -4631,9 +4661,19 @@ class InkboxAdapter(BasePlatformAdapter):
                         "task %s; the worker turn will continue",
                         task_id,
                     )
+                    pending_delay = (
+                        min(5.0, self._a2a_progress_interval_seconds)
+                        if self._a2a_progress_has_pending(task_id, message_id)
+                        else None
+                    )
                     continue
                 if not keep_running:
                     break
+                pending_delay = (
+                    min(5.0, self._a2a_progress_interval_seconds)
+                    if self._a2a_progress_has_pending(task_id, message_id)
+                    else None
+                )
         except asyncio.CancelledError:
             raise
         finally:
@@ -4648,6 +4688,22 @@ class InkboxAdapter(BasePlatformAdapter):
         message_id: str,
     ) -> bool:
         """Send one resumable progress update; return False once settled."""
+        if not begin_a2a_progress_delivery(task_id):
+            return False
+        try:
+            return await self._emit_a2a_progress_update_unfenced(
+                task_id=task_id,
+                message_id=message_id,
+            )
+        finally:
+            end_a2a_progress_delivery(task_id)
+
+    async def _emit_a2a_progress_update_unfenced(
+        self,
+        *,
+        task_id: str,
+        message_id: str,
+    ) -> bool:
         key = f"{task_id}:{message_id}"
         entry = self._read_a2a_registry().get(key)
         if not isinstance(entry, dict) or entry.get("state") == "finalized":
@@ -5179,37 +5235,43 @@ class InkboxAdapter(BasePlatformAdapter):
                         outcome=state,
                     )
                     continue
-                context_id = str(full.context_id)
+                data = entry.get("data")
+                if not isinstance(data, dict):
+                    logger.warning(
+                        "[Inkbox] Cannot resume A2A task %s without persisted input",
+                        task_id,
+                    )
+                    continue
+                context_id = str(data.get("context_id") or full.context_id)
                 chat_id = f"a2a:{self._identity_id}:{context_id}"
                 if task_id in self._a2a_tasks_by_chat.get(chat_id, []):
                     continue
-                message = full.messages[-1] if full.messages else None
                 await self._on_a2a_event({
                     "id": f"resume:{task_id}",
                     "event_type": "a2a.task.created",
-                    "data": {
-                        "task_id": task_id,
-                        "context_id": context_id,
-                        "state": state,
-                        "caller": {
-                            "identity_id": str(full.caller.identity_id),
-                            "organization_id": full.caller.organization_id,
-                            "handle": full.caller.handle,
-                        },
-                        "message_id": (
-                            str(message.message_id)
-                            if message
-                            else str(entry.get("message_id") or f"task:{task_id}")
-                        ),
-                        "parts": message.parts if message else [],
-                    },
+                    "data": dict(data),
                 })
             tasks = await asyncio.to_thread(
                 lambda: list(identity.iter_a2a_tasks(state="submitted"))
             )
             for task in tasks:
                 full = await asyncio.to_thread(identity.a2a_task, task.id)
-                message = full.messages[-1] if full.messages else None
+                message = self._latest_a2a_caller_message(full)
+                if message is None:
+                    logger.warning(
+                        "[Inkbox] Cannot catch up A2A task %s without caller input",
+                        task.id,
+                    )
+                    continue
+                message_id = str(_field(message, "message_id", "messageId") or "")
+                if not message_id:
+                    logger.warning(
+                        "[Inkbox] Cannot catch up A2A task %s without a message ID",
+                        task.id,
+                    )
+                    continue
+                if f"{task.id}:{message_id}" in self._read_a2a_registry():
+                    continue
                 await self._on_a2a_event({
                     "id": f"catchup:{task.id}",
                     "event_type": "a2a.task.created",
@@ -5222,8 +5284,8 @@ class InkboxAdapter(BasePlatformAdapter):
                             "organization_id": task.caller.organization_id,
                             "handle": task.caller.handle,
                         },
-                        "message_id": str(message.message_id) if message else f"task:{task.id}",
-                        "parts": message.parts if message else [],
+                        "message_id": message_id,
+                        "parts": _list_field(message, "parts"),
                     },
                 })
         except Exception:

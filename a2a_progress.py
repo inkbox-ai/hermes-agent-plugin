@@ -18,7 +18,10 @@ A2A_PROGRESS_MAX_TEXT_CHARS = 180
 A2A_PROGRESS_MAX_WORDS = 16
 
 _TOOL_LOCK = threading.Lock()
+_DELIVERY_CONDITION = threading.Condition()
 _TOOL_NAMES_BY_TASK: dict[str, list[str]] = {}
+_DELIVERIES_BY_TASK: dict[str, int] = {}
+_FENCED_TASKS: set[str] = set()
 _MAX_TOOL_NAMES = 8
 _MAX_TOOL_NAME_CHARS = 80
 _TERMINAL_CLAIM_RE = re.compile(
@@ -52,12 +55,15 @@ def _safe_tool_name(tool_name: str) -> str:
     return _normalize_identifier_text(tool_name)[:_MAX_TOOL_NAME_CHARS].strip("_.:-")
 
 
-def start_a2a_progress(task_id: str) -> None:
+def start_a2a_progress(task_id: str, *, reset_fence: bool = False) -> None:
     """Start a bounded activity buffer for one active worker turn."""
     if not task_id:
         return
     with _TOOL_LOCK:
         _TOOL_NAMES_BY_TASK[task_id] = []
+    if reset_fence:
+        with _DELIVERY_CONDITION:
+            _FENCED_TASKS.discard(task_id)
 
 
 def stop_a2a_progress(task_id: str) -> None:
@@ -66,6 +72,34 @@ def stop_a2a_progress(task_id: str) -> None:
         return
     with _TOOL_LOCK:
         _TOOL_NAMES_BY_TASK.pop(task_id, None)
+
+
+def begin_a2a_progress_delivery(task_id: str) -> bool:
+    """Enter one progress attempt unless an explicit outcome fenced the task."""
+    with _DELIVERY_CONDITION:
+        if task_id in _FENCED_TASKS:
+            return False
+        _DELIVERIES_BY_TASK[task_id] = _DELIVERIES_BY_TASK.get(task_id, 0) + 1
+        return True
+
+
+def end_a2a_progress_delivery(task_id: str) -> None:
+    """Release one progress attempt and wake a waiting outcome tool."""
+    with _DELIVERY_CONDITION:
+        remaining = _DELIVERIES_BY_TASK.get(task_id, 0) - 1
+        if remaining > 0:
+            _DELIVERIES_BY_TASK[task_id] = remaining
+        else:
+            _DELIVERIES_BY_TASK.pop(task_id, None)
+            _DELIVERY_CONDITION.notify_all()
+
+
+def fence_a2a_progress_delivery(task_id: str) -> None:
+    """Prevent new progress and wait for any active attempt to finish."""
+    with _DELIVERY_CONDITION:
+        _FENCED_TASKS.add(task_id)
+        while _DELIVERIES_BY_TASK.get(task_id, 0) > 0:
+            _DELIVERY_CONDITION.wait()
 
 
 def a2a_tool_snapshot(task_id: str) -> list[str]:
