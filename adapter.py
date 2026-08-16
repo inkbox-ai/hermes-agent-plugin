@@ -674,6 +674,7 @@ _A2A_SETTLED_SERVER_STATES = frozenset({
     "input_required",
     "auth_required",
 })
+_A2A_ADMISSION_CLOSING = "__closing__"
 _A2A_PHASE_RANK = {
     "received": 1,
     "bound": 2,
@@ -2266,6 +2267,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_suppress_next_reply_by_chat: set[str] = set()
         self._a2a_progress_tasks: Dict[str, asyncio.Task] = {}
         self._a2a_progress_stop_events: Dict[str, asyncio.Event] = {}
+        self._a2a_closing = False
         self._a2a_ingest_lock = asyncio.Lock()
         self._a2a_registry_path = _inkbox_state_path().with_name(
             "inkbox_a2a_tasks.json"
@@ -2280,6 +2282,7 @@ class InkboxAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def connect(self, is_reconnect: bool = False, **kwargs) -> bool:
+        self._a2a_closing = False
         if not check_inkbox_requirements():
             logger.warning(
                 "[Inkbox] aiohttp or `inkbox` SDK not installed. "
@@ -2402,6 +2405,7 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        self._a2a_closing = True
         progress_tasks = list(self._a2a_progress_tasks.values())
         for stop_event in self._a2a_progress_stop_events.values():
             stop_event.set()
@@ -4579,6 +4583,8 @@ class InkboxAdapter(BasePlatformAdapter):
             self._identity_handle,
         )
         authoritative = await asyncio.to_thread(identity.a2a_task, task_id)
+        if self._a2a_closing:
+            return _A2A_ADMISSION_CLOSING
         state = str(
             getattr(authoritative.state, "value", authoritative.state)
         )
@@ -4827,6 +4833,8 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             logger.exception("[Inkbox] Could not acknowledge the A2A task")
             return None
+        if settled_state == _A2A_ADMISSION_CLOSING:
+            return settled_state
         if settled_state:
             self._write_a2a_registry(
                 key,
@@ -4899,6 +4907,9 @@ class InkboxAdapter(BasePlatformAdapter):
         if event_type == "a2a.sent_task.updated":
             logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
+
+        if self._a2a_closing:
+            return web.Response(status=503, text="a2a adapter is stopping")
 
         if a2a_progress_fence_owner(task_id) == message_id:
             logger.info(
@@ -4987,6 +4998,11 @@ class InkboxAdapter(BasePlatformAdapter):
                         status=503,
                         text="a2a receipt unavailable",
                     )
+                if settled_state == _A2A_ADMISSION_CLOSING:
+                    return web.Response(
+                        status=503,
+                        text="a2a adapter is stopping",
+                    )
                 if settled_state:
                     return web.Response(status=200, text="stopped")
                 acknowledged = True
@@ -5056,6 +5072,8 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             if settled_state is None:
                 return web.Response(status=503, text="a2a receipt unavailable")
+            if settled_state == _A2A_ADMISSION_CLOSING:
+                return web.Response(status=503, text="a2a adapter is stopping")
             if settled_state:
                 return web.Response(status=200, text="stopped")
         return web.Response(status=200, text="ok")

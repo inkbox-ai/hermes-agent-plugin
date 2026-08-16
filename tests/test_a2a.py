@@ -53,6 +53,7 @@ def _adapter(tmp_path):
     adapter._a2a_suppress_next_reply_by_chat = set()
     adapter._a2a_progress_tasks = {}
     adapter._a2a_progress_stop_events = {}
+    adapter._a2a_closing = False
     adapter._a2a_progress_interval_seconds = 0
     adapter._a2a_progress_llm = None
     adapter._a2a_ingest_lock = asyncio.Lock()
@@ -1067,6 +1068,57 @@ def test_a2a_cancel_waits_for_inflight_reply_thread(tmp_path):
 
     assert len(replies) == 1
     assert adapter._a2a_progress_tasks == {}
+
+
+def test_a2a_cleanup_closes_admission_before_drain(tmp_path):
+    adapter = _adapter(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Identity:
+        def a2a_task(self, _task_id):
+            entered.set()
+            release.wait(timeout=5)
+            return types.SimpleNamespace(state="working", messages=[])
+
+        def a2a_reply(self, task_id, **kwargs):
+            adapter._a2a_receipts.append((task_id, kwargs))
+
+    class Client:
+        def get_identity(self, _handle):
+            return Identity()
+
+        def close(self):
+            return None
+
+    adapter._inkbox = Client()
+    adapter._pending_sms_text_batch_tasks = {}
+    adapter._pending_sms_text_batches = {}
+    adapter._imessage_typing_tasks = {}
+    adapter._active_call_ws = {}
+    adapter._call_ws_meta = {}
+    adapter._site = None
+    adapter._runner = None
+    adapter._tunnel = None
+    adapter._tunnel_runtime_thread = None
+
+    async def scenario():
+        webhook = asyncio.create_task(adapter._on_a2a_event(_event()))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        await adapter._cleanup()
+        assert not webhook.done()
+        release.set()
+        response = await webhook
+        await asyncio.sleep(0.05)
+        return response
+
+    response = asyncio.run(scenario())
+
+    assert response.status == 503
+    assert adapter._enqueued == []
+    assert adapter._a2a_receipts == []
+    assert adapter._a2a_tasks_by_chat == {}
 
 
 def test_late_receipt_cannot_regress_running_or_failed_state(tmp_path):
