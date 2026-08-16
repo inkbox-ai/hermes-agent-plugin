@@ -2268,7 +2268,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_progress_tasks: Dict[str, asyncio.Task] = {}
         self._a2a_progress_stop_events: Dict[str, asyncio.Event] = {}
         self._a2a_admission_tasks: set[asyncio.Task[Any]] = set()
-        self._a2a_canceled_tasks: set[str] = set()
+        self._a2a_canceled_messages: Dict[str, str] = {}
         self._a2a_closing = False
         self._a2a_ingest_lock = asyncio.Lock()
         self._a2a_registry_path = _inkbox_state_path().with_name(
@@ -4547,6 +4547,14 @@ class InkboxAdapter(BasePlatformAdapter):
                 return message
         return None
 
+    @staticmethod
+    def _a2a_message_id(message: Any) -> str:
+        return str(
+            _field(message, "message_id")
+            or _field(message, "messageId")
+            or ""
+        )
+
     def _a2a_progress_delay(
         self,
         *,
@@ -4891,7 +4899,9 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="ignored")
         chat_id = f"a2a:{self._identity_id}:{context_id}"
         if event_type == "a2a.task.canceled":
-            self._a2a_canceled_tasks.add(task_id)
+            self._a2a_canceled_messages[task_id] = str(
+                data.get("message_id") or ""
+            )
             await self._stop_a2a_progress_updates(task_id)
             queue = self._a2a_tasks_by_chat.get(chat_id, [])
             was_active = bool(queue and queue[0] == task_id)
@@ -4929,8 +4939,27 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
 
-        if task_id in self._a2a_canceled_tasks:
-            return web.Response(status=200, text="duplicate")
+        canceled_message_id = self._a2a_canceled_messages.get(task_id)
+        if canceled_message_id is not None:
+            if message_id == canceled_message_id:
+                return web.Response(status=200, text="duplicate")
+            identity = await asyncio.to_thread(
+                self._inkbox.get_identity,
+                self._identity_handle,
+            )
+            authoritative = await asyncio.to_thread(identity.a2a_task, task_id)
+            state = str(
+                getattr(authoritative.state, "value", authoritative.state)
+                or ""
+            ).strip().lower()
+            latest_caller = self._latest_a2a_caller_message(authoritative)
+            if (
+                event_type != "a2a.task.message"
+                or state not in {"submitted", "working"}
+                or self._a2a_message_id(latest_caller) != message_id
+            ):
+                return web.Response(status=200, text="duplicate")
+            self._a2a_canceled_messages.pop(task_id, None)
         if self._a2a_closing:
             return web.Response(status=503, text="a2a adapter is stopping")
 

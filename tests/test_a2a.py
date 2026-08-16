@@ -54,7 +54,7 @@ def _adapter(tmp_path):
     adapter._a2a_progress_tasks = {}
     adapter._a2a_progress_stop_events = {}
     adapter._a2a_admission_tasks = set()
-    adapter._a2a_canceled_tasks = set()
+    adapter._a2a_canceled_messages = {}
     adapter._a2a_closing = False
     adapter._a2a_progress_interval_seconds = 0
     adapter._a2a_progress_llm = None
@@ -422,6 +422,42 @@ def test_canceled_task_late_output_cannot_complete_the_next_task(tmp_path):
     assert result.success is True
     assert result.message_id == "a2a-canceled"
     assert adapter._a2a_tasks_by_chat[chat_id] == ["task-2"]
+
+
+def test_a2a_cancel_tombstone_allows_only_genuine_later_caller_message(tmp_path):
+    adapter = _adapter(tmp_path)
+    authoritative = adapter._a2a_authoritative_task
+
+    canceled = _event("evt-cancel", "a2a.task.canceled")
+    follow_up = _event("evt-follow-up", "a2a.task.message")
+    follow_up["data"]["message_id"] = "message-2"
+    spoofed = _event("evt-spoofed", "a2a.task.message")
+    spoofed["data"]["message_id"] = "message-3"
+
+    async def scenario():
+        await adapter._on_a2a_event(canceled)
+        canceled_replay = await adapter._on_a2a_event(_event())
+        authoritative.state = "working"
+        authoritative.messages = [
+            types.SimpleNamespace(
+                role="ROLE_CALLER",
+                message_id="message-2",
+                parts=[{"text": "Continue."}],
+            )
+        ]
+        spoofed_response = await adapter._on_a2a_event(spoofed)
+        resumed = await adapter._on_a2a_event(follow_up)
+        duplicate = await adapter._on_a2a_event(follow_up)
+        return canceled_replay, spoofed_response, resumed, duplicate
+
+    canceled_replay, spoofed_response, resumed, duplicate = asyncio.run(scenario())
+
+    assert canceled_replay.text == "duplicate"
+    assert spoofed_response.text == "duplicate"
+    assert resumed.status == 200
+    assert duplicate.text == "duplicate"
+    assert [event.message_id for event in adapter._enqueued] == ["message-2"]
+    assert adapter._a2a_canceled_messages == {}
 
 
 def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
