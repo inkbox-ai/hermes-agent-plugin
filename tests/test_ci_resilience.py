@@ -57,7 +57,9 @@ def test_full_stack_live_validation_runs_for_pull_requests():
     assert "pull_request:" in workflow
     assert "github.event_name == 'pull_request'" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "workflow_run:" in workflow
+    assert "schedule:" in workflow
+    assert "uses: ./.github/workflows/canary.yml" in workflow
+    assert "workflow_run:" not in workflow
 
 
 def test_live_tool_scope_preserves_other_config_and_allows_only_inkbox():

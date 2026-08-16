@@ -1,14 +1,10 @@
 name: Canary — plugin vs Hermes main
 
 # Hermes main moves ~14 commits/day, so it can break us even when we don't push.
-# Run the host-interface contract tests against the latest Hermes main twice a day
-# and post one Google Chat message with the result (pass or fail). The live channel
-# suite chains off this run, so the canary leads and live follows on the same cadence.
+# This reusable check runs the host-interface contract tests against the latest
+# host revision before full-stack suites.
 on:
-  schedule:
-    # 2x/day at 8 AM and 8 PM America/Los_Angeles (PDT/UTC-7 basis; cron is UTC).
-    - cron: "13 15 * * *"   # 08:00 PT
-    - cron: "13 3 * * *"    # 20:00 PT
+  workflow_call:
   workflow_dispatch: {}
 
 permissions:
@@ -40,19 +36,3 @@ jobs:
 
       - name: Complete offline suite vs real Hermes main
         run: uv run pytest -q
-
-  notify:
-    needs: canary
-    if: always() && github.event_name == 'schedule' && needs.canary.result != 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Notify Google Chat on scheduled failure
-        env:
-          WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
-        run: |
-          [ -n "$WEBHOOK_URL" ] || { echo "GOOGLE_CHAT_WEBHOOK_URL is missing"; exit 1; }
-          curl --fail-with-body --retry 3 --retry-all-errors --max-time 20 \
-            -sS -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\": \"🚨 hermes-agent-plugin canary FAILED: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-            "$WEBHOOK_URL"
