@@ -154,6 +154,35 @@ def test_a2a_event_is_persisted_before_enqueue_and_deduplicated(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "stopped_state",
+    [
+        "completed",
+        "failed",
+        "canceled",
+        "rejected",
+        "input_required",
+        "auth_required",
+    ],
+)
+def test_stale_stopped_a2a_webhook_never_enqueues_model(
+    tmp_path,
+    stopped_state,
+):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_authoritative_task.state = stopped_state
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.status == 200
+    assert response.text == "stopped"
+    assert adapter._enqueued == []
+    assert adapter._a2a_tasks_by_chat == {}
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["state"] == "finalized"
+    assert registry["task-1:message-1"]["outcome"] == stopped_state
+
+
+@pytest.mark.parametrize(
     ("interval", "expectation"),
     [
         (180, "Expect progress updates about every 3 minutes."),

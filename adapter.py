@@ -4572,8 +4572,8 @@ class InkboxAdapter(BasePlatformAdapter):
             and bool(str(pending.get("text") or "").strip())
         )
 
-    async def _acknowledge_a2a_task(self, task_id: str) -> None:
-        """Advance the caller-visible task once local work is durably queued."""
+    async def _acknowledge_a2a_task(self, task_id: str) -> str:
+        """Send the receipt, or return the authoritative stopped state."""
         identity = await asyncio.to_thread(
             self._inkbox.get_identity,
             self._identity_handle,
@@ -4587,15 +4587,16 @@ class InkboxAdapter(BasePlatformAdapter):
             self._a2a_progress_interval_seconds,
         )
         if state in _A2A_SETTLED_SERVER_STATES:
-            return
+            return state
         if self._a2a_task_has_receipt(authoritative, receipt):
-            return
+            return ""
         await asyncio.to_thread(
             identity.a2a_reply,
             task_id,
             intent="progress",
             text=receipt,
         )
+        return ""
 
     async def _stop_a2a_progress_updates(self, task_id: str) -> None:
         task = self._a2a_progress_tasks.get(task_id)
@@ -4813,9 +4814,9 @@ class InkboxAdapter(BasePlatformAdapter):
         key: str,
         data: Dict[str, Any],
         task_id: str,
-    ) -> bool:
+    ) -> Optional[str]:
         try:
-            await self._acknowledge_a2a_task(task_id)
+            settled_state = await self._acknowledge_a2a_task(task_id)
         except Exception:
             self._write_a2a_registry(
                 key,
@@ -4825,9 +4826,17 @@ class InkboxAdapter(BasePlatformAdapter):
                 error_code="receipt_delivery_failed",
             )
             logger.exception("[Inkbox] Could not acknowledge the A2A task")
-            return False
+            return None
+        if settled_state:
+            self._write_a2a_registry(
+                key,
+                data,
+                "finalized",
+                outcome=settled_state,
+            )
+            return settled_state
         self._write_a2a_registry(key, data, "acknowledged")
-        return True
+        return ""
 
     async def _on_a2a_event(
         self,
@@ -4967,6 +4976,21 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=503, text="a2a session unavailable")
             self._write_a2a_registry(key, data, "bound")
 
+            if not acknowledged:
+                settled_state = await self._record_a2a_acknowledgement(
+                    key,
+                    data,
+                    task_id,
+                )
+                if settled_state is None:
+                    return web.Response(
+                        status=503,
+                        text="a2a receipt unavailable",
+                    )
+                if settled_state:
+                    return web.Response(status=200, text="stopped")
+                acknowledged = True
+
             queue = self._a2a_tasks_by_chat.setdefault(chat_id, [])
             if task_id not in queue:
                 queue.append(task_id)
@@ -4990,17 +5014,6 @@ class InkboxAdapter(BasePlatformAdapter):
             event_queue = self._a2a_events_by_chat.setdefault(chat_id, [])
             if not any(event.message_id == message_id for event in event_queue):
                 event_queue.append(message_event)
-            if not acknowledged:
-                if not await self._record_a2a_acknowledgement(
-                    key,
-                    data,
-                    task_id,
-                ):
-                    return web.Response(
-                        status=503,
-                        text="a2a receipt unavailable",
-                    )
-                acknowledged = True
             if chat_id not in self._a2a_active_chats:
                 self._a2a_active_chats.add(chat_id)
                 try:
@@ -5036,12 +5049,15 @@ class InkboxAdapter(BasePlatformAdapter):
             self._write_a2a_registry(key, data, "enqueued")
 
         if enqueued and not acknowledged:
-            if not await self._record_a2a_acknowledgement(
+            settled_state = await self._record_a2a_acknowledgement(
                 key,
                 data,
                 task_id,
-            ):
+            )
+            if settled_state is None:
                 return web.Response(status=503, text="a2a receipt unavailable")
+            if settled_state:
+                return web.Response(status=200, text="stopped")
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
