@@ -427,8 +427,11 @@ def test_canceled_task_late_output_cannot_complete_the_next_task(tmp_path):
 def test_a2a_cancel_tombstone_allows_only_genuine_later_caller_message(tmp_path):
     adapter = _adapter(tmp_path)
     authoritative = adapter._a2a_authoritative_task
+    authoritative.id = "task-1"
+    authoritative.context_id = "context-1"
 
     canceled = _event("evt-cancel", "a2a.task.canceled")
+    canceled["data"].pop("message_id")
     follow_up = _event("evt-follow-up", "a2a.task.message")
     follow_up["data"]["message_id"] = "message-2"
     spoofed = _event("evt-spoofed", "a2a.task.message")
@@ -445,19 +448,69 @@ def test_a2a_cancel_tombstone_allows_only_genuine_later_caller_message(tmp_path)
                 parts=[{"text": "Continue."}],
             )
         ]
+        created = dict(follow_up)
+        created["event_type"] = "a2a.task.created"
+        created_response = await adapter._on_a2a_event(created)
+        authoritative.context_id = "context-other"
+        wrong_context = await adapter._on_a2a_event(follow_up)
+        authoritative.context_id = "context-1"
+        authoritative.id = "task-other"
+        wrong_task = await adapter._on_a2a_event(follow_up)
+        authoritative.id = "task-1"
+        authoritative.state = "completed"
+        stopped = await adapter._on_a2a_event(follow_up)
+        authoritative.state = "working"
+        authoritative.messages[0].role = "ROLE_AGENT"
+        noncaller = await adapter._on_a2a_event(follow_up)
+        authoritative.messages[0].role = "ROLE_CALLER"
         spoofed_response = await adapter._on_a2a_event(spoofed)
         resumed = await adapter._on_a2a_event(follow_up)
         duplicate = await adapter._on_a2a_event(follow_up)
-        return canceled_replay, spoofed_response, resumed, duplicate
+        return (
+            canceled_replay,
+            created_response,
+            wrong_context,
+            wrong_task,
+            stopped,
+            noncaller,
+            spoofed_response,
+            resumed,
+            duplicate,
+        )
 
-    canceled_replay, spoofed_response, resumed, duplicate = asyncio.run(scenario())
+    responses = asyncio.run(scenario())
 
-    assert canceled_replay.text == "duplicate"
-    assert spoofed_response.text == "duplicate"
-    assert resumed.status == 200
-    assert duplicate.text == "duplicate"
+    assert all(response.text == "duplicate" for response in responses[:7])
+    assert responses[7].status == 200
+    assert responses[8].text == "duplicate"
     assert [event.message_id for event in adapter._enqueued] == ["message-2"]
     assert adapter._a2a_canceled_messages == {}
+
+
+def test_a2a_cancel_without_message_id_tombstones_known_registry_keys(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._write_a2a_registry(
+        "task-1:message-0",
+        _event()["data"] | {"message_id": "message-0"},
+        "running",
+    )
+    authoritative = adapter._a2a_authoritative_task
+    authoritative.id = "task-1"
+    authoritative.context_id = "context-1"
+    authoritative.state = "canceled"
+    authoritative.messages = [types.SimpleNamespace(
+        role="ROLE_CALLER",
+        message_id="message-1",
+        parts=[],
+    )]
+    canceled = _event("evt-cancel", "a2a.task.canceled")
+    canceled["data"].pop("message_id")
+
+    asyncio.run(adapter._on_a2a_event(canceled))
+
+    assert adapter._a2a_canceled_messages == {
+        "task-1": ("context-1", {"message-0", "message-1"})
+    }
 
 
 def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
