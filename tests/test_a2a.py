@@ -53,6 +53,8 @@ def _adapter(tmp_path):
     adapter._a2a_suppress_next_reply_by_chat = set()
     adapter._a2a_progress_tasks = {}
     adapter._a2a_progress_stop_events = {}
+    adapter._a2a_admission_tasks = set()
+    adapter._a2a_canceled_tasks = set()
     adapter._a2a_closing = False
     adapter._a2a_progress_interval_seconds = 0
     adapter._a2a_progress_llm = None
@@ -1106,10 +1108,12 @@ def test_a2a_cleanup_closes_admission_before_drain(tmp_path):
         webhook = asyncio.create_task(adapter._on_a2a_event(_event()))
         while not entered.is_set():
             await asyncio.sleep(0.01)
-        await adapter._cleanup()
-        assert not webhook.done()
+        cleanup = asyncio.create_task(adapter._cleanup())
+        await asyncio.sleep(0.05)
+        assert not cleanup.done()
         release.set()
         response = await webhook
+        await cleanup
         await asyncio.sleep(0.05)
         return response
 

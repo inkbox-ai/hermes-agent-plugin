@@ -2267,6 +2267,8 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_suppress_next_reply_by_chat: set[str] = set()
         self._a2a_progress_tasks: Dict[str, asyncio.Task] = {}
         self._a2a_progress_stop_events: Dict[str, asyncio.Event] = {}
+        self._a2a_admission_tasks: set[asyncio.Task[Any]] = set()
+        self._a2a_canceled_tasks: set[str] = set()
         self._a2a_closing = False
         self._a2a_ingest_lock = asyncio.Lock()
         self._a2a_registry_path = _inkbox_state_path().with_name(
@@ -2406,6 +2408,14 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _cleanup(self) -> None:
         self._a2a_closing = True
+        current = asyncio.current_task()
+        admission_tasks = [
+            task
+            for task in self._a2a_admission_tasks
+            if task is not current
+        ]
+        if admission_tasks:
+            await asyncio.gather(*admission_tasks, return_exceptions=True)
         progress_tasks = list(self._a2a_progress_tasks.values())
         for stop_event in self._a2a_progress_stop_events.values():
             stop_event.set()
@@ -4853,8 +4863,18 @@ class InkboxAdapter(BasePlatformAdapter):
         headers: Optional[Dict[str, str]] = None,
     ) -> "web.Response":
         """Serialize A2A admission so duplicate receipts cannot race."""
-        async with self._a2a_ingest_lock:
-            return await self._on_a2a_event_locked(envelope, headers=headers)
+        current = asyncio.current_task()
+        if current is not None:
+            self._a2a_admission_tasks.add(current)
+        try:
+            async with self._a2a_ingest_lock:
+                return await self._on_a2a_event_locked(
+                    envelope,
+                    headers=headers,
+                )
+        finally:
+            if current is not None:
+                self._a2a_admission_tasks.discard(current)
 
     async def _on_a2a_event_locked(
         self,
@@ -4871,6 +4891,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="ignored")
         chat_id = f"a2a:{self._identity_id}:{context_id}"
         if event_type == "a2a.task.canceled":
+            self._a2a_canceled_tasks.add(task_id)
             await self._stop_a2a_progress_updates(task_id)
             queue = self._a2a_tasks_by_chat.get(chat_id, [])
             was_active = bool(queue and queue[0] == task_id)
@@ -4908,6 +4929,8 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.info("[Inkbox] Outbound A2A task updated: %s", task_id)
             return web.Response(status=200, text="ok")
 
+        if task_id in self._a2a_canceled_tasks:
+            return web.Response(status=200, text="duplicate")
         if self._a2a_closing:
             return web.Response(status=503, text="a2a adapter is stopping")
 
