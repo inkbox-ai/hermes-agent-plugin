@@ -64,6 +64,7 @@ def _adapter(tmp_path):
             if kwargs.get("intent") == "progress":
                 task.state = "working"
             task.messages.append(types.SimpleNamespace(
+                role="agent",
                 parts=[{"text": kwargs["text"]}],
             ))
 
@@ -312,6 +313,7 @@ def test_a2a_receipt_is_idempotent_when_response_is_lost(tmp_path):
             nonlocal attempts
             attempts += 1
             task.messages.append(types.SimpleNamespace(
+                role="agent",
                 parts=[{"text": receipt}],
             ))
             raise RuntimeError("response lost")
@@ -330,6 +332,28 @@ def test_a2a_receipt_is_idempotent_when_response_is_lost(tmp_path):
     assert attempts == 1
     registry = json.loads(adapter._a2a_registry_path.read_text())
     assert registry["task-1:message-1"]["state"] == "enqueued"
+
+
+def test_a2a_caller_cannot_spoof_delivered_receipt(tmp_path):
+    adapter = _adapter(tmp_path)
+    receipt = (
+        "Task task-1 received. Work is queued and starting. "
+        "Periodic progress updates are disabled."
+    )
+    adapter._a2a_authoritative_task.messages.append(
+        types.SimpleNamespace(
+            role="caller",
+            parts=[{"text": receipt}],
+        )
+    )
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.status == 200
+    assert adapter._a2a_receipts == [(
+        "task-1",
+        {"intent": "progress", "text": receipt},
+    )]
 
 
 def test_a2a_cancel_removes_only_the_addressed_task(tmp_path):
@@ -575,7 +599,7 @@ def test_a2a_progress_retry_recovers_accepted_reply_without_duplicate(tmp_path):
     asyncio.run(adapter._on_a2a_event(_event()))
     update = "I'm validating the work. (60s elapsed)"
     adapter._a2a_authoritative_task.messages.append(
-        types.SimpleNamespace(parts=[{"text": update}])
+        types.SimpleNamespace(role="agent", parts=[{"text": update}])
     )
     adapter._write_a2a_registry(
         "task-1:message-1",
@@ -597,6 +621,31 @@ def test_a2a_progress_retry_recovers_accepted_reply_without_duplicate(tmp_path):
     progress = registry["task-1:message-1"]["progress"]
     assert progress["last_delivered_text"] == update
     assert "pending" not in progress
+
+
+def test_a2a_caller_cannot_spoof_pending_progress_delivery(tmp_path):
+    adapter = _adapter(tmp_path)
+    update = "I'm validating the work. (60s elapsed)"
+    adapter._a2a_authoritative_task.messages.append(
+        types.SimpleNamespace(role="caller", parts=[{"text": update}])
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+        progress_text=update,
+    )
+
+    asyncio.run(adapter._emit_a2a_progress_update(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert adapter._a2a_receipts == [(
+        "task-1",
+        {"intent": "progress", "text": update},
+    )]
 
 
 def test_a2a_progress_elapsed_time_continues_across_caller_follow_up(tmp_path):
@@ -647,6 +696,12 @@ def test_a2a_progress_stops_for_terminal_task(tmp_path):
 def test_a2a_progress_runner_waits_configured_interval(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     adapter._a2a_progress_interval_seconds = 60
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
     sleeps = []
     emissions = []
 
@@ -665,8 +720,106 @@ def test_a2a_progress_runner_waits_configured_interval(monkeypatch, tmp_path):
         message_id="message-1",
     ))
 
-    assert sleeps == [60]
+    assert sleeps == [pytest.approx(60, abs=0.1)]
     assert emissions == [{"task_id": "task-1", "message_id": "message-1"}]
+
+
+def test_a2a_progress_runner_preserves_restart_phase(monkeypatch, tmp_path):
+    now = 1_000.0
+    monkeypatch.setattr(adapter_mod.time, "time", lambda: now)
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
+    now = 1_059.0
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def stop_after_one(**_kwargs):
+        return False
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", fake_sleep)
+    adapter._emit_a2a_progress_update = stop_after_one
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert sleeps == [1]
+
+
+def test_a2a_progress_runner_preserves_follow_up_phase(monkeypatch, tmp_path):
+    now = 2_000.0
+    monkeypatch.setattr(adapter_mod.time, "time", lambda: now)
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
+    now = 2_059.0
+    follow_up = _event()["data"] | {"message_id": "message-2"}
+    adapter._write_a2a_registry(
+        "task-1:message-2",
+        follow_up,
+        "running",
+        progress_started=True,
+    )
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def stop_after_one(**_kwargs):
+        return False
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", fake_sleep)
+    adapter._emit_a2a_progress_update = stop_after_one
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-2",
+    ))
+
+    assert sleeps == [1]
+
+
+def test_a2a_progress_runner_retries_pending_delivery_immediately(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+        progress_text="I'm validating the work. (59s elapsed)",
+    )
+
+    async def unexpected_sleep(_delay):
+        pytest.fail("a pending delivery must be retried before sleeping")
+
+    async def stop_after_one(**_kwargs):
+        return False
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", unexpected_sleep)
+    adapter._emit_a2a_progress_update = stop_after_one
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-1",
+    ))
 
 
 def test_a2a_progress_runner_retries_local_preparation_failure(monkeypatch, tmp_path):

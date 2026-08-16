@@ -4504,10 +4504,44 @@ class InkboxAdapter(BasePlatformAdapter):
     @staticmethod
     def _a2a_task_has_receipt(task: Any, receipt: str) -> bool:
         for message in _list_field(task, "messages"):
+            role = _field(message, "role")
+            role = getattr(role, "value", role)
+            if str(role or "").strip().lower() != "agent":
+                continue
             for part in _list_field(message, "parts"):
                 if str(_field(part, "text") or "") == receipt:
                     return True
         return False
+
+    def _a2a_progress_delay(
+        self,
+        *,
+        task_id: str,
+        message_id: str,
+        retry_pending: bool,
+    ) -> float:
+        interval = self._a2a_progress_interval_seconds
+        entry = self._read_a2a_registry().get(f"{task_id}:{message_id}")
+        progress = entry.get("progress") if isinstance(entry, dict) else None
+        progress = progress if isinstance(progress, dict) else {}
+        pending = progress.get("pending")
+        if (
+            retry_pending
+            and isinstance(pending, dict)
+            and str(pending.get("text") or "").strip()
+        ):
+            return 0.0
+        try:
+            started_at = float(progress.get("started_at"))
+        except (TypeError, ValueError):
+            return interval
+        elapsed = max(0.0, time.time() - started_at)
+        if elapsed < interval:
+            return interval - elapsed
+        remainder = elapsed % interval
+        if remainder <= 1e-9 or interval - remainder <= 1e-9:
+            return 0.0
+        return interval - remainder
 
     async def _acknowledge_a2a_task(self, task_id: str) -> None:
         """Advance the caller-visible task once local work is durably queued."""
@@ -4575,9 +4609,17 @@ class InkboxAdapter(BasePlatformAdapter):
         message_id: str,
     ) -> None:
         current = asyncio.current_task()
+        retry_pending = True
         try:
             while True:
-                await asyncio.sleep(self._a2a_progress_interval_seconds)
+                delay = self._a2a_progress_delay(
+                    task_id=task_id,
+                    message_id=message_id,
+                    retry_pending=retry_pending,
+                )
+                retry_pending = False
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 try:
                     keep_running = await self._emit_a2a_progress_update(
                         task_id=task_id,
