@@ -5002,6 +5002,21 @@ class InkboxAdapter(BasePlatformAdapter):
         data = dict(data)
         data["message_id"] = authoritative_message_id
         data["parts"] = list(_list_field(latest_caller, "parts"))
+        authoritative_caller = _field(authoritative, "caller")
+        data["caller"] = {
+            "identity_id": str(
+                _field(authoritative_caller, "identity_id", "identityId") or ""
+            ),
+            "organization_id": str(
+                _field(
+                    authoritative_caller,
+                    "organization_id",
+                    "organizationId",
+                )
+                or ""
+            ),
+            "handle": str(_field(authoritative_caller, "handle") or ""),
+        }
 
         canceled_generation = self._a2a_canceled_messages.get(task_id)
         if canceled_generation is not None:

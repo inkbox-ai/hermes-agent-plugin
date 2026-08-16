@@ -66,6 +66,11 @@ def _adapter(tmp_path):
         id="task-1",
         context_id="context-1",
         state="submitted",
+        caller=types.SimpleNamespace(
+            identity_id="caller-1",
+            organization_id="org-1",
+            handle="caller",
+        ),
         messages=[types.SimpleNamespace(
             role="ROLE_CALLER",
             message_id="message-1",
@@ -552,6 +557,11 @@ def test_a2a_restart_rejects_delayed_canceled_message_and_uses_authoritative_par
 
     adapter = _adapter(tmp_path)
     adapter._a2a_authoritative_task.state = "working"
+    adapter._a2a_authoritative_task.caller = types.SimpleNamespace(
+        identity_id="trusted-caller",
+        organization_id="trusted-org",
+        handle="trusted-handle",
+    )
     adapter._a2a_authoritative_task.messages = [types.SimpleNamespace(
         role="ROLE_CALLER",
         message_id="message-2",
@@ -560,6 +570,11 @@ def test_a2a_restart_rejects_delayed_canceled_message_and_uses_authoritative_par
     delayed = _event("evt-delayed", "a2a.task.message")
     follow_up = _event("evt-follow-up", "a2a.task.message")
     follow_up["data"]["message_id"] = "message-2"
+    follow_up["data"]["caller"] = {
+        "identity_id": "spoofed-caller",
+        "organization_id": "spoofed-org",
+        "handle": "spoofed-handle",
+    }
     follow_up["data"]["parts"] = [{"text": "Spoofed webhook text."}]
 
     async def scenario():
@@ -579,6 +594,13 @@ def test_a2a_restart_rejects_delayed_canceled_message_and_uses_authoritative_par
     assert registry["task-1:message-2"]["data"]["parts"] == [
         {"text": "Trusted follow-up."}
     ]
+    assert registry["task-1:message-2"]["data"]["caller"] == {
+        "identity_id": "trusted-caller",
+        "organization_id": "trusted-org",
+        "handle": "trusted-handle",
+    }
+    assert "caller=@trusted-handle caller_org=trusted-org" in adapter._enqueued[0].text
+    assert "spoofed" not in adapter._enqueued[0].text
 
 
 def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
