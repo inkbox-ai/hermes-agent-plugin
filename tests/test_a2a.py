@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -24,7 +25,12 @@ from inkbox_plugin.adapter import InkboxAdapter
 
 
 @pytest.fixture(autouse=True)
-def fake_web(monkeypatch):
+def fake_web(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    progress_mod._FENCED_TASKS.clear()
+    progress_mod._FENCE_OWNER_BY_TASK.clear()
+    progress_mod._DELIVERIES_BY_TASK.clear()
+    progress_mod._TOOL_NAMES_BY_TASK.clear()
     monkeypatch.setattr(
         adapter_mod,
         "web",
@@ -46,6 +52,7 @@ def _adapter(tmp_path):
     adapter._a2a_session_key_by_chat = {}
     adapter._a2a_suppress_next_reply_by_chat = set()
     adapter._a2a_progress_tasks = {}
+    adapter._a2a_progress_stop_events = {}
     adapter._a2a_progress_interval_seconds = 0
     adapter._a2a_progress_llm = None
     adapter._a2a_ingest_lock = asyncio.Lock()
@@ -966,7 +973,7 @@ def test_a2a_progress_runner_retries_local_preparation_failure(monkeypatch, tmp_
     assert attempts == 2
 
 
-def test_a2a_processing_completion_cancels_progress_timer(tmp_path):
+def test_a2a_processing_completion_stops_progress_timer(tmp_path):
     adapter = _adapter(tmp_path)
     adapter._a2a_progress_interval_seconds = 60
 
@@ -982,6 +989,55 @@ def test_a2a_processing_completion_cancels_progress_timer(tmp_path):
         assert adapter._a2a_progress_tasks == {}
 
     asyncio.run(scenario())
+
+
+def test_a2a_cancel_waits_for_inflight_reply_thread(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    entered = threading.Event()
+    release = threading.Event()
+    replies = []
+
+    class Identity:
+        def a2a_task(self, _task_id):
+            return types.SimpleNamespace(state="working", messages=[])
+
+        def a2a_reply(self, task_id, **kwargs):
+            entered.set()
+            release.wait(timeout=5)
+            replies.append((task_id, kwargs))
+
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: Identity(),
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+        progress_text="I'm validating the work. (60s elapsed)",
+    )
+
+    async def scenario():
+        await adapter._start_a2a_progress_updates(
+            task_id="task-1",
+            message_id="message-1",
+            data=_event()["data"],
+        )
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        canceled = _event("evt-cancel", "a2a.task.canceled")
+        cancel_task = asyncio.create_task(adapter._on_a2a_event(canceled))
+        await asyncio.sleep(0.05)
+        assert not cancel_task.done()
+        release.set()
+        await cancel_task
+        await asyncio.sleep(0.05)
+
+    asyncio.run(scenario())
+
+    assert len(replies) == 1
+    assert adapter._a2a_progress_tasks == {}
 
 
 def test_late_receipt_cannot_regress_running_or_failed_state(tmp_path):
@@ -1226,7 +1282,20 @@ def test_a2a_terminal_tool_waits_for_inflight_progress(
     )]
 
 
-def test_a2a_terminal_failure_keeps_progress_fenced(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("intent_tool", "args"),
+    [
+        (tools_mod.inkbox_a2a_complete, {"text": "Done."}),
+        (tools_mod.inkbox_a2a_ask_caller, {"text": "Which region?"}),
+        (tools_mod.inkbox_a2a_fail, {"reason": "Cannot continue."}),
+    ],
+)
+def test_a2a_ambiguous_outcome_restart_keeps_progress_fenced(
+    monkeypatch,
+    tmp_path,
+    intent_tool,
+    args,
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _adapter(tmp_path)
     adapter._write_a2a_registry(
@@ -1260,10 +1329,9 @@ def test_a2a_terminal_failure_keeps_progress_fenced(monkeypatch, tmp_path):
         ),
     )
 
-    result = json.loads(tools_mod.inkbox_a2a_fail(
-        {"reason": "Cannot continue."},
-        task_id="session-1",
-    ))
+    result = json.loads(intent_tool(args, task_id="session-1"))
+    progress_mod._FENCED_TASKS.clear()
+    progress_mod._FENCE_OWNER_BY_TASK.clear()
     keep_running = asyncio.run(adapter._emit_a2a_progress_update(
         task_id="task-1",
         message_id="message-1",
@@ -1287,7 +1355,7 @@ def test_a2a_ask_caller_follow_up_reacquires_progress(monkeypatch, tmp_path):
         progress_started=True,
     )
     progress_mod.start_a2a_progress("task-1", reset_fence=True)
-    progress_mod.fence_a2a_progress_delivery("task-1")
+    progress_mod.fence_a2a_progress_delivery("task-1", "message-1")
     follow_up = first | {"message_id": "message-2"}
 
     async def scenario():
@@ -1304,6 +1372,48 @@ def test_a2a_ask_caller_follow_up_reacquires_progress(monkeypatch, tmp_path):
 
     assert asyncio.run(scenario()) is True
     assert adapter._a2a_receipts[-1][1]["intent"] == "progress"
+
+
+def test_a2a_same_key_restart_with_older_sibling_keeps_fence(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    first = _event()["data"]
+    second = first | {"message_id": "message-2"}
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        first,
+        "finalized",
+        progress_started=True,
+    )
+    adapter._write_a2a_registry(
+        "task-1:message-2",
+        second,
+        "running",
+        progress_started=True,
+    )
+    progress_mod.start_a2a_progress("task-1", reset_fence=True)
+    progress_mod.fence_a2a_progress_delivery("task-1", "message-2")
+    progress_mod._FENCED_TASKS.clear()
+    progress_mod._FENCE_OWNER_BY_TASK.clear()
+
+    async def scenario():
+        await adapter._start_a2a_progress_updates(
+            task_id="task-1",
+            message_id="message-2",
+            data=second,
+        )
+        await adapter._stop_a2a_progress_updates("task-1")
+        return await adapter._emit_a2a_progress_update(
+            task_id="task-1",
+            message_id="message-2",
+        )
+
+    assert asyncio.run(scenario()) is False
+    assert adapter._a2a_receipts == []
 
 
 def test_a2a_delegation_tools_send_check_wait_and_reply(monkeypatch):
@@ -1672,6 +1782,37 @@ def test_a2a_catch_up_resumes_nonfinal_registry_entries(
     assert list(registry) == ["task-1:message-1"]
     assert registry["task-1:message-1"]["state"] == "enqueued"
     assert registry["task-1:message-1"]["attempt"] == 2
+
+
+def test_a2a_catch_up_finalizes_auth_required_without_rerun(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+    )
+    task = types.SimpleNamespace(state="auth_required")
+    identity = types.SimpleNamespace(
+        a2a_task=lambda _task_id: task,
+        iter_a2a_tasks=lambda **_kwargs: iter(()),
+    )
+    adapter._inkbox = types.SimpleNamespace(
+        get_identity=lambda _handle: identity,
+    )
+
+    async def inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", inline)
+    asyncio.run(adapter._catch_up_a2a_tasks())
+
+    registry = json.loads(adapter._a2a_registry_path.read_text())
+    assert registry["task-1:message-1"]["state"] == "finalized"
+    assert registry["task-1:message-1"]["outcome"] == "auth_required"
+    assert adapter._enqueued == []
 
 
 def test_a2a_catch_up_new_task_selects_latest_caller_message(

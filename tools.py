@@ -73,7 +73,10 @@ def _a2a_intent(intent: str, text: str, session_id: str) -> str:
     try:
         _, _, identity = _client_and_identity()
         task_id = str(context["task_id"])
-        fence_a2a_progress_delivery(task_id)
+        fence_a2a_progress_delivery(
+            task_id,
+            str(context.get("message_id") or ""),
+        )
         try:
             result = identity.a2a_reply(
                 task_id,

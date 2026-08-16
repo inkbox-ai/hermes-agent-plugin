@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -22,6 +25,7 @@ _DELIVERY_CONDITION = threading.Condition()
 _TOOL_NAMES_BY_TASK: dict[str, list[str]] = {}
 _DELIVERIES_BY_TASK: dict[str, int] = {}
 _FENCED_TASKS: set[str] = set()
+_FENCE_OWNER_BY_TASK: dict[str, str] = {}
 _MAX_TOOL_NAMES = 8
 _MAX_TOOL_NAME_CHARS = 80
 _TERMINAL_CLAIM_RE = re.compile(
@@ -55,7 +59,34 @@ def _safe_tool_name(tool_name: str) -> str:
     return _normalize_identifier_text(tool_name)[:_MAX_TOOL_NAME_CHARS].strip("_.:-")
 
 
-def start_a2a_progress(task_id: str, *, reset_fence: bool = False) -> None:
+def _fence_path(task_id: str) -> Path:
+    try:
+        from hermes_cli.config import get_hermes_home
+
+        home = Path(get_hermes_home())
+    except ImportError:  # pragma: no cover - local import/test fallback
+        configured = os.getenv("HERMES_HOME")
+        home = Path(configured).expanduser() if configured else Path.home() / ".hermes"
+    root = home / "inkbox_a2a_progress_fences"
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    digest = hashlib.sha256(task_id.encode()).hexdigest()
+    return root / f"{digest}.fenced"
+
+
+def _durable_fence_owner(task_id: str) -> str:
+    try:
+        return _fence_path(task_id).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def start_a2a_progress(
+    task_id: str,
+    *,
+    message_id: str = "",
+    reset_fence: bool = False,
+) -> None:
     """Start a bounded activity buffer for one active worker turn."""
     if not task_id:
         return
@@ -63,7 +94,14 @@ def start_a2a_progress(task_id: str, *, reset_fence: bool = False) -> None:
         _TOOL_NAMES_BY_TASK[task_id] = []
     if reset_fence:
         with _DELIVERY_CONDITION:
-            _FENCED_TASKS.discard(task_id)
+            owner = _durable_fence_owner(task_id) or _FENCE_OWNER_BY_TASK.get(
+                task_id,
+                "",
+            )
+            if owner and message_id and owner != message_id:
+                _fence_path(task_id).unlink(missing_ok=True)
+                _FENCED_TASKS.discard(task_id)
+                _FENCE_OWNER_BY_TASK.pop(task_id, None)
 
 
 def stop_a2a_progress(task_id: str) -> None:
@@ -77,7 +115,7 @@ def stop_a2a_progress(task_id: str) -> None:
 def begin_a2a_progress_delivery(task_id: str) -> bool:
     """Enter one progress attempt unless an explicit outcome fenced the task."""
     with _DELIVERY_CONDITION:
-        if task_id in _FENCED_TASKS:
+        if task_id in _FENCED_TASKS or _durable_fence_owner(task_id):
             return False
         _DELIVERIES_BY_TASK[task_id] = _DELIVERIES_BY_TASK.get(task_id, 0) + 1
         return True
@@ -94,10 +132,17 @@ def end_a2a_progress_delivery(task_id: str) -> None:
             _DELIVERY_CONDITION.notify_all()
 
 
-def fence_a2a_progress_delivery(task_id: str) -> None:
+def fence_a2a_progress_delivery(task_id: str, message_id: str = "") -> None:
     """Prevent new progress and wait for any active attempt to finish."""
     with _DELIVERY_CONDITION:
+        path = _fence_path(task_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(str(message_id or "") + "\n")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+        path.chmod(0o600)
         _FENCED_TASKS.add(task_id)
+        _FENCE_OWNER_BY_TASK[task_id] = str(message_id or "")
         while _DELIVERIES_BY_TASK.get(task_id, 0) > 0:
             _DELIVERY_CONDITION.wait()
 

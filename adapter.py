@@ -670,6 +670,7 @@ _A2A_SETTLED_SERVER_STATES = frozenset({
     "canceled",
     "rejected",
     "input_required",
+    "auth_required",
 })
 _A2A_PHASE_RANK = {
     "received": 1,
@@ -2262,6 +2263,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_session_key_by_chat: Dict[str, str] = {}
         self._a2a_suppress_next_reply_by_chat: set[str] = set()
         self._a2a_progress_tasks: Dict[str, asyncio.Task] = {}
+        self._a2a_progress_stop_events: Dict[str, asyncio.Event] = {}
         self._a2a_ingest_lock = asyncio.Lock()
         self._a2a_registry_path = _inkbox_state_path().with_name(
             "inkbox_a2a_tasks.json"
@@ -2399,12 +2401,12 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _cleanup(self) -> None:
         progress_tasks = list(self._a2a_progress_tasks.values())
-        for task in progress_tasks:
-            if not task.done():
-                task.cancel()
+        for stop_event in self._a2a_progress_stop_events.values():
+            stop_event.set()
         if progress_tasks:
             await asyncio.gather(*progress_tasks, return_exceptions=True)
         self._a2a_progress_tasks.clear()
+        self._a2a_progress_stop_events.clear()
 
         for task in list(self._pending_sms_text_batch_tasks.values()):
             if not task.done():
@@ -4594,11 +4596,16 @@ class InkboxAdapter(BasePlatformAdapter):
         )
 
     async def _stop_a2a_progress_updates(self, task_id: str) -> None:
-        task = self._a2a_progress_tasks.pop(task_id, None)
+        task = self._a2a_progress_tasks.get(task_id)
+        stop_event = self._a2a_progress_stop_events.get(task_id)
+        if stop_event is not None:
+            stop_event.set()
         if task is not None and task is not asyncio.current_task():
-            if not task.done():
-                task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if self._a2a_progress_tasks.get(task_id) is task:
+            self._a2a_progress_tasks.pop(task_id, None)
+        if self._a2a_progress_stop_events.get(task_id) is stop_event:
+            self._a2a_progress_stop_events.pop(task_id, None)
         stop_a2a_progress(task_id)
 
     async def _start_a2a_progress_updates(
@@ -4618,17 +4625,18 @@ class InkboxAdapter(BasePlatformAdapter):
             "running",
             progress_started=True,
         )
-        is_follow_up = any(
-            candidate_key != key
-            and isinstance(candidate, dict)
-            and str(candidate.get("task_id") or "") == task_id
-            for candidate_key, candidate in self._read_a2a_registry().items()
+        start_a2a_progress(
+            task_id,
+            message_id=message_id,
+            reset_fence=True,
         )
-        start_a2a_progress(task_id, reset_fence=is_follow_up)
+        stop_event = asyncio.Event()
+        self._a2a_progress_stop_events[task_id] = stop_event
         self._a2a_progress_tasks[task_id] = asyncio.create_task(
             self._run_a2a_progress_updates(
                 task_id=task_id,
                 message_id=message_id,
+                stop_event=stop_event,
             ),
             name=f"inkbox-a2a-progress-{task_id}",
         )
@@ -4638,18 +4646,39 @@ class InkboxAdapter(BasePlatformAdapter):
         *,
         task_id: str,
         message_id: str,
+        stop_event: Optional[asyncio.Event] = None,
     ) -> None:
         current = asyncio.current_task()
+        stop_event = stop_event or asyncio.Event()
         pending_delay: Optional[float] = 0.0
         try:
-            while True:
+            while not stop_event.is_set():
                 delay = self._a2a_progress_delay(
                     task_id=task_id,
                     message_id=message_id,
                     pending_delay=pending_delay,
                 )
                 if delay > 0:
-                    await asyncio.sleep(delay)
+                    sleeper = asyncio.create_task(asyncio.sleep(delay))
+                    stopper = asyncio.create_task(stop_event.wait())
+                    try:
+                        done, _pending = await asyncio.wait(
+                            {sleeper, stopper},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if stopper in done:
+                            return
+                    finally:
+                        for waiter in (sleeper, stopper):
+                            if not waiter.done():
+                                waiter.cancel()
+                        await asyncio.gather(
+                            sleeper,
+                            stopper,
+                            return_exceptions=True,
+                        )
+                if stop_event.is_set():
+                    return
                 try:
                     keep_running = await self._emit_a2a_progress_update(
                         task_id=task_id,
@@ -4679,6 +4708,8 @@ class InkboxAdapter(BasePlatformAdapter):
         finally:
             if self._a2a_progress_tasks.get(task_id) is current:
                 self._a2a_progress_tasks.pop(task_id, None)
+            if self._a2a_progress_stop_events.get(task_id) is stop_event:
+                self._a2a_progress_stop_events.pop(task_id, None)
             stop_a2a_progress(task_id)
 
     async def _emit_a2a_progress_update(
@@ -5216,13 +5247,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     continue
                 full = await asyncio.to_thread(identity.a2a_task, task_id)
                 state = str(getattr(full.state, "value", full.state))
-                if state in {
-                    "completed",
-                    "failed",
-                    "canceled",
-                    "rejected",
-                    "input_required",
-                }:
+                if state in _A2A_SETTLED_SERVER_STATES:
                     data = entry.get("data")
                     self._write_a2a_registry(
                         key,
@@ -5344,13 +5369,7 @@ class InkboxAdapter(BasePlatformAdapter):
             state = str(
                 getattr(authoritative.state, "value", authoritative.state)
             )
-            if state in {
-                "completed",
-                "failed",
-                "canceled",
-                "rejected",
-                "input_required",
-            }:
+            if state in _A2A_SETTLED_SERVER_STATES:
                 finish_task(state)
                 return SendResult(success=True, message_id=f"a2a:{task_id}")
             return SendResult(
