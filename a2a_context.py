@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import threading
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,10 +37,18 @@ def _queue_path(session_id: str) -> Path:
 
 def _atomic_write(path: Path, value: Any) -> None:
     tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    tmp.chmod(0o600)
-    os.replace(tmp, path)
-    path.chmod(0o600)
+    try:
+        tmp.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        with suppress(OSError):
+            tmp.chmod(0o600)
+        os.replace(tmp, path)
+        with suppress(OSError):
+            path.chmod(0o600)
+    finally:
+        with suppress(OSError):
+            if tmp.exists():
+                tmp.unlink()
+
 
 
 def write_a2a_turn_context(session_id: str, context: Dict[str, Any]) -> None:
