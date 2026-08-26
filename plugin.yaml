@@ -63,7 +63,7 @@ optional_env:
     prompt: "Enable Realtime"
     secret: false
   - name: INKBOX_CONTACT_MEMORIES_ENABLED
-    description: "Include generated contact memories as background context for inbound conversations. Defaults to true."
+    description: "Add generated contact memories to inbound turns. Defaults to true."
     prompt: "Enable contact memories"
     secret: false
   - name: INKBOX_A2A_PROGRESS_INTERVAL_SECONDS

@@ -187,7 +187,7 @@ def test_admin_api_key_flow_selects_existing_identity_and_mints_agent_key(monkey
 
         def create(self, **kwargs):
             self.created.append(kwargs)
-            return types.SimpleNamespace(api_key="ApiKey_agent_selected")
+            return types.SimpleNamespace(api_key="agent-key")
 
     class FakeInkbox:
         instance = None
@@ -239,7 +239,7 @@ def test_admin_api_key_flow_selects_existing_identity_and_mints_agent_key(monkey
     )
 
     assert identity.agent_handle == "selected-agent"
-    assert agent_key == "ApiKey_agent_selected"
+    assert agent_key == "agent-key"
     assert did_provision_phone is False
     assert authority_identity is identity
     assert FakeInkbox.instance.api_keys.created == [

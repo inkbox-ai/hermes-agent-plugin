@@ -86,3 +86,10 @@ jobs:
             --override-ini pythonpath= \
             --import-mode=importlib \
             "$GITHUB_WORKSPACE/tests/contract" -v
+
+      - name: Verify Hermes plugin security scan
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" \
+            "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
+            "$GITHUB_WORKSPACE"

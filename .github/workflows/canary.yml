@@ -36,3 +36,10 @@ jobs:
 
       - name: Complete offline suite vs real Hermes main
         run: uv run pytest -q
+
+      - name: Verify Hermes plugin security scan
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" \
+            "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
+            "$GITHUB_WORKSPACE"
