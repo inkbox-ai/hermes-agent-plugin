@@ -1,6 +1,6 @@
 ---
 name: inkbox-email-triage
-description: Use when an inbound email arrives at the agent's Inkbox mailbox or when the user asks the agent to send/reply to email. Hermes can send and reply from current inbound context, but does not expose mailbox queue/read/forward/archive tools.
+description: Use for inbound email and user-requested outbound email. Hermes supports new messages and replies using the active inbound thread, but does not expose mailbox queue/read/forward/archive tools.
 user-invocable: false
 ---
 

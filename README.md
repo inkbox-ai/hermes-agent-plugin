@@ -25,7 +25,8 @@ Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching,
 - The recommended Hermes installer for macOS, Linux, or WSL2:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o hermes-install.sh && \
+  bash hermes-install.sh && rm hermes-install.sh
 source ~/.bashrc
 hermes setup
 ```
@@ -281,7 +282,7 @@ If a person disconnects the agent, outbound sends to that conversation fail unti
 
 Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. For explicit `inkbox_send_imessage` calls, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
 
-Group iMessage uses the same conversation-first behavior as group SMS. `inkbox_list_imessage_conversations` includes groups by default, `inkbox_get_imessage_conversation` returns their history, and `inkbox_send_imessage` replies with `conversationId`. To start a group, pass 2–8 distinct E.164 recipients in `to`; the plugin verifies that the identity has a dedicated outbound iMessage line first. Inbound group messages share a conversation session, include sender and participant context, and only trigger a visible reply when the agent is addressed or expected to act. Typing indicators and read receipts remain 1:1-only.
+Group iMessage uses the same conversation-first behavior as group SMS. `inkbox_list_imessage_conversations` returns groups by default, `inkbox_get_imessage_conversation` returns their history, and `inkbox_send_imessage` replies with `conversationId`. To start a group, pass 2–8 distinct E.164 recipients in `to`; the plugin verifies that the identity has a dedicated outbound iMessage line first. Inbound group messages reuse one conversation session, carry sender and participant details, and only trigger a visible reply when the agent is addressed or expected to act. Typing indicators and read receipts remain 1:1-only.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -375,7 +376,7 @@ After the gateway starts:
 | `INKBOX_HOME_CHANNEL` | no | - | Default Inkbox chat/contact id for cron or notification delivery. |
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
-| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
+| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Add generated memories for the matched sender or caller to inbound turns. `platforms.inkbox.contact_memories_enabled` takes precedence. |
 | `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS` | no | `180` | Seconds between progress updates for an active inbound A2A task. Set to `0` to disable periodic updates. `platforms.inkbox.a2a_progress_interval_seconds` takes precedence. |
 | `INKBOX_VOICE_STACK` | no | legacy migration | Phone call stack: `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
 | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Voice AI | `contact_scoped` | Voice AI tool authority: `contact_scoped` or `yolo`. |

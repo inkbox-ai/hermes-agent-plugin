@@ -1524,7 +1524,7 @@ def _is_hermes_admin_notice(
             tag = str(metadata.get(key) or "").lower().strip()
             if tag and tag in _ADMIN_NOTICE_METADATA_TYPES:
                 return True
-    head = (content or "").lstrip().lstrip("﻿")
+    head = (content or "").lstrip().lstrip(chr(0xFEFF))
     if head.startswith(_ADMIN_NOTICE_PREFIXES):
         return True
     for glyph in _TOOL_PROGRESS_GLYPHS:

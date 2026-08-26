@@ -8,6 +8,7 @@ def test_scheduled_failures_use_one_verified_reporting_path():
     canary = (ROOT / ".github/workflows/canary.yml").read_text()
     stack = (ROOT / ".github/workflows/live-stack.yml").read_text()
     report = (ROOT / ".github/workflows/scheduled-failure-report.yml").read_text()
+    reporter = (ROOT / "tests/ci/report_scheduled_failure.sh").read_text()
 
     assert "workflow_call:" in canary
     assert "schedule:" not in canary
@@ -21,5 +22,7 @@ def test_scheduled_failures_use_one_verified_reporting_path():
     assert "failure" in report and "timed_out" in report and "startup_failure" in report
     assert "if: always()" in report
     assert "actions: read" in report
-    assert "X-Hub-Signature-256" in report
-    assert "chat_thread_key" in report
+    assert 'report_scheduled_failure.sh" notification' in report
+    assert 'report_scheduled_failure.sh" event' in report
+    assert "X-Hub-Signature-256" in reporter
+    assert "chat_thread_key" in reporter

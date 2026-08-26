@@ -93,13 +93,7 @@ jobs:
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          HANDLE="$("$PY" - <<'PY'
-          import os
-          from inkbox import Inkbox
-          client = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"])
-          print(client.mailboxes.list()[0].email_address.split("@", 1)[0])
-          PY
-          )"
+          HANDLE="$("$PY" "$GITHUB_WORKSPACE/tests/ci/resolve_inkbox_identity.py")"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
