@@ -90,6 +90,8 @@ jobs:
       - name: Verify Hermes plugin security scan
         working-directory: ${{ runner.temp }}
         run: |
+          mkdir -p "$RUNNER_TEMP/plugin-scan"
+          git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$RUNNER_TEMP/plugin-scan"
           "$GITHUB_WORKSPACE/.venv/bin/python" \
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
-            "$GITHUB_WORKSPACE"
+            "$RUNNER_TEMP/plugin-scan"

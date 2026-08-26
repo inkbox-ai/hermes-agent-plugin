@@ -31,6 +31,13 @@ def test_host_contract_workflows_use_authenticated_checkout():
         assert "git clone --depth 1 https://github.com/NousResearch/hermes-agent" not in workflow
 
 
+def test_security_scan_uses_only_the_tracked_plugin_snapshot():
+    for name in ("canary.yml", "tests.yml"):
+        workflow = ROOT.joinpath(".github", "workflows", name).read_text()
+        assert 'git -C "$GITHUB_WORKSPACE" archive HEAD' in workflow
+        assert '"$RUNNER_TEMP/plugin-scan"' in workflow
+
+
 def test_live_workflows_precheckout_the_host_and_keep_bounded_install_retries():
     for name in (
         "live-a2a.yml",
