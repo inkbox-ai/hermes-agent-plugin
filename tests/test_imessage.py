@@ -489,6 +489,43 @@ def test_adapter_imessage_reply_uses_thread_conversation_id(monkeypatch):
     assert identity.sent_imessages == [{"conversation_id": "imconv-456", "text": "reply"}]
 
 
+def test_adapter_reply_keeps_imessage_thread_after_overlapping_call(monkeypatch):
+    identity = FakeIdentity()
+
+    async def _inline_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod.asyncio, "to_thread", _inline_to_thread)
+    adapter = _new_test_adapter()
+    adapter._active_call_ws = {}
+    adapter._voice_recently_closed = {"contact-123": adapter_mod.time.time() - 61}
+    adapter._last_inbound_modality = {}
+    adapter._last_inbound_imessage = {
+        "contact-123|imessage:imconv-456": {
+            "conversation_id": "imconv-456",
+            "remote_number": "+155****0101",
+            "message_id": "im-in",
+        },
+    }
+    adapter._inkbox = FakeInkboxClient(identity)
+    adapter._identity_handle = "agent"
+
+    # A voice call on the same contact can overwrite and then clear the shared
+    # modality while this iMessage turn is still running. The turn's immutable
+    # thread id must remain authoritative for its eventual reply.
+    result = asyncio.run(adapter.send(
+        "contact-123",
+        "receipt processed",
+        metadata={"thread_id": "imessage:imconv-456"},
+    ))
+
+    assert result.success is True
+    assert identity.sent_imessages == [{
+        "conversation_id": "imconv-456",
+        "text": "receipt processed",
+    }]
+
+
 def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
     identity = FakeIdentity()
 
