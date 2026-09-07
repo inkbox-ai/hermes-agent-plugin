@@ -42,7 +42,8 @@ def test_pcm_silence_reset_and_legacy_formats():
         call.configure({'encoding': 'L16', 'sample_rate': 8000, 'channels': 1})
 
 
-def test_start_descriptor_drives_actual_inbound_conversion():
+def test_start_descriptor_drives_actual_inbound_conversion(caplog):
+    caplog.set_level("INFO")
     import asyncio
     descriptor = {'encoding': 'L16', 'sample_rate': 16000, 'channels': 1}
     peer = _FakeOpenAIWS([
@@ -56,6 +57,7 @@ def test_start_descriptor_drives_actual_inbound_conversion():
     assert 956 <= len(base64.b64decode(append['audio'])) <= 960
     assert state.audio.outbound.target_rate == 16000
     assert state.stream_id == "hd-stream"
+    assert "call_id=call-123 audio_format=pcm_s16le sample_rate=16000" in caplog.text
 
 
 def test_hd_output_converts_and_resets_partial_samples_on_interrupt():

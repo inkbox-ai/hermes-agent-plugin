@@ -1232,6 +1232,12 @@ async def _inkbox_to_openai_pump(
                 start = frame.get("start") or {}
                 state.stream_id = frame.get("stream_id") or start.get("stream_id") or state.stream_id
                 state.audio.configure(start.get("media_format", frame.get("media_format")))
+                logger.info(
+                    "[Inkbox realtime] call_id=%s audio_format=%s sample_rate=%d",
+                    meta.call_id,
+                    "pcmu" if state.audio.inbound.decode_ulaw else "pcm_s16le",
+                    state.audio.inbound.source_rate,
+                )
                 await _maybe_send_greeting(openai_ws, state, meta)
             elif event == "media":
                 if not state.greeting_triggered:
