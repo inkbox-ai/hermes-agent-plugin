@@ -388,6 +388,14 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "just write it. Only call inkbox_send_email to email a DIFFERENT thread or "
     "recipient, never to reply here (that sends your message twice).",
 }
+_ACTION_EXECUTION_GUIDANCE = (
+    "For a requested action such as placing a call or sending to another channel, "
+    "invoke the relevant tool; a text reply does not perform that action. "
+    "If Hermes exposes tool_search, tool_describe, and tool_call, discovery only "
+    "returns schemas: execute a discovered tool with tool_call, passing its name "
+    "and arguments. If the tool is directly available, call it directly. "
+    "Do not report an action as performed unless its tool result confirms success."
+)
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
 IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
 IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
@@ -5952,6 +5960,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # it's always in context — an operator prompt (if any) is appended after.
         builtin = _REPLY_AUTOSEND_DIRECTIVES.get(modality)
         if builtin:
+            builtin = f"{builtin}\n\n{_ACTION_EXECUTION_GUIDANCE}"
             prompt = f"{builtin}\n\n{prompt}" if prompt else builtin
         configured = self._lookup_channel_skills(extra, contact_key, modality)
         return prompt, self._merge_auto_skills(default_skills, configured)
