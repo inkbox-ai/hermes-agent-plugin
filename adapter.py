@@ -4307,6 +4307,9 @@ class InkboxAdapter(BasePlatformAdapter):
             "Call inkbox_send_sms exactly once with `to` set to the exact "
             f"authoritative remote number `{remote_phone}` and `text` set to "
             "the still-needed SMS body from the SMS-only context below.",
+            "If the caller supplied an exact message body in the action or "
+            "transcript, copy it verbatim. Do not replace it with an "
+            "acknowledgment, summary, or generic follow-up.",
             "Do not use conversationId, another recipient, or plain prose. "
             "Do not reply [SILENT] or skip the tool in this correction turn. "
             "Do not execute any non-SMS post-call action. Stop after the tool result.",
@@ -7548,6 +7551,21 @@ class InkboxAdapter(BasePlatformAdapter):
         call_id = str(call.get("id") or "").strip()
         if not call_id:
             return web.Response(status=200, text="ignored")
+        admissions = self.__dict__.setdefault("_hosted_call_admissions", set())
+        if call_id in admissions:
+            return web.Response(status=200, text="duplicate")
+        admissions.add(call_id)
+        try:
+            return await self._admit_hosted_call_completion(
+                envelope, data, call, call_id, _safe_recovery=_safe_recovery,
+            )
+        finally:
+            admissions.discard(call_id)
+
+    async def _admit_hosted_call_completion(
+        self, envelope: Dict[str, Any], data: Dict[str, Any],
+        call: Dict[str, Any], call_id: str, *, _safe_recovery: bool = False,
+    ) -> "web.Response":
         event_id = str(envelope.get("id") or "").strip()
         existing = self._read_hosted_call_registry().get(call_id)
         existing_state = (
@@ -7732,6 +7750,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 f"remote number `{escaped_remote}` and `text` set to the "
                 "requested SMS body. Do not use conversationId for this "
                 "post-call send.",
+                "If the caller supplied an exact message body in the action or "
+                "transcript, copy it verbatim. Do not replace it with an "
+                "acknowledgment, summary, or generic follow-up.",
                 "The SMS commitment is complete only after inkbox_send_sms "
                 "returns a success payload with `ok: true`. Plain text is not "
                 "a send and does not complete the commitment.",
@@ -8601,6 +8622,9 @@ class InkboxAdapter(BasePlatformAdapter):
             "Do not merely say still-needed actions are impossible. If an email, "
             "SMS, note, or contact update is still needed and enough recipient/"
             "content info is present, perform it.",
+            "If the caller supplied an exact message body in the action or "
+            "transcript, copy it verbatim. Do not replace it with an "
+            "acknowledgment, summary, or generic follow-up.",
             "Do NOT send a confirmation follow-up after successful work unless the "
             "caller explicitly requested one. Only if required information is "
             "missing, ask the caller for the missing information. Try SMS first; "

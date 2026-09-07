@@ -255,6 +255,8 @@ def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
     assert len(events) == 1
     prompt = events[0].text
     assert "SMS post-call tool contract:" in prompt
+    assert "copy it verbatim" in prompt
+    assert "acknowledgment, summary, or generic follow-up" in prompt
     assert "use inkbox_send_sms" in prompt
     assert "tool_search" in prompt
     assert "`to` set to the exact authoritative remote number `+15551112222`" in prompt
@@ -526,6 +528,7 @@ def test_hosted_sms_missing_tool_enqueues_one_correction(tmp_path, monkeypatch):
     assert len(events) == 2
     correction = events[1]
     assert "only correction attempt" in correction.text
+    assert "copy it verbatim" in correction.text
     assert "Do not reply [SILENT] or skip the tool" in correction.text
     assert correction.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
     receipt = instance._read_hosted_call_registry()["call-1"]
@@ -1144,3 +1147,45 @@ def test_hosted_completion_enqueue_failure_allows_webhook_retry(tmp_path):
         asyncio.run(instance._on_call_ended(_payload()))
 
     assert instance._read_hosted_call_registry() == {}
+
+
+def test_concurrent_distinct_events_for_one_call_enqueue_once(tmp_path, monkeypatch):
+    instance, events = _adapter(tmp_path)
+
+    async def scenario():
+        fetching = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_fetch(fn, *args):
+            fetching.set()
+            await release.wait()
+            return fn(*args)
+
+        monkeypatch.setattr(adapter_mod.asyncio, "to_thread", delayed_fetch)
+        first = asyncio.create_task(instance._on_call_ended(_payload(event_id="first")))
+        await fetching.wait()
+        duplicate = await instance._on_call_ended(_payload(event_id="second"))
+        assert duplicate.text == "duplicate"
+        assert not events
+        release.set()
+        assert (await first).status == 200
+        assert len(events) == 1
+        assert not instance._hosted_call_admissions
+
+    asyncio.run(scenario())
+
+
+def test_failed_admission_releases_call_for_retry(tmp_path):
+    instance, events = _adapter(tmp_path)
+    enqueue = instance._enqueue
+
+    async def fail_enqueue(event):
+        raise RuntimeError("queue unavailable")
+
+    instance._enqueue = fail_enqueue
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        asyncio.run(instance._on_call_ended(_payload()))
+    assert not instance._hosted_call_admissions
+    instance._enqueue = enqueue
+    assert asyncio.run(instance._on_call_ended(_payload())).status == 200
+    assert len(events) == 1
