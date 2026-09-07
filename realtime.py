@@ -1229,8 +1229,9 @@ async def _inkbox_to_openai_pump(
                 continue
             event = (frame.get("event") or "").lower()
             if event == "start":
-                state.stream_id = frame.get("stream_id") or state.stream_id
-                state.audio.configure(frame.get("media_format"))
+                start = frame.get("start") or {}
+                state.stream_id = frame.get("stream_id") or start.get("stream_id") or state.stream_id
+                state.audio.configure(start.get("media_format", frame.get("media_format")))
                 await _maybe_send_greeting(openai_ws, state, meta)
             elif event == "media":
                 if not state.greeting_triggered:

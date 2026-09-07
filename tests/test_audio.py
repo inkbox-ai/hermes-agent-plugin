@@ -46,7 +46,7 @@ def test_start_descriptor_drives_actual_inbound_conversion():
     import asyncio
     descriptor = {'encoding': 'L16', 'sample_rate': 16000, 'channels': 1}
     peer = _FakeOpenAIWS([
-        {'event': 'start', 'media_format': descriptor},
+        {'event': 'start', 'start': {'media_format': descriptor, 'stream_id': 'hd-stream'}},
         {'event': 'media', 'media': {'payload': _encoded(bytes(640))}},
     ])
     upstream = _FakeWS()
@@ -55,6 +55,7 @@ def test_start_descriptor_drives_actual_inbound_conversion():
     append = next(frame for frame in upstream.sent if frame['type'] == 'input_audio_buffer.append')
     assert 956 <= len(base64.b64decode(append['audio'])) <= 960
     assert state.audio.outbound.target_rate == 16000
+    assert state.stream_id == "hd-stream"
 
 
 def test_hd_output_converts_and_resets_partial_samples_on_interrupt():
