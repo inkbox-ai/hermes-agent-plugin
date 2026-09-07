@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v7
@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'inkbox>=0.5.9,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.5.9,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -74,7 +74,7 @@ jobs:
         run: |
           uv venv --python 3.12
           uv pip install \
-            'inkbox>=0.5.9,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.5.9,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 

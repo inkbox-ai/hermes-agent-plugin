@@ -42,7 +42,10 @@ _CALL_ME_PHRASINGS = (
 def _call_me_text() -> str:
     """A fresh call-request body each send (rotating phrasing + unique ref)."""
     phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
-    return f"{phrasing} (ref {uuid.uuid4().hex[:6]})"
+    return (
+        f"{phrasing} This is my authorization to place the call now; "
+        f"please execute the call rather than only describe it. (ref {uuid.uuid4().hex[:6]})"
+    )
 
 
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")

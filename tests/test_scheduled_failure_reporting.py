@@ -26,3 +26,12 @@ def test_scheduled_failures_use_one_verified_reporting_path():
     assert 'report_scheduled_failure.sh" event' in report
     assert "X-Hub-Signature-256" in reporter
     assert "chat_thread_key" in reporter
+
+
+def test_reporter_checks_out_trusted_scripts_before_execution():
+    report = (ROOT / ".github/workflows/scheduled-failure-report.yml").read_text()
+    assert "contents: read" in report
+    assert "ref: ${{ github.event.repository.default_branch }}" in report
+    assert "persist-credentials: false" in report
+    assert report.index("uses: actions/checkout@") < report.index("- name: Post failure notification")
+    assert "ref: ${{ github.event.workflow_run.head_sha }}" not in report

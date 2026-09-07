@@ -10,7 +10,7 @@ The bridge:
 1. Preflights an OpenAI Realtime API WebSocket
    (``wss://api.openai.com/v1/realtime?model=<model>``) and sends
    ``session.update`` configuring tools, instructions, and the
-   ``g711_ulaw`` input/output audio format.
+   24 kHz PCM input/output audio format.
 2. Lets the adapter accept the Inkbox call WS with
    ``x-use-inkbox-text-to-speech: false`` and
    ``x-use-inkbox-speech-to-text: false`` headers only after OpenAI is ready,
@@ -51,6 +51,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 try:
+    from .audio import CallAudio
+except ImportError:  # Standalone plugin loading.
+    from audio import CallAudio
+
+try:
     import aiohttp
 except ImportError:  # pragma: no cover — aiohttp is a core dep on this fork
     aiohttp = None  # type: ignore
@@ -60,7 +65,7 @@ logger = logging.getLogger(__name__)
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_MODEL = "gpt-realtime-2"
 DEFAULT_VOICE = "cedar"
-AUDIO_FORMAT_TELEPHONY = {"type": "audio/pcmu"}
+AUDIO_FORMAT_PCM = {"type": "audio/pcm", "rate": 24000}
 INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 AGENT_CONSULT_TOOL_NAME = "consult_agent"
@@ -538,6 +543,7 @@ class RealtimeConsultResult:
 
 @dataclass
 class _BridgeState:
+    audio: CallAudio = field(default_factory=CallAudio)
     transcript: List[Tuple[str, str]] = field(default_factory=list)
     post_call_actions: List[Dict[str, str]] = field(default_factory=list)
     consult_results: List[RealtimeConsultResult] = field(default_factory=list)
@@ -1167,7 +1173,7 @@ async def _send_session_update(
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
-                    "format": AUDIO_FORMAT_TELEPHONY,
+                    "format": AUDIO_FORMAT_PCM,
                     "noise_reduction": None,
                     "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
                     # Server-side VAD with default settings — the model
@@ -1184,7 +1190,7 @@ async def _send_session_update(
                     },
                 },
                 "output": {
-                    "format": AUDIO_FORMAT_TELEPHONY,
+                    "format": AUDIO_FORMAT_PCM,
                     "voice": config.voice,
                 },
             },
@@ -1224,12 +1230,16 @@ async def _inkbox_to_openai_pump(
             event = (frame.get("event") or "").lower()
             if event == "start":
                 state.stream_id = frame.get("stream_id") or state.stream_id
+                state.audio.configure(frame.get("media_format"))
                 await _maybe_send_greeting(openai_ws, state, meta)
             elif event == "media":
                 if not state.greeting_triggered:
                     await _maybe_send_greeting(openai_ws, state, meta)
                 payload_b64 = (frame.get("media") or {}).get("payload")
                 if payload_b64:
+                    payload_b64 = state.audio.inbound.convert(payload_b64)
+                    if not payload_b64:
+                        continue
                     state.caller_media_frames += 1
                     await openai_ws.send_str(json.dumps({
                         "type": "input_audio_buffer.append",
@@ -1508,11 +1518,12 @@ async def _openai_to_inkbox_pump(
 
         # GA emits ``response.output_audio.delta``; beta ``response.audio.delta``.
         if ftype in ("response.output_audio.delta", "response.audio.delta"):
-            # Already μ-law base64. Forward as an outbound Inkbox media frame,
-            # echoing the stream_id and tagging the track per the Inkbox media
-            # protocol.
+            # Convert the streaming PCM response to the negotiated call format.
             delta_b64 = frame.get("delta") or ""
             if delta_b64:
+                delta_b64 = state.audio.outbound.convert(delta_b64)
+                if not delta_b64:
+                    continue
                 # Goodbye audio is still streaming — hold any pending
                 # auto-confirm so the farewell isn't clipped mid-word.
                 _cancel_hangup_auto_confirm(state)
@@ -1530,6 +1541,7 @@ async def _openai_to_inkbox_pump(
 
         # Outbound audio for a response finished — tell Inkbox to flush/play.
         elif ftype in ("response.output_audio.done", "response.audio.done"):
+            state.audio.outbound.reset()
             done = {"event": "audio_done"}
             if state.stream_id:
                 done["stream_id"] = state.stream_id
@@ -1556,6 +1568,7 @@ async def _openai_to_inkbox_pump(
 
         # Caller started speaking (barge-in) — drop any queued outbound audio.
         elif ftype == "input_audio_buffer.speech_started":
+            state.audio.outbound.reset()
             if state.hangup_armed_at is not None:
                 state.hangup_armed_at = None
                 _cancel_hangup_auto_confirm(state)

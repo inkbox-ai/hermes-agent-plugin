@@ -333,7 +333,10 @@ def test_auto_accept_call_context_carries_memories_without_webhook_prestash(monk
         headers={"x-call-context": context},
     )
 
-    asyncio.run(adapter._handle_call_ws(request))
+    ws = asyncio.run(adapter._handle_call_ws(request))
+    assert ws.headers["x-inkbox-audio-format"] == "pcm_s16le_16000"
+    assert ws.headers["x-use-inkbox-text-to-speech"] == "false"
+    assert ws.headers["x-use-inkbox-speech-to-text"] == "false"
 
     assert captured["meta"].contact_known is True
     assert captured["meta"].contact_name is None

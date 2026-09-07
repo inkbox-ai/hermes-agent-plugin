@@ -7877,6 +7877,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
         async def _prepare_call_ws(*, use_realtime: bool) -> None:
             if use_realtime:
+                ws.headers["x-inkbox-audio-format"] = "pcm_s16le_16000"
                 ws.headers["x-use-inkbox-text-to-speech"] = "false"
                 ws.headers["x-use-inkbox-speech-to-text"] = "false"
             else:
