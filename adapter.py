@@ -4214,10 +4214,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 str(action.get(field) or "")
                 for field in ("action", "description", "details")
             )
-            context.extend(_positive_sms_clauses(
-                action_text,
-                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
-            ))
+            if _positive_sms_clauses(action_text, _OPEN_ACTION_SMS_COMMITMENT_PATTERNS):
+                # Preserve explicit message bodies, including punctuation.
+                context.append(action_text)
         for text in transcript_texts:
             context.extend(_positive_sms_clauses(
                 text,

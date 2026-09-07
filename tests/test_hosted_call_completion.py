@@ -1189,3 +1189,19 @@ def test_failed_admission_releases_call_for_retry(tmp_path):
     instance._enqueue = enqueue
     assert asyncio.run(instance._on_call_ended(_payload())).status == 200
     assert len(events) == 1
+
+
+def test_sms_correction_preserves_exact_action_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    body = "Banana! Telescope? Library."
+    payload["data"]["post_call_action_items"] = [
+        {"action": "Email the release details", "status": "open"},
+        {"action": "Send the caller an SMS.", "details": f"Exact body: {body}", "status": "open"},
+    ]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+    assert body in events[1].text
+    assert "Email the release details" not in events[1].text
