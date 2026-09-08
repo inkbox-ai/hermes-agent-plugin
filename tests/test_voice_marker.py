@@ -72,6 +72,8 @@ def test_hosted_voice_workflow_keeps_peer_alive_for_test_owned_hangup():
         in workflow
     )
     assert "export VOICE_DRIVER_LISTEN=180" in workflow
+    assert "export VOICE_DRIVER_REASK=0" in workflow
+    assert "export VOICE_DRIVER_NUDGE=" not in workflow
     assert "export VOICE_DRIVER_LISTEN=45" not in workflow
     assert hosted_proof.index("_wait_for_hosted_request(") < hosted_proof.index("_wait_for_hosted_action(")
     assert hosted_proof.index("_wait_for_hosted_action(") < hosted_proof.index("finally:")

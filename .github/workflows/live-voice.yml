@@ -159,8 +159,7 @@ jobs:
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
-            export VOICE_DRIVER_REASK=30
-            export VOICE_DRIVER_NUDGE="Please verify the one queued SMS body is exactly: $HOSTED_MARKER. Correct the existing action if needed; do not create another action or send it yet."
+            export VOICE_DRIVER_REASK=0
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
