@@ -18,6 +18,7 @@ RUN /usr/local/bin/uv pip install \
         --python /opt/hermes/.venv/bin/python \
         "inkbox==0.5.9" \
         "aiohttp>=3.9" \
+        "audioop-lts>=0.2.1; python_version >= '3.13'" \
         "segno>=1.5"
 
 # Hermes's plugin installer expects a Git repository. Build one from the local

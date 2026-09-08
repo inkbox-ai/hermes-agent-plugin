@@ -270,7 +270,7 @@ def test_proactive_greeting_fires_once_without_output_modalities():
 def test_openai_audio_frames_match_inkbox_media_protocol():
     inkbox_ws = _FakeWS()
     openai_ws = _FakeOpenAIWS([
-        {"type": "response.output_audio.delta", "delta": "AAAA"},
+        {"type": "response.output_audio.delta", "delta": "AAAAAAAA"},
         {"type": "response.output_audio.done"},
         {"type": "input_audio_buffer.speech_started"},
     ])
@@ -290,7 +290,7 @@ def test_openai_audio_frames_match_inkbox_media_protocol():
     ))
 
     media = next(frame for frame in inkbox_ws.sent if frame.get("event") == "media")
-    assert media["media"]["payload"] == "AAAA"
+    assert media["media"]["payload"] == "/w=="
     assert media["media"]["track"] == "outbound"
     assert media["stream_id"] == "stream-xyz"
     assert {"event": "audio_done", "stream_id": "stream-xyz"} in inkbox_ws.sent
@@ -449,7 +449,7 @@ def test_agent_consult_does_not_block_audio_pump():
             },
             # ...and audio arrives WHILE the consult is still running. The pump
             # must forward this without waiting for the consult to finish.
-            {"type": "response.output_audio.delta", "delta": "ONEMOMENT"},
+            {"type": "response.output_audio.delta", "delta": "AAAAAAAA"},
         ])
         state = _BridgeState()
         state.stream_id = "stream-c"
@@ -467,7 +467,7 @@ def test_agent_consult_does_not_block_audio_pump():
         # consult has not returned yet.
         assert any(
             frame.get("event") == "media"
-            and frame["media"]["payload"] == "ONEMOMENT"
+            and frame["media"]["payload"] == "/w=="
             for frame in inkbox_ws.sent
         )
         # The consult was handed off to a background task, not awaited inline.

@@ -106,3 +106,33 @@ def test_live_identity_resolution_uses_the_configured_api(monkeypatch):
 
     assert resolve_identity(fake_client_factory) == "ci-agent"
     assert calls == [{"api_key": "test-key", "base_url": "https://example.com"}]
+
+
+def test_installer_retries_a_hung_attempt_without_waiting_for_job_timeout(tmp_path):
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl = bin_dir / "curl"
+    curl.write_text('''#!/bin/bash
+cat > "$RUNNER_TEMP/hermes-install.sh" <<'INSTALL'
+#!/bin/bash
+if [ ! -e "$RUNNER_TEMP/first-attempt" ]; then
+  touch "$RUNNER_TEMP/first-attempt"
+  /bin/sleep 30
+fi
+INSTALL
+''')
+    curl.chmod(0o755)
+    sleep = bin_dir / "sleep"
+    sleep.write_text("#!/bin/bash\nexit 0\n")
+    sleep.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(ROOT / "tests/ci/install_hermes.sh"), "--skip-browser", "--no-skills"],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path),
+             "HERMES_INSTALL_TIMEOUT": "0.1", "HERMES_INSTALL_ATTEMPTS": "2"},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "attempt 1 failed; retrying" in result.stdout

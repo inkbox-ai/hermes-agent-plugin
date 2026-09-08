@@ -116,3 +116,36 @@ def test_live_inkbox_tool_scope_excludes_builtin_and_mcp(monkeypatch):
     assert "test-mcp" not in enabled
     assert "terminal" not in enabled
     assert "browser" not in enabled
+
+
+def test_deferred_discovery_does_not_execute_but_tool_call_does(monkeypatch):
+    import json
+    import model_tools
+    from tools.registry import registry
+
+    name = "inkbox_contract_call"
+    schema = {
+        "name": name,
+        "description": "Exercise deferred plugin action execution.",
+        "parameters": {"type": "object", "properties": {"purpose": {"type": "string"}}, "required": ["purpose"]},
+    }
+    called = []
+
+    def handler(args, **kwargs):
+        called.append(args)
+        return json.dumps({"ok": True, "call_id": "synthetic-call"})
+
+    monkeypatch.setattr(registry, "_tools", dict(registry._tools))
+    registry.register(name=name, toolset="inkbox", schema=schema, handler=handler)
+    defs = [{"type": "function", "function": schema}]
+    monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **kwargs: defs)
+    described = json.loads(model_tools.handle_function_call(
+        "tool_describe", {"names": [name]}, enabled_toolsets=["inkbox"],
+    ))
+    assert described["tools"][name]["parameters"] == schema["parameters"]
+    assert called == []
+    result = json.loads(model_tools.handle_function_call(
+        "tool_call", {"name": name, "arguments": {"purpose": "Call me back"}}, enabled_toolsets=["inkbox"],
+    ))
+    assert result == {"ok": True, "call_id": "synthetic-call"}
+    assert called == [{"purpose": "Call me back"}]

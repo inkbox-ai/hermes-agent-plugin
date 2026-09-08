@@ -388,6 +388,14 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "just write it. Only call inkbox_send_email to email a DIFFERENT thread or "
     "recipient, never to reply here (that sends your message twice).",
 }
+_ACTION_EXECUTION_GUIDANCE = (
+    "For a requested action such as placing a call or sending to another channel, "
+    "invoke the relevant tool; a text reply does not perform that action. "
+    "If Hermes exposes tool_search, tool_describe, and tool_call, discovery only "
+    "returns schemas: execute a discovered tool with tool_call, passing its name "
+    "and arguments. If the tool is directly available, call it directly. "
+    "Do not report an action as performed unless its tool result confirms success."
+)
 SMS_MAX_LENGTH = 1600  # Inkbox SMS hard cap
 IMESSAGE_MAX_LENGTH = 18995  # Sendblue-compatible iMessage text cap
 IMESSAGE_MEDIA_MAX_BYTES = 10 * 1024 * 1024
@@ -4214,10 +4222,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 str(action.get(field) or "")
                 for field in ("action", "description", "details")
             )
-            context.extend(_positive_sms_clauses(
-                action_text,
-                _OPEN_ACTION_SMS_COMMITMENT_PATTERNS,
-            ))
+            if _positive_sms_clauses(action_text, _OPEN_ACTION_SMS_COMMITMENT_PATTERNS):
+                # Preserve explicit message bodies, including punctuation.
+                context.append(action_text)
         for text in transcript_texts:
             context.extend(_positive_sms_clauses(
                 text,
@@ -4307,6 +4314,9 @@ class InkboxAdapter(BasePlatformAdapter):
             "Call inkbox_send_sms exactly once with `to` set to the exact "
             f"authoritative remote number `{remote_phone}` and `text` set to "
             "the still-needed SMS body from the SMS-only context below.",
+            "If the caller supplied an exact message body in the action or "
+            "transcript, copy it verbatim. Do not replace it with an "
+            "acknowledgment, summary, or generic follow-up.",
             "Do not use conversationId, another recipient, or plain prose. "
             "Do not reply [SILENT] or skip the tool in this correction turn. "
             "Do not execute any non-SMS post-call action. Stop after the tool result.",
@@ -5950,6 +5960,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # it's always in context — an operator prompt (if any) is appended after.
         builtin = _REPLY_AUTOSEND_DIRECTIVES.get(modality)
         if builtin:
+            builtin = f"{builtin}\n\n{_ACTION_EXECUTION_GUIDANCE}"
             prompt = f"{builtin}\n\n{prompt}" if prompt else builtin
         configured = self._lookup_channel_skills(extra, contact_key, modality)
         return prompt, self._merge_auto_skills(default_skills, configured)
@@ -7548,6 +7559,21 @@ class InkboxAdapter(BasePlatformAdapter):
         call_id = str(call.get("id") or "").strip()
         if not call_id:
             return web.Response(status=200, text="ignored")
+        admissions = self.__dict__.setdefault("_hosted_call_admissions", set())
+        if call_id in admissions:
+            return web.Response(status=200, text="duplicate")
+        admissions.add(call_id)
+        try:
+            return await self._admit_hosted_call_completion(
+                envelope, data, call, call_id, _safe_recovery=_safe_recovery,
+            )
+        finally:
+            admissions.discard(call_id)
+
+    async def _admit_hosted_call_completion(
+        self, envelope: Dict[str, Any], data: Dict[str, Any],
+        call: Dict[str, Any], call_id: str, *, _safe_recovery: bool = False,
+    ) -> "web.Response":
         event_id = str(envelope.get("id") or "").strip()
         existing = self._read_hosted_call_registry().get(call_id)
         existing_state = (
@@ -7732,6 +7758,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 f"remote number `{escaped_remote}` and `text` set to the "
                 "requested SMS body. Do not use conversationId for this "
                 "post-call send.",
+                "If the caller supplied an exact message body in the action or "
+                "transcript, copy it verbatim. Do not replace it with an "
+                "acknowledgment, summary, or generic follow-up.",
                 "The SMS commitment is complete only after inkbox_send_sms "
                 "returns a success payload with `ok: true`. Plain text is not "
                 "a send and does not complete the commitment.",
@@ -7877,6 +7906,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
         async def _prepare_call_ws(*, use_realtime: bool) -> None:
             if use_realtime:
+                ws.headers["x-inkbox-audio-format"] = "pcm_s16le_16000"
                 ws.headers["x-use-inkbox-text-to-speech"] = "false"
                 ws.headers["x-use-inkbox-speech-to-text"] = "false"
             else:
@@ -8600,6 +8630,9 @@ class InkboxAdapter(BasePlatformAdapter):
             "Do not merely say still-needed actions are impossible. If an email, "
             "SMS, note, or contact update is still needed and enough recipient/"
             "content info is present, perform it.",
+            "If the caller supplied an exact message body in the action or "
+            "transcript, copy it verbatim. Do not replace it with an "
+            "acknowledgment, summary, or generic follow-up.",
             "Do NOT send a confirmation follow-up after successful work unless the "
             "caller explicitly requested one. Only if required information is "
             "missing, ask the caller for the missing information. Try SMS first; "

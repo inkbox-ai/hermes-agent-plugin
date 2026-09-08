@@ -256,6 +256,8 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
+Realtime calls negotiate HD mono PCM16 audio at 16 kHz. The bridge resamples to and from the realtime session’s 24 kHz PCM format, with legacy 8 kHz call compatibility.
+
 ### Two calling lines
 
 Calls — inbound and outbound — can run over either of two lines, and the agent picks the one that matches the channel it's talking on:

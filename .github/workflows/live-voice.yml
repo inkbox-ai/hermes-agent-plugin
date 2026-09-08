@@ -89,7 +89,7 @@ jobs:
           "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.5.9,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.5.9,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
 
       - name: Configure AUT identity + model + speech path (${{ matrix.scenario }})
@@ -159,6 +159,7 @@ jobs:
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_REASK=0
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."

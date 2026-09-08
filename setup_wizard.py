@@ -75,7 +75,10 @@ except Exception:  # pragma: no cover - local tests without Hermes
 
 
 INKBOX_MIN_VERSION = "0.5.9"
-INKBOX_REQUIREMENTS = (f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5")
+INKBOX_REQUIREMENTS = (
+    f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
+    "audioop-lts>=0.2.1; python_version >= '3.13'",
+)
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.png"
 _RAW_AVATAR_BASE_URL_DEFAULT = "https://inkbox.ai"

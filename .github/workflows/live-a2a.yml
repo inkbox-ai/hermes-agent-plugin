@@ -85,7 +85,7 @@ jobs:
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install \
             --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
 
       - name: Configure the deterministic model and AUT identity
         env:
