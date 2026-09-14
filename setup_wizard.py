@@ -1806,14 +1806,7 @@ def _gateway_runtime_state() -> tuple[bool | None, bool]:
         return bool(snapshot.running), bool(snapshot.service_installed)
     except Exception:
         pass
-    # Fallback: the PID/lock file the gateway writes for itself. It knows
-    # nothing about installed services, so callers only get liveness here.
-    try:
-        from gateway.status import is_gateway_running
-
-        return bool(is_gateway_running()), False
-    except Exception:
-        return None, False
+    return None, False
 
 
 def _run_gateway_command(action: str) -> bool:
