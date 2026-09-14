@@ -14,7 +14,7 @@ jobs:
   # and the contract tests auto-skip. Fast signal on our own code — cheap enough to
   # run on every push, including draft PRs (the heavy live suite is what we gate).
   unit:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +53,7 @@ jobs:
   # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
   # Same suite the canary runs on a schedule; this is the per-PR gate version.
   contract-pr:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@v7
