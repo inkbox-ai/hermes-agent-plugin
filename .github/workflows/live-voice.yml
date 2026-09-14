@@ -159,15 +159,11 @@ jobs:
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
-            export VOICE_DRIVER_REASK=0
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
             export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email
             export VOICE_DRIVER_ANSWER_SETTLE=4
-            # No driver re-ask (VOICE_DRIVER_REASK defaults to 0): the realtime
-            # path now says its own filler during the silent contact read, so the
-            # call stays alive without the caller nudging. Set REASK>0 to re-enable.
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
