@@ -43,7 +43,7 @@ concurrency:
 
 jobs:
   a2a:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 12
     strategy:
       fail-fast: false
