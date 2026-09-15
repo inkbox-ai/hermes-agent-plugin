@@ -152,7 +152,7 @@ def _a2a_diagnostics(client: Any, identity_id: Any) -> Dict[str, Any]:
         set(
             str(event_type)
             for event_type in (_field(row, "event_types", []) or [])
-        ) == _DESIRED_A2A_EVENTS
+        ).issuperset(_DESIRED_A2A_EVENTS)
         and str(_field(row, "status", "")) == "active"
         for row in a2a_subscriptions
     )

@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
   "audioop-lts>=0.2.1; python_version >= '3.13'",
-  "inkbox>=0.5.9,<1.0.0",
+  "inkbox>=0.6.12,<1.0.0",
   "segno>=1.5",
 ]
 
@@ -33,3 +33,6 @@ line-length = 125
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
+
+[tool.uv.sources]
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "9f54e8dbb4a540c5f721c26a296d47f7b1978b0f", subdirectory = "sdk/python" }

@@ -18,15 +18,9 @@ On ``connect()`` the adapter:
      the same tunnel. Data-plane auth uses the SDK client's ``x-api-key``
      directly. Production deployments can bypass tunneling entirely by
      setting ``INKBOX_PUBLIC_URL``.
-  2. Registers webhook subscriptions for the configured identity's
-     mailbox (``message.*`` events), phone number (``text.*``
-     events), and — when the identity is iMessage-enabled — the
-     identity itself (``imessage.*`` and ``call.*`` events use separate
-     subscriptions because each subscription belongs to one event channel;
-     shared and dedicated iMessage lines are all owned by the agent identity)
-     pointing at the tunnel, and configures the identity's incoming-call
-     routing. Incoming call control remains synchronous, while completed-call
-     lifecycle events arrive through the ``call.*`` subscription.
+  2. Registers one identity-owned notification receiver for all consumed
+     event types, independently of optional channels. Existing compatible
+     subscription coverage is preserved. Incoming-call control stays separate.
   3. Starts an aiohttp server with two routes:
         - ``POST /webhook`` — verifies the ``X-Inkbox-Signature`` HMAC
           via the SDK, parses the body into one of three event shapes
@@ -157,6 +151,7 @@ try:
         hosted_sms_settlement,
         mark_hosted_binding_failure,
     )
+    from .webhook_subscriptions import reconcile_identity_subscription
     from .config import (
         INKBOX_BASE_URL_DEFAULT,
         VoiceStack,
@@ -200,6 +195,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         hosted_sms_settlement,
         mark_hosted_binding_failure,
     )
+    from webhook_subscriptions import reconcile_identity_subscription
     from config import (
         INKBOX_BASE_URL_DEFAULT,
         VoiceStack,
@@ -1092,257 +1088,8 @@ def _resolve_realtime_config(extra: Dict[str, Any]) -> RealtimeConfig:
     return config
 
 
-def _reconcile_subscription(
-    client,
-    *,
-    owner_kwarg: str,
-    owner_id,
-    desired_url: str,
-    previous_webhook_url: Optional[str],
-    desired_events: tuple[str, ...],
-):
-    """Reconcile a single owner's webhook subscription against desired state.
-
-    Returns the active subscription's id for DEBUG logging at the call site.
-    """
-    desired_set = set(desired_events)
-    desired_families = {
-        event_type.split(".", 1)[0] for event_type in desired_events
-    }
-    desired_endpoint = urlparse(desired_url)
-    desired_route = (
-        desired_endpoint.scheme,
-        desired_endpoint.netloc,
-        desired_endpoint.path.rstrip("/"),
-    )
-    list_kwargs = {owner_kwarg: owner_id}
-    existing = client.webhooks.subscriptions.list(**list_kwargs)
-
-    # Same URL + a compatible event superset: adopt verbatim, no writes. A
-    # provisioner may attach newer events from this channel before the plugin
-    # knows how to consume them; stripping those events can collide with a
-    # legacy duplicate before cleanup gets a chance to run.
-    for row in existing:
-        row_set = set(row.event_types)
-        row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
-        }
-        if (
-            row.url == desired_url
-            and desired_set.issubset(row_set)
-            and row_families == desired_families
-        ):
-            active_id = row.id
-            break
-    else:
-        # Patch only this event channel. Identity-owned channels may share one
-        # URL, so a row from another channel must remain untouched. Match the
-        # receiver route without its query string so URL normalization keeps
-        # the existing subscription (and its signing key).
-        drifted = next(
-            (
-                row
-                for row in existing
-                if desired_families
-                & {
-                    event_type.split(".", 1)[0]
-                    for event_type in row.event_types
-                }
-                and (
-                    (
-                        urlparse(row.url).scheme,
-                        urlparse(row.url).netloc,
-                        urlparse(row.url).path.rstrip("/"),
-                    )
-                    == desired_route
-                    or (
-                        previous_webhook_url
-                        and previous_webhook_url != desired_url
-                        and row.url == previous_webhook_url
-                    )
-                )
-            ),
-            None,
-        )
-        if drifted is not None:
-            updated = client.webhooks.subscriptions.update(
-                drifted.id,
-                url=desired_url,
-                event_types=list(desired_events),
-            )
-            active_id = updated.id
-        else:
-            active_id = _create_with_409_repair(
-                client,
-                owner_kwarg=owner_kwarg,
-                owner_id=owner_id,
-                desired_url=desired_url,
-                desired_events=desired_events,
-            )
-
-    # Cleanup runs after the active row is in place so a failure mid-reconcile
-    # can never leave the owner with zero receivers.
-    for row in client.webhooks.subscriptions.list(**list_kwargs):
-        if row.id == active_id:
-            continue
-        row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
-        }
-        row_endpoint = urlparse(row.url)
-        row_route = (
-            row_endpoint.scheme,
-            row_endpoint.netloc,
-            row_endpoint.path.rstrip("/"),
-        )
-        same_receiver = row_route == desired_route
-        previous_receiver = (
-            previous_webhook_url
-            and previous_webhook_url != desired_url
-            and row.url == previous_webhook_url
-        )
-        if desired_families & row_families and (
-            same_receiver or previous_receiver
-        ):
-            try:
-                client.webhooks.subscriptions.delete(row.id)
-            except InkboxAPIError as exc:
-                if exc.status_code == 404:
-                    pass  # already gone; fine
-                else:
-                    raise
-
-    return active_id
 
 
-def _create_with_409_repair(
-    client,
-    *,
-    owner_kwarg: str,
-    owner_id,
-    desired_url: str,
-    desired_events: tuple[str, ...],
-):
-    """POST a new subscription; on a 409 race, adopt or repair its channel."""
-    create_kwargs = {
-        owner_kwarg: owner_id,
-        "url": desired_url,
-        "event_types": list(desired_events),
-    }
-    try:
-        sub = client.webhooks.subscriptions.create(**create_kwargs)
-        return sub.id
-    except InkboxAPIError as exc:
-        if exc.status_code != 409:
-            raise
-
-    desired_set = set(desired_events)
-    desired_families = {
-        event_type.split(".", 1)[0] for event_type in desired_events
-    }
-    list_kwargs = {owner_kwarg: owner_id}
-    for row in client.webhooks.subscriptions.list(**list_kwargs):
-        if row.url != desired_url:
-            continue
-        row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
-        }
-        if not desired_families & row_families:
-            continue
-
-        if set(row.event_types) == desired_set:
-            return row.id
-
-        repaired = client.webhooks.subscriptions.update(
-            row.id, event_types=list(desired_events),
-        )
-        return repaired.id
-
-    # Theoretically unreachable: 409 says the row exists, but the followup
-    # list didn't surface it. Re-raise the original collision shape so
-    # higher layers see a clear failure rather than a None.
-    raise InkboxAPIError(
-        status_code=409,
-        detail=(
-            f"Webhook subscription collision on {owner_kwarg}={owner_id} "
-            f"url={desired_url}, but follow-up list did not return the row."
-        ),
-    )
-
-
-def _reconcile_mail_subscription(
-    client,
-    mailbox_id,
-    desired_url: str,
-    previous_webhook_url: Optional[str],
-    desired_events: tuple[str, ...] = _DESIRED_MAIL_EVENTS,
-):
-    """Reconcile a mailbox's webhook subscription against the desired state."""
-    return _reconcile_subscription(
-        client,
-        owner_kwarg="mailbox_id",
-        owner_id=mailbox_id,
-        desired_url=desired_url,
-        previous_webhook_url=previous_webhook_url,
-        desired_events=desired_events,
-    )
-
-
-def _reconcile_text_subscription(
-    client,
-    phone_number_id,
-    desired_url: str,
-    previous_webhook_url: Optional[str],
-    desired_events: tuple[str, ...] = _DESIRED_TEXT_EVENTS,
-):
-    """Reconcile a phone number's text webhook subscription."""
-    return _reconcile_subscription(
-        client,
-        owner_kwarg="phone_number_id",
-        owner_id=phone_number_id,
-        desired_url=desired_url,
-        previous_webhook_url=previous_webhook_url,
-        desired_events=desired_events,
-    )
-
-
-def _reconcile_imessage_subscription(
-    client,
-    agent_identity_id,
-    desired_url: str,
-    previous_webhook_url: Optional[str],
-    desired_events: tuple[str, ...] = _DESIRED_IMESSAGE_EVENTS,
-):
-    """Reconcile the identity-owned iMessage webhook subscription.
-
-    iMessage traffic rides shared Inkbox-managed numbers, so the
-    subscription owner is the agent identity, not a phone number.
-    """
-    return _reconcile_subscription(
-        client,
-        owner_kwarg="agent_identity_id",
-        owner_id=agent_identity_id,
-        desired_url=desired_url,
-        previous_webhook_url=previous_webhook_url,
-        desired_events=desired_events,
-    )
-
-
-def _reconcile_call_subscription(
-    client,
-    agent_identity_id,
-    desired_url: str,
-    previous_webhook_url: Optional[str],
-    desired_events: tuple[str, ...] = _DESIRED_CALL_EVENTS,
-):
-    """Reconcile the identity-owned call lifecycle subscription."""
-    return _reconcile_subscription(
-        client,
-        owner_kwarg="agent_identity_id",
-        owner_id=agent_identity_id,
-        desired_url=desired_url,
-        previous_webhook_url=previous_webhook_url,
-        desired_events=desired_events,
-    )
 
 
 SMS_CONTROL_WORDS = frozenset({
@@ -2590,7 +2337,7 @@ class InkboxAdapter(BasePlatformAdapter):
         return True
 
     def _patch_identity_objects(self) -> None:
-        """Point every mailbox + phone number on the identity at this server."""
+        """Register identity notifications independently of channel availability."""
         if self._skip_webhook_reconcile:
             logger.info(
                 "[Inkbox] Leaving webhook subscriptions alone; expecting them "
@@ -2602,42 +2349,22 @@ class InkboxAdapter(BasePlatformAdapter):
         webhook_url = f"{self._public_url}{self._webhook_path}"
         ws_url = f"wss://{self._public_host}{self._ws_path}"
 
-        # Snapshot the prior webhook URL before we overwrite state so the
-        # reconcile helpers can delete exactly the row we installed last time.
-        previous_webhook_url = _read_previous_webhook_url()
-
         identity = self._inkbox.get_identity(self._identity_handle)
         self._identity_id = str(getattr(identity, "id", "") or "") or None
         self._identity_email_addresses = _identity_email_addresses(identity)
         self._identity_email_addresses_loaded = True
 
-        # Mailbox: register the inbound-mail subscription.
-        if identity.mailbox is not None:
-            _reconcile_mail_subscription(
-                self._inkbox,
-                identity.mailbox.id,
-                desired_url=webhook_url,
-                previous_webhook_url=previous_webhook_url,
-                desired_events=_DESIRED_MAIL_EVENTS,
-            )
-            logger.info(
-                "[Inkbox] Patched mailbox %s → %s",
-                identity.mailbox.email_address, webhook_url,
-            )
+        subscription = reconcile_identity_subscription(
+            self._inkbox, identity.id, webhook_url,
+            _DESIRED_MAIL_EVENTS + _DESIRED_TEXT_EVENTS + _DESIRED_IMESSAGE_EVENTS
+            + _DESIRED_CALL_EVENTS + _DESIRED_A2A_EVENTS,
+        )
+        signing_key = getattr(subscription, "signing_key", None)
+        if signing_key and not self._signing_key:
+            from hermes_cli.config import save_env_value
 
-        # Phone number: register the inbound-text subscription on the number.
-        if identity.phone_number is not None:
-            _reconcile_text_subscription(
-                self._inkbox,
-                identity.phone_number.id,
-                desired_url=webhook_url,
-                previous_webhook_url=previous_webhook_url,
-                desired_events=_DESIRED_TEXT_EVENTS,
-            )
-            logger.info(
-                "[Inkbox] Patched phone %s text subscription → %s",
-                identity.phone_number.number, webhook_url,
-            )
+            save_env_value("INKBOX_SIGNING_KEY", signing_key)
+            self._signing_key = signing_key
 
         # Inbound-call config is identity-scoped: one row covers the dedicated
         # number and any shared iMessage line. Local voice stacks open the media
@@ -2678,45 +2405,6 @@ class InkboxAdapter(BasePlatformAdapter):
                 "[Inkbox] Patched incoming-call action for identity %s → %s",
                 self._identity_handle,
                 self._voice_stack.value,
-            )
-
-        # Identity-owned event channels use independent subscription rows at
-        # the same canonical receiver URL.
-        if self._identity_id:
-            try:
-                _reconcile_imessage_subscription(
-                    self._inkbox,
-                    self._identity_id,
-                    desired_url=webhook_url,
-                    previous_webhook_url=previous_webhook_url,
-                    desired_events=_DESIRED_A2A_EVENTS,
-                )
-            except Exception as exc:
-                if not _is_unsupported_a2a_event_types(exc):
-                    raise
-                logger.warning(
-                    "[Inkbox] API does not support A2A webhook events yet; "
-                    "continuing without A2A delivery until the backend is upgraded",
-                )
-            if getattr(identity, "imessage_enabled", False):
-                _reconcile_imessage_subscription(
-                    self._inkbox,
-                    self._identity_id,
-                    desired_url=webhook_url,
-                    previous_webhook_url=previous_webhook_url,
-                    desired_events=_DESIRED_IMESSAGE_EVENTS,
-                )
-            if can_receive_calls:
-                _reconcile_call_subscription(
-                    self._inkbox,
-                    self._identity_id,
-                    desired_url=webhook_url,
-                    previous_webhook_url=previous_webhook_url,
-                    desired_events=_DESIRED_CALL_EVENTS,
-                )
-            logger.info(
-                "[Inkbox] Patched identity events for %s → %s",
-                self._identity_handle, webhook_url,
             )
 
         # Persist the resolved identity so non-Inkbox sessions (CLI, etc.) can

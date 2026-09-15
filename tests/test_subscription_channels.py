@@ -14,141 +14,6 @@ from inkbox_plugin import adapter
 from inkbox_plugin.config import VoiceStack
 
 
-class _Subscriptions:
-    def __init__(self, rows=()):
-        self.rows = list(rows)
-        self.deleted = []
-
-    def list(self, **_owner):
-        return list(self.rows)
-
-    def create(self, **kwargs):
-        desired_families = {
-            event_type.split(".", 1)[0] for event_type in kwargs["event_types"]
-        }
-        assert all(
-            row.url != kwargs["url"]
-            or not desired_families
-            & {
-                event_type.split(".", 1)[0]
-                for event_type in row.event_types
-            }
-            for row in self.rows
-        )
-        row = SimpleNamespace(
-            id=f"sub-{len(self.rows) + 1}",
-            url=kwargs["url"],
-            event_types=list(kwargs["event_types"]),
-        )
-        self.rows.append(row)
-        return row
-
-    def update(self, sub_id, *, event_types, url=None):
-        row = next(row for row in self.rows if row.id == sub_id)
-        if url is not None:
-            row.url = url
-        row.event_types = list(event_types)
-        return row
-
-    def delete(self, sub_id):
-        self.deleted.append(sub_id)
-        self.rows = [row for row in self.rows if row.id != sub_id]
-
-
-def _client(rows=()):
-    subscriptions = _Subscriptions(rows)
-    return (
-        SimpleNamespace(
-            webhooks=SimpleNamespace(subscriptions=subscriptions),
-        ),
-        subscriptions,
-    )
-
-
-def _reconcile(client, url, events, previous=None):
-    return adapter._reconcile_imessage_subscription(
-        client,
-        "identity-1",
-        desired_url=url,
-        previous_webhook_url=previous,
-        desired_events=events,
-    )
-
-
-def test_identity_event_channels_share_the_canonical_url():
-    client, subscriptions = _client()
-    base = "https://agent.example/webhook"
-
-    _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
-    _reconcile(client, base, adapter._DESIRED_IMESSAGE_EVENTS)
-    adapter._reconcile_call_subscription(
-        client,
-        "identity-1",
-        desired_url=base,
-        previous_webhook_url=None,
-        desired_events=adapter._DESIRED_CALL_EVENTS,
-    )
-
-    assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
-        (base, adapter._DESIRED_A2A_EVENTS),
-        (base, adapter._DESIRED_IMESSAGE_EVENTS),
-        (base, adapter._DESIRED_CALL_EVENTS),
-    ]
-
-
-def test_reconcile_keeps_one_row_per_channel_and_receiver():
-    base = "https://agent.example/webhook"
-    extra_a2a = SimpleNamespace(
-        id="sub-a2a-extra",
-        url=f"{base}?unused=true",
-        event_types=list(adapter._DESIRED_A2A_EVENTS),
-    )
-    imessage = SimpleNamespace(
-        id="sub-imessage",
-        url=base,
-        event_types=list(adapter._DESIRED_IMESSAGE_EVENTS),
-    )
-    client, subscriptions = _client([extra_a2a, imessage])
-
-    _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
-
-    assert subscriptions.deleted == []
-    assert [(row.url, tuple(row.event_types)) for row in subscriptions.rows] == [
-        (base, adapter._DESIRED_A2A_EVENTS),
-        (base, adapter._DESIRED_IMESSAGE_EVENTS),
-    ]
-    assert "sub-imessage" not in subscriptions.deleted
-    assert any(row.id == "sub-imessage" for row in subscriptions.rows)
-
-
-def test_reconcile_adopts_a2a_superset_before_removing_legacy_duplicate():
-    base = "https://agent.example/webhook"
-    legacy_a2a = SimpleNamespace(
-        id="sub-a2a-legacy",
-        url=f"{base}?channel=a2a",
-        event_types=[
-            "a2a.task.created",
-            "a2a.task.message",
-            "a2a.task.canceled",
-        ],
-    )
-    provisioned_a2a = SimpleNamespace(
-        id="sub-a2a-provisioned",
-        url=base,
-        event_types=[
-            *adapter._DESIRED_A2A_EVENTS,
-            "a2a.sent_task.updated",
-        ],
-    )
-    client, subscriptions = _client([legacy_a2a, provisioned_a2a])
-
-    active_id = _reconcile(client, base, adapter._DESIRED_A2A_EVENTS)
-
-    assert active_id == "sub-a2a-provisioned"
-    assert subscriptions.deleted == ["sub-a2a-legacy"]
-    assert subscriptions.rows == [provisioned_a2a]
-
-
 def _patchable_adapter(monkeypatch, voice_stack):
     incoming_updates = []
     identity = SimpleNamespace(
@@ -172,9 +37,7 @@ def _patchable_adapter(monkeypatch, voice_stack):
     instance._write_identity_state = lambda *_args: None
 
     monkeypatch.setattr(adapter, "_read_previous_webhook_url", lambda: None)
-    monkeypatch.setattr(adapter, "_reconcile_text_subscription", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(adapter, "_reconcile_imessage_subscription", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(adapter, "_reconcile_call_subscription", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(adapter, "reconcile_identity_subscription", lambda *_args, **_kwargs: None)
     return instance, incoming_updates
 
 
@@ -218,63 +81,20 @@ def test_local_voice_stack_startup_reconciles_media_websocket(
     ]
 
 
-def test_identity_subscribes_to_call_ended_without_imessage(monkeypatch):
-    instance, _incoming_updates = _patchable_adapter(
-        monkeypatch,
-        VoiceStack.INKBOX_VOICE_AI,
-    )
+@pytest.mark.parametrize("has_channels", [False, True])
+def test_registers_one_identity_union_regardless_of_channels(monkeypatch, has_channels):
+    instance, incoming = _patchable_adapter(monkeypatch, VoiceStack.INKBOX_VOICE_AI)
+    identity = instance._inkbox.get_identity("voice-agent")
+    identity.imessage_enabled = has_channels
+    if not has_channels:
+        identity.phone_number = None
     reconciled = []
-    monkeypatch.setattr(
-        adapter,
-        "_reconcile_call_subscription",
-        lambda *_args, **kwargs: reconciled.append(kwargs),
-    )
-
+    monkeypatch.setattr(adapter, "reconcile_identity_subscription", lambda *args: reconciled.append(args))
     instance._patch_identity_objects()
-
-    call_rows = [
-        row for row in reconciled
-        if row["desired_url"] == "https://voice-agent.inkboxwire.com/webhook"
-        and row["desired_events"] == adapter._DESIRED_CALL_EVENTS
-    ]
-    assert len(call_rows) == 1
-    assert call_rows[0]["desired_events"] == ("call.ended",)
-
-
-def test_imessage_enabled_identity_keeps_call_events_separate(monkeypatch):
-    instance, _incoming_updates = _patchable_adapter(
-        monkeypatch,
-        VoiceStack.INKBOX_VOICE_AI,
+    assert len(reconciled) == 1
+    assert reconciled[0][1] == identity.id
+    assert set(reconciled[0][3]) == set(
+        adapter._DESIRED_MAIL_EVENTS + adapter._DESIRED_TEXT_EVENTS + adapter._DESIRED_IMESSAGE_EVENTS
+        + adapter._DESIRED_CALL_EVENTS + adapter._DESIRED_A2A_EVENTS
     )
-    instance._inkbox.get_identity("voice-agent").imessage_enabled = True
-    reconciled = []
-    monkeypatch.setattr(
-        adapter,
-        "_reconcile_imessage_subscription",
-        lambda *_args, **kwargs: reconciled.append(("imessage", kwargs)),
-    )
-    monkeypatch.setattr(
-        adapter,
-        "_reconcile_call_subscription",
-        lambda *_args, **kwargs: reconciled.append(("call", kwargs)),
-    )
-
-    instance._patch_identity_objects()
-
-    channel_rows = [
-        (channel, row["desired_url"], row["desired_events"])
-        for channel, row in reconciled
-        if row["desired_events"] != adapter._DESIRED_A2A_EVENTS
-    ]
-    assert channel_rows == [
-        (
-            "imessage",
-            "https://voice-agent.inkboxwire.com/webhook",
-            adapter._DESIRED_IMESSAGE_EVENTS,
-        ),
-        (
-            "call",
-            "https://voice-agent.inkboxwire.com/webhook",
-            adapter._DESIRED_CALL_EVENTS,
-        ),
-    ]
+    assert bool(incoming) is has_channels
