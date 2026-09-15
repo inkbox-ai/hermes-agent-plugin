@@ -560,7 +560,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
-    { name = "inkbox", git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=9f54e8dbb4a540c5f721c26a296d47f7b1978b0f" },
+    { name = "inkbox", git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=df6807c3502007e3510706d868fbcf143743977a" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -633,8 +633,8 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.6.12"
-source = { git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=9f54e8dbb4a540c5f721c26a296d47f7b1978b0f#9f54e8dbb4a540c5f721c26a296d47f7b1978b0f" }
+version = "0.7.1"
+source = { git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=df6807c3502007e3510706d868fbcf143743977a#df6807c3502007e3510706d868fbcf143743977a" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "certifi" },

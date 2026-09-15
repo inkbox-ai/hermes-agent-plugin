@@ -16,7 +16,7 @@ RUN ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
 # building so the setup wizard is ready immediately after container startup.
 RUN /usr/local/bin/uv pip install \
         --python /opt/hermes/.venv/bin/python \
-        "inkbox==0.6.12" \
+        "inkbox==0.7.1" \
         "aiohttp>=3.9" \
         "audioop-lts>=0.2.1; python_version >= '3.13'" \
         "segno>=1.5"

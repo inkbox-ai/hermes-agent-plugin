@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_MIN_VERSION = "0.6.12"
+INKBOX_MIN_VERSION = "0.7.1"
 INKBOX_REQUIREMENTS = (
     f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
     "audioop-lts>=0.2.1; python_version >= '3.13'",

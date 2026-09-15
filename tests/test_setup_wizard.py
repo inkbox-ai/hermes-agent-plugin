@@ -107,7 +107,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "install",
         "--python",
         "/tmp/hermes/venv/bin/python",
-        "inkbox>=0.6.12,<1.0.0",
+        "inkbox>=0.7.1,<1.0.0",
         "aiohttp>=3.9",
         "segno>=1.5",
         "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -119,10 +119,10 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
 
     assert setup_wizard._install_commands() == [
-        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.6.12,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"]],
+        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.1,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"]],
         [
             ["/tmp/hermes/venv/bin/python", "-m", "ensurepip", "--upgrade"],
-            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.6.12,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"],
+            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.1,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"],
         ],
     ]
 
@@ -141,7 +141,7 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "/tmp/hermes/venv/bin/python" in out
     assert "uv pip install --python" in out
-    assert "inkbox>=0.6.12,<1.0.0" in out
+    assert "inkbox>=0.7.1,<1.0.0" in out
     assert "aiohttp>=3.9" in out
 
 
