@@ -124,3 +124,7 @@ provides_tools:
   - inkbox_list_a2a_messages
   - inkbox_list_a2a_sent_tasks
   - inkbox_get_a2a_sent_task
+provides_hooks:
+  - post_tool_call
+  - pre_llm_call
+  - pre_tool_call
