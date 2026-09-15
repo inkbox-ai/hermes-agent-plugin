@@ -156,7 +156,7 @@ def test_missing_revision_fails_without_unconditional_write():
 def test_persistent_conflict_is_bounded():
     subs = Subscriptions([row(events=["message.received"])])
     subs.update = Mock(side_effect=Conflict())
-    with pytest.raises(Conflict):
+    with pytest.raises(RuntimeError, match="changed repeatedly"):
         reconcile(subs)
     assert subs.update.call_count == 4
 
@@ -188,3 +188,26 @@ def test_deleted_receiver_is_not_resurrected():
     reconcile(subs)
     assert len(subs.created) == 1
     assert subs.updates == []
+
+
+@pytest.mark.parametrize("detail", ["Too many active webhook subscriptions", {"detail": "Maximum 10 subscriptions reached"}, {"code": "subscription_limit_reached"}])
+def test_capacity_conflict_does_not_retry_or_modify_previous_destination(detail):
+    previous = row("previous", url="https://old.example/webhook")
+    subs = Subscriptions([previous])
+    error = Conflict()
+    error.detail = detail
+    subs.create = Mock(side_effect=error)
+    with pytest.raises(RuntimeError, match="capacity reached.*verified previous destination"):
+        reconcile(subs)
+    assert subs.create.call_count == 1
+    assert subs.updates == []
+    assert previous.url == "https://old.example/webhook"
+
+
+def test_changed_host_does_not_claim_other_destination_or_copy_context():
+    previous = row("previous", url="https://old.example/webhook", context_config={"email": {"mode": "count", "count": 3}})
+    subs = Subscriptions([previous])
+    reconcile(subs)
+    assert subs.updates == []
+    assert previous.url == "https://old.example/webhook"
+    assert "context_config" not in subs.created[0]

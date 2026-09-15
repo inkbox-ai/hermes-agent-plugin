@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 _RECEIVED = {"message.received", "text.received", "imessage.received"}
@@ -59,6 +60,12 @@ def reconcile_identity_subscription(client, identity_id, url, events):
                 kwargs["context_config"] = context
             return subscriptions.create(**kwargs)
         except Exception as exc:
-            if getattr(exc, "status_code", None) not in (404, 409) or attempt == 3:
+            status = getattr(exc, "status_code", None)
+            detail = json.dumps(getattr(exc, "detail", None), default=str) if getattr(exc, "detail", None) is not None else str(exc)
+            if status == 409 and re.search(r"subscription", detail, re.I) and re.search(r"too many|maximum|capacity|limit|\bcap\b|\bmax\s*\d", detail, re.I):
+                raise RuntimeError("Webhook subscription capacity reached. Review this identity in the Inkbox Console; if the gateway URL changed, move only its verified previous destination using a revision-checked update, then retry startup. Other destinations were left unchanged.") from None
+            if status not in (404, 409):
                 raise
+            if attempt == 3:
+                raise RuntimeError("Webhook subscriptions changed repeatedly. Review concurrent edits or overlapping event selections, then retry startup.") from None
     raise RuntimeError("Webhook subscriptions changed repeatedly; retry setup.")

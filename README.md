@@ -577,3 +577,12 @@ including channels that are not enabled yet. Incoming-call control is configured
 On upgrade, compatible existing subscriptions retain their IDs, event selections, and context;
 missing events are added with revision-checked updates. Other destination URLs are untouched.
 Conflicting delivery authentication or context settings require review instead of replacement.
+
+
+### Changing the webhook destination
+
+Startup treats a different URL as an additional destination, not proof that an existing subscription belongs to this gateway. A matching path on another host is not sufficient ownership evidence; existing URLs, event selections, bearer credentials, and context are left untouched. Repeated host changes without migration can leave old destinations active and reach the subscription limit.
+
+Before switching hosts, stop the previous gateway and review the identity's subscriptions in the Inkbox Console. Identify the exact previous URL and subscription IDs you own, verify the same identity and delivery bearer credential (this gateway expects no bearer), and move those rows to the new URL using an SDK update with their current revision precondition. Change only the URL to preserve events and context. If the new URL already has subscriptions with overlapping events, reconcile those reviewed rows first; do not replace all identity subscriptions or delete unrelated destinations. A stale-revision conflict requires rereading before another update.
+
+If prior ownership cannot be established, leave those rows unchanged and resolve the configuration manually before restarting. Capacity errors stop startup with an explicit migration instruction; they are not retried as revision conflicts or reported as healthy intake.
