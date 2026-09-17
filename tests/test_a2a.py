@@ -262,6 +262,80 @@ def test_a2a_bind_failure_is_retryable_before_enqueue(tmp_path):
     assert len(adapter._a2a_receipts) == 1
 
 
+@pytest.mark.parametrize("handler_kind", ["wrapped", "bound", "legacy"])
+def test_a2a_binds_real_session_before_acknowledgement(tmp_path, handler_kind):
+    adapter = _adapter(tmp_path)
+    del adapter._bind_a2a_turn_context
+    sources = []
+
+    class Store:
+        def get_or_create_session(self, source):
+            sources.append(source)
+            return types.SimpleNamespace(session_id="session-1", session_key="key-1")
+
+    class Owner:
+        session_store = Store()
+
+        async def handle(self, event):
+            pass
+
+    owner = Owner()
+
+    async def wrapped(event):
+        return await owner.handle(event)
+
+    adapter._message_handler = wrapped if handler_kind == "wrapped" else owner.handle
+    if handler_kind != "legacy":
+        adapter._session_store = Store()
+        # The injected store is authoritative even if the callback has an owner.
+        owner.session_store = None
+
+    response = asyncio.run(adapter._on_a2a_event(_event()))
+
+    assert response.status == 200
+    assert len(sources) == len(adapter._enqueued) == len(adapter._a2a_receipts) == 1
+    assert adapter._a2a_session_by_chat[sources[0].chat_id] == "session-1"
+    assert adapter._a2a_session_key_by_chat[sources[0].chat_id] == "key-1"
+    context = activate_next_a2a_turn_context("session-1")
+    assert context["task_id"] == "task-1"
+    assert context["message_id"] == "message-1"
+
+
+@pytest.mark.parametrize("persisted_failure", [False, True])
+def test_a2a_catch_up_uses_injected_store_after_binding_failure(tmp_path, persisted_failure):
+    adapter = _adapter(tmp_path)
+    del adapter._bind_a2a_turn_context
+
+    async def wrapped(event):
+        pass
+
+    adapter._message_handler = wrapped
+    if persisted_failure:
+        response = asyncio.run(adapter._on_a2a_event(_event()))
+        assert response.status == 503
+        assert not adapter._enqueued
+        assert not adapter._a2a_receipts
+
+    task = adapter._a2a_authoritative_task
+    task.id = "task-1"
+    identity = adapter._inkbox.get_identity("agent")
+    identity.iter_a2a_tasks = lambda *, state: iter([task] if task.state == state else [])
+    adapter._inkbox.get_identity = lambda _handle: identity
+    adapter._session_store = types.SimpleNamespace(
+        get_or_create_session=lambda _source: types.SimpleNamespace(
+            session_id="session-1", session_key="key-1",
+        ),
+    )
+
+    asyncio.run(adapter._catch_up_a2a_tasks())
+    duplicate = asyncio.run(adapter._on_a2a_event(_event("retry")))
+
+    assert duplicate.text == "duplicate"
+    assert len(adapter._enqueued) == len(adapter._a2a_receipts) == 1
+    assert activate_next_a2a_turn_context("session-1")["task_id"] == "task-1"
+    assert activate_next_a2a_turn_context("session-1") is None
+
+
 def test_a2a_enqueue_failure_rolls_back_and_retries(tmp_path):
     adapter = _adapter(tmp_path)
     attempts = 0
