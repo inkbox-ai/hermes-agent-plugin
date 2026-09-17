@@ -4241,6 +4241,14 @@ class InkboxAdapter(BasePlatformAdapter):
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         return cls._hosted_sms_required_from_data(data)
 
+    def _host_session_store(self) -> Any:
+        """Prefer the injected store; older hosts expose it on a bound handler."""
+        session_store = getattr(self, "_session_store", None)
+        if session_store is not None:
+            return session_store
+        handler_owner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        return getattr(handler_owner, "session_store", None)
+
     def _bind_hosted_turn_context(
         self,
         event: MessageEvent,
@@ -4251,12 +4259,7 @@ class InkboxAdapter(BasePlatformAdapter):
     ) -> bool:
         """Bind verified call data to the Hermes session observed by tools."""
         sms_required = self._hosted_sms_required(event)
-        handler_owner = getattr(
-            getattr(self, "_message_handler", None),
-            "__self__",
-            None,
-        )
-        session_store = getattr(handler_owner, "session_store", None)
+        session_store = self._host_session_store()
         if session_store is None:
             if sms_required:
                 mark_hosted_binding_failure(call_id, attempt, remote_phone)
@@ -4507,12 +4510,7 @@ class InkboxAdapter(BasePlatformAdapter):
         headers: Optional[Dict[str, str]] = None,
     ) -> bool:
         """Bind verified webhook data to the host session used by tool calls."""
-        handler_owner = getattr(
-            getattr(self, "_message_handler", None),
-            "__self__",
-            None,
-        )
-        session_store = getattr(handler_owner, "session_store", None)
+        session_store = self._host_session_store()
         if session_store is None:
             return False
         try:

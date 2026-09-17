@@ -486,6 +486,29 @@ def test_hosted_sms_binding_failure_aborts_turn_without_affecting_other_sessions
     assert receipt["retryable"] is False
 
 
+def test_hosted_sms_binds_injected_store_with_wrapped_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    bound_handler = instance._message_handler
+    instance._session_store = bound_handler.__self__.session_store
+
+    async def wrapped(event):
+        return bound_handler(event)
+
+    instance._message_handler = wrapped
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+
+    context = activate_next_hosted_turn_context("bound-session")
+    assert context["call_id"] == "call-1"
+    assert context["sms_required"] is True
+
+
 def test_hosted_sms_context_persist_failure_blocks_send(
     tmp_path,
     monkeypatch,
