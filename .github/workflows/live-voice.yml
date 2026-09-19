@@ -156,10 +156,12 @@ jobs:
             RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS containing exactly: $HOSTED_MARKER. Save one post-call action now, with both title and details exactly: Send SMS $HOSTED_MARKER. After the tool succeeds, read back the exact three-word SMS body."
+            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS with exactly these words: $HOSTED_MARKER. Save one post-call action titled Send SMS, with details exactly $HOSTED_MARKER. After the tool succeeds, read back the SMS body."
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
             export VOICE_DRIVER_LINE="Look up Olivia Parker's contact card. Read her full name and email address aloud. Then wait for me to confirm."
