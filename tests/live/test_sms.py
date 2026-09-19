@@ -237,7 +237,8 @@ def test_sms_reports_own_identity(sms):
     aut_email = sms["aut"].mailboxes.list()[0].email_address
     body = _ask_sms(sms, "Reply with just your Inkbox email address and phone number — short.")
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:200]}"
-    assert _digits(sms["aut_phone"]) in _digits(body), "reply missing full phone number"
+    phone_matches = _digits(sms["aut_phone"]) in _digits(body)
+    assert phone_matches, "reply missing full phone number"
 
 
 @real_only
@@ -247,7 +248,8 @@ def test_sms_reports_sender_details(sms):
     matches = aut.contacts.lookup(email=remote_email)
     assert matches, "the synthetic sender contact fixture is missing"
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
-    assert name.strip(), "the synthetic sender contact has no name"
+    named_fixture = bool(name.strip())
+    assert named_fixture, "the synthetic sender contact has no name"
     body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
     assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:200]}"
 

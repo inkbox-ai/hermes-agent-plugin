@@ -58,13 +58,21 @@ def _normalized_spoken_text(value: str | None) -> str:
 
 
 def _spoken_marker_key(value: str | None) -> str:
-    """Ignore separators that speech recognition may add or remove."""
-    return "".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
+    """Normalize case and punctuation while retaining word boundaries."""
+    return _normalized_spoken_text(value)
+
+
+def _has_spoken_marker(value, marker):
+    tokens = re.findall(r"[a-z0-9]+", (value or "").casefold())
+    expected = re.findall(r"[a-z0-9]+", (marker or "").casefold())
+    return bool(expected) and any(
+        tokens[index:index + len(expected)] == expected for index in range(len(tokens))
+    )
 
 
 def _sms_contains_marker(message, marker_key: str) -> bool:
     """Whether a text carries this run's contiguous, speech-normalized marker."""
-    return bool(marker_key and marker_key in _spoken_marker_key(getattr(message, "text", None)))
+    return bool(marker_key and _has_spoken_marker(getattr(message, "text", None), marker_key))
 
 
 def _hosted_request_persisted(transcript: str, marker: str) -> bool:
@@ -73,7 +81,7 @@ def _hosted_request_persisted(transcript: str, marker: str) -> bool:
     expected_marker = _spoken_marker_key(marker)
     sms_intent = re.search(r"\bsend me (?:one|1|an) sms\b", text)
     return bool(
-        expected_marker and "after we hang up" in text and sms_intent and expected_marker in _spoken_marker_key(text)
+        expected_marker and "after we hang up" in text and sms_intent and _has_spoken_marker(text, expected_marker)
     )
 
 
@@ -97,7 +105,7 @@ def _hosted_action_persisted(call, marker: str) -> bool:
             str(status_value or "").casefold() == "open"
             and re.search(r"\bsend\b", text)
             and re.search(r"\b(?:sms|text(?: message)?)\b", text)
-            and expected_marker in _spoken_marker_key(text)
+            and _has_spoken_marker(text, expected_marker)
         ):
             return True
     return False
@@ -124,7 +132,7 @@ def _hosted_action_diagnostic(call, marker: str) -> str:
                 "status": status_value[:24],
                 "send_intent": bool(re.search(r"\bsend\b", text)),
                 "sms_intent": bool(re.search(r"\b(?:sms|text(?: message)?)\b", text)),
-                "marker_exact": _spoken_marker_key(marker) in _spoken_marker_key(text),
+                "marker_exact": _has_spoken_marker(text, marker),
                 "marker_words_present": len(expected_words & words),
                 "marker_words_expected": len(expected_words),
                 "action_chars": min(len(str(action or "")), 999),
@@ -169,7 +177,7 @@ def _wait_for_hosted_readback(client, call_id, marker, *, deadline, party="local
             _all, peer, local = _segments(client, "unused", call_id)
             chosen = peer if party == "remote" else local
             spoken = " ".join(segment.text.strip() for segment in chosen)
-            if _spoken_marker_key(marker) in _spoken_marker_key(spoken):
+            if _has_spoken_marker(spoken, marker):
                 return
         except Exception:
             pass  # Speech records may not exist yet.
@@ -182,10 +190,12 @@ def _assert_post_call_sms(messages, before_ids, marker, call, caller_number):
     current = [message for message in messages if message.id not in before_ids]
     assert len(current) == 1, f"expected exactly one new outbound SMS, got {len(current)}"
     message = current[0]
-    assert _sms_target_numbers(message) == {_digits(caller_number)}, "post-call SMS has the wrong recipient"
+    recipient_matches = _sms_target_numbers(message) == {_digits(caller_number)}
+    assert recipient_matches, "post-call SMS has the wrong recipient"
     actual_words = re.findall(r"[a-z0-9]+", (getattr(message, "text", "") or "").casefold())
     expected_words = re.findall(r"[a-z0-9]+", marker.casefold())
-    assert actual_words == expected_words, "post-call SMS body is not exact"
+    body_matches = actual_words == expected_words
+    assert body_matches, "post-call SMS body is not exact"
     created = _message_created_at(message)
     ended = _message_created_at(call, "ended_at")
     assert created is not None and ended is not None, "SMS or call is missing its persisted timestamp"

@@ -22,15 +22,15 @@ voice = _load_voice_module()
 
 def test_spoken_marker_normalization_is_case_and_punctuation_insensitive() -> None:
     assert voice._normalized_spoken_text("Alpha, BRAVO! Charlie.") == ("alpha bravo charlie")
-    assert voice._spoken_marker_key("Alpha X-ray") == "alphaxray"
-    assert voice._spoken_marker_key("alpha x ray") == "alphaxray"
+    assert voice._spoken_marker_key("Alpha X-ray") == "alpha x ray"
+    assert voice._spoken_marker_key("alpha x ray") == "alpha x ray"
 
 
 def test_settlement_candidate_filter_is_not_the_exact_final_sms_oracle() -> None:
     marker = voice._spoken_marker_key("alpha xray charlie")
 
-    assert voice._sms_contains_marker(SimpleNamespace(text="Alpha, X-ray Charlie."), marker)
-    assert voice._sms_contains_marker(SimpleNamespace(text="Requested words: alpha x ray charlie — done."), marker)
+    assert voice._sms_contains_marker(SimpleNamespace(text="Alpha, Xray Charlie."), marker)
+    assert voice._sms_contains_marker(SimpleNamespace(text="Requested words: alpha xray charlie — done."), marker)
     assert not voice._sms_contains_marker(SimpleNamespace(text="alpha xray"), marker)
     assert not voice._sms_contains_marker(SimpleNamespace(text="alpha delta xray charlie"), marker)
     assert not voice._sms_contains_marker(SimpleNamespace(text=None), marker)
@@ -66,11 +66,11 @@ def test_hosted_request_requires_intent_and_current_marker() -> None:
     marker = "alpha xray charlie"
 
     assert voice._hosted_request_persisted(
-        "After we hang up, send me one SMS containing Alpha, X-ray Charlie.",
+        "After we hang up, send me one SMS containing Alpha, Xray Charlie.",
         marker,
     )
     assert voice._hosted_request_persisted(
-        "After we hang up, send me 1 SMS containing alpha x ray charlie.",
+        "After we hang up, send me 1 SMS containing alpha xray charlie.",
         marker,
     )
     assert voice._hosted_request_persisted(
@@ -95,7 +95,7 @@ def test_hosted_action_requires_open_sms_intent_and_current_marker() -> None:
             SimpleNamespace(
                 status="open",
                 action="Send a text message after the call",
-                details="Use the words Alpha, X-ray Charlie.",
+                details="Use the words Alpha, Xray Charlie.",
             ),
         ],
     )
@@ -106,7 +106,7 @@ def test_hosted_action_requires_open_sms_intent_and_current_marker() -> None:
             {
                 "status": "open",
                 "action": "Send SMS",
-                "details": "alpha x ray charlie",
+                "details": "alpha xray charlie",
             }
         ],
     )
@@ -270,3 +270,12 @@ def test_sms_window_exhausts_actual_sdk_pages_and_retains_all_targets(monkeypatc
     assert current[-1].remote_phone_number == "+15553334444"
     assert [request["offset"] for request in requests] == [0, 200, 0, 200]
     assert all(request["start_datetime"] == bound for request in requests)
+
+
+@pytest.mark.parametrize("heard", ["AlphaBravoCharlie", "Xalpha Bravo Charlie", "Alpha Bravo Charliez", "Alpha extra Bravo Charlie", "Alfa Bravo Charlie"])
+def test_spoken_marker_rejects_merged_subword_and_phonetic_substitutes(heard):
+    assert not voice._has_spoken_marker(heard, "Alpha Bravo Charlie")
+
+
+def test_spoken_marker_preserves_contiguous_word_boundaries_with_punctuation():
+    assert voice._has_spoken_marker("Your words: ALPHA, Bravo Charlie.", "Alpha Bravo Charlie")
