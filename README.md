@@ -173,6 +173,17 @@ INKBOX_SIGNING_KEY=xxxxxxxxxxxx
 INKBOX_ALLOW_ALL_USERS=true
 ```
 
+Setup also defaults `display.platforms.inkbox.show_reasoning` to `false` in
+Hermes config, preserving any explicit Inkbox setting. This keeps terminal-style
+reasoning blocks out of email, SMS, iMessage, and spoken replies without changing
+the agent's reasoning. For an existing install, apply the same setting and restart
+the gateway:
+
+```bash
+hermes config set display.platforms.inkbox.show_reasoning false
+hermes gateway restart
+```
+
 Optional:
 
 ```bash

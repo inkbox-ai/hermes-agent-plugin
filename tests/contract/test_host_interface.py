@@ -149,3 +149,41 @@ def test_deferred_discovery_does_not_execute_but_tool_call_does(monkeypatch):
     ))
     assert result == {"ok": True, "call_id": "synthetic-call"}
     assert called == [{"purpose": "Call me back"}]
+
+
+def test_setup_display_default_keeps_host_reasoning_out_of_channel_reply(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import hermes_cli.config as host_config
+    import gateway.run as host_run
+    from gateway.run_turn import GatewayTurnMixin
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+
+    package = ModuleType("inkbox_display_contract")
+    package.__path__ = [str(Path(__file__).resolve().parents[2])]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    setup_wizard = importlib.import_module("inkbox_display_contract.setup_wizard")
+
+    monkeypatch.setattr(host_config, "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text("display:\n  show_reasoning: true\n")
+    config = host_config.load_config()
+    monkeypatch.setattr(host_run, "_load_gateway_config", lambda: config)
+    monkeypatch.setattr(host_run, "_platform_config_key", lambda _platform: "inkbox")
+    runner = SimpleNamespace(_show_reasoning=True, _REASONING_QUOTE_STYLES={})
+    source = SimpleNamespace(platform="inkbox")
+    result = {"last_reasoning": "Check the requested channel before replying."}
+    response = "Everything is on track for tomorrow."
+
+    assert "**Reasoning:**" in GatewayTurnMixin._hmwa_prepend_reasoning(
+        runner, result, response, source, False,
+    )
+    setup_wizard._configure_channel_display()
+    config = host_config.load_config()
+
+    assert config["display"]["show_reasoning"] is True
+    assert config["display"]["platforms"]["inkbox"]["show_reasoning"] is False
+    assert GatewayTurnMixin._hmwa_prepend_reasoning(
+        runner, result, response, source, False,
+    ) == response
