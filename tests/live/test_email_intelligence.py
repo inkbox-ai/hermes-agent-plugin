@@ -125,15 +125,17 @@ def _ask(
             body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
             lowered = body.lower()
             bad = [m for m in ERROR_MARKERS if m in lowered]
-            assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
+            assert not bad, (
+                "reply is an error, not a real answer "
+                f"(matched_error_count={len(bad)})"
+            )
             candidates.append(body)
             if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
                 return lowered
         time.sleep(POLL_EVERY_S)
-    previews = "\n---\n".join(body[:500] for body in candidates) or "(none)"
     pytest.fail(
-        f"no acceptable reply within {TIMEOUT_S:.0f}s to: {question!r}\n"
-        f"new emails from AUT:\n{previews}"
+        f"no acceptable reply within {TIMEOUT_S:.0f}s "
+        f"(candidate_count={len(candidates)})"
     )
 
 
