@@ -46,19 +46,9 @@ def _digits(s: str) -> str:
 
 
 def _phone_present(phone: str, body: str) -> bool:
-    """True if the agent reported ``phone`` in ``body``.
-
-    Accepts either the full number (all digits present) or a privacy-masked
-    form the model tends to emit in formal identity listings, where it keeps a
-    leading prefix + the last 4 and masks the middle (e.g. ``+192****3235``).
-    The masked branch requires a run of mask chars immediately followed by the
-    real last-4, so it won't false-match on markdown bold (``**name:**``).
-    """
+    """Require every phone digit; punctuation and spacing may vary."""
     want = _digits(phone)
-    if want[-10:] in _digits(body):
-        return True
-    tail = re.escape(want[-4:])
-    return bool(re.search(r"[*xX•·]{2,}\D{0,2}" + tail, body))
+    return bool(want) and want in _digits(body)
 
 
 def _mailbox(client) -> str:
@@ -135,15 +125,17 @@ def _ask(
             body = getattr(remote.messages.get(remote_email, msg.id), "body_text", "") or ""
             lowered = body.lower()
             bad = [m for m in ERROR_MARKERS if m in lowered]
-            assert not bad, f"reply is an error, not a real answer: {bad}\n{body[:300]}"
+            assert not bad, (
+                "reply is an error, not a real answer "
+                f"(matched_error_count={len(bad)})"
+            )
             candidates.append(body)
             if (accept is None and _is_reply(msg)) or (accept is not None and accept(lowered)):
                 return lowered
         time.sleep(POLL_EVERY_S)
-    previews = "\n---\n".join(body[:500] for body in candidates) or "(none)"
     pytest.fail(
-        f"no acceptable reply within {TIMEOUT_S:.0f}s to: {question!r}\n"
-        f"new emails from AUT:\n{previews}"
+        f"no acceptable reply within {TIMEOUT_S:.0f}s "
+        f"(candidate_count={len(candidates)})"
     )
 
 
@@ -183,8 +175,6 @@ def test_reports_own_identity(ctx):
     )
     assert handle in body, f"reply missing handle {handle!r}\n{body[:400]}"
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:400]}"
-    # Accept a privacy-masked phone (the model self-redacts the middle digits in
-    # formal listings even with Hermes secret redaction off) as well as full.
     assert _phone_present(aut_phone, body), f"reply missing phone {aut_phone!r}\n{body[:400]}"
 
 
@@ -291,9 +281,9 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "Use inkbox_create_contact now. Create a new contact named "
-            f"{contact_name} with email {contact_email}. Do not just describe the action. "
-            f"After the tool succeeds, reply exactly: CREATED {nonce}",
+            "Create a new contact named "
+            f"{contact_name} with email {contact_email}. "
+            f"When done, reply exactly: CREATED {nonce}",
             accept=lambda candidate: "created" in candidate and nonce in candidate,
         )
         assert "created" in created and nonce in created, created[:500]
@@ -306,9 +296,9 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "Use inkbox_update_contact now. Update contactId "
-            f"{contact_id} and set notes to {updated_notes}. Do not create a second contact. "
-            f"After the tool succeeds, reply exactly: UPDATED {nonce}",
+            f"Update the contact with email {contact_email}: set its notes to {updated_notes}. "
+            "Do not create a second contact. "
+            f"When done, reply exactly: UPDATED {nonce}",
             accept=lambda candidate: "updated" in candidate and nonce in candidate,
         )
         assert "updated" in updated and nonce in updated, updated[:500]
@@ -319,8 +309,8 @@ def test_contact_crud_tool_use(ctx):
             ctx["remote"],
             ctx["aut_email"],
             ctx["remote_email"],
-            "I confirm this is a temporary test contact. Use inkbox_delete_contact now "
-            f"to delete contactId {contact_id}. After the tool succeeds, reply exactly: DELETED {nonce}",
+            f"Delete the temporary contact with email {contact_email}. "
+            f"When done, reply exactly: DELETED {nonce}",
             accept=lambda candidate: "deleted" in candidate and nonce in candidate,
         )
         assert "deleted" in deleted and nonce in deleted, deleted[:500]
