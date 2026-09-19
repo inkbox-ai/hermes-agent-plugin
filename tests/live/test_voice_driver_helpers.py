@@ -142,3 +142,83 @@ def test_partial_transcript_extends_quiet_gate_before_final_transcript(driver, m
     assert observed["partial_activity"] > 0
     assert observed["utterances"] == [driver.GREETING]
     assert observed["stopped"]
+
+
+@pytest.mark.parametrize("peer_at, expected_retry", [(None, 159.0), (158.0, 164.0)])
+def test_long_request_does_not_requeue_before_playback_and_peer_quiet(
+    driver, monkeypatch, peer_at, expected_retry,
+):
+    now = 100.0
+    observed_state = None
+    original_wait = driver._wait_for_greeting
+
+    async def wait_for_greeting(state):
+        nonlocal observed_state
+        observed_state = state
+        return await original_wait(state)
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+        await asyncio.sleep(0)
+
+    async def wait_for(awaitable, timeout):
+        nonlocal now
+        awaitable.close()
+        now += timeout
+        if now == peer_at:
+            observed_state["last_heard"] = now
+        await asyncio.sleep(0)
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(driver, "_wait_for_greeting", wait_for_greeting)
+    monkeypatch.setattr(driver, "LINE", " ".join(["word"] * 80))
+    monkeypatch.setattr(driver, "SPEAK_AFTER_S", 5)
+    monkeypatch.setattr(driver, "QUIET_GAP_S", 6)
+    monkeypatch.setattr(driver, "REASK_EVERY_S", 20)
+    monkeypatch.setattr(driver, "LISTEN_S", 70)
+    monkeypatch.setattr(driver, "MAX_REASKS", 1)
+    loop = SimpleNamespace(time=lambda: now)
+    monkeypatch.setattr(driver, "asyncio", SimpleNamespace(
+        get_event_loop=lambda: loop, get_running_loop=lambda: loop,
+        sleep=sleep, wait_for=wait_for, Event=asyncio.Event,
+        create_task=asyncio.create_task, TimeoutError=asyncio.TimeoutError,
+        CancelledError=asyncio.CancelledError,
+    ))
+
+    async def run():
+        class Socket:
+            client_state = "disconnected"
+
+            def __init__(self):
+                self.started = False
+                self.stopped = asyncio.Event()
+                self.spoken = []
+
+            async def accept(self, **_kwargs):
+                pass
+
+            async def send_text(self, raw):
+                event = json.loads(raw)
+                if "delta" in event:
+                    self.spoken.append((now, event["delta"]))
+                if event["event"] == "stop":
+                    self.stopped.set()
+
+            async def receive_text(self):
+                if not self.started:
+                    self.started = True
+                    return json.dumps({"event": "start"})
+                await self.stopped.wait()
+                return json.dumps({"event": "stop"})
+
+        socket = Socket()
+        await driver.phone_media_ws(socket)
+        return socket.spoken
+
+    spoken = asyncio.run(run())
+    assert spoken == [
+        (100.0, driver.GREETING),
+        (105.0, driver.LINE),
+        (expected_retry, driver.LINE),
+    ]

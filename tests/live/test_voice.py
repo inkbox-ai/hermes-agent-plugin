@@ -678,6 +678,19 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             HOSTED_POST_CALL_MARKER,
             deadline=scenario_deadline,
         )
+        in_call_sms = [
+            message for message in _aut_outbound_sms()
+            if (
+                message.id not in before_postcall_sms
+                and (created_at := _message_created_at(message)) is not None
+                and created_at >= sms_watermark
+                and _sms_contains_marker(message, expected_postcall_text)
+            )
+        ]
+        assert not in_call_sms, (
+            "Hosted Voice AI sent the deferred SMS before hangup "
+            f"(matching_rows={len(in_call_sms)})"
+        )
     finally:
         _hangup_fresh_calls(remote, _driver_inbound, before_driver)
         _hangup_fresh_calls(aut, _aut_outbound, before_aut)
