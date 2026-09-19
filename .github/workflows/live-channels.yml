@@ -163,7 +163,7 @@ jobs:
           PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"
           "$HERMES_HOME/bin/uv" pip install --python "$PY" pytest pyyaml
           if [ "${{ matrix.mode }}" = "real" ]; then
-            LIVE_REAL_MODEL=1 "$PYTEST" tests/live -v
+            LIVE_REAL_MODEL=1 LIVE_CONTACT_CRUD=1 "$PYTEST" tests/live -v
           else
             "$PYTEST" tests/live -v
           fi
