@@ -27,25 +27,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 
-# The agent answers a call request by dialing back, not by texting, so these
-# driver→AUT SMS never get an SMS reply to reset the server's conversation
-# cadence. Two identical no-reply sends to the same number trip the
-# duplicate_body rule (422), so every call request must carry a fresh body.
-_CALL_ME_PHRASINGS = (
-    "Please call me right now by phone and set voicemail_detection to disabled.",
-    "Can you ring me now with voicemail_detection disabled?",
-    "Give me a call now, using disabled voicemail_detection.",
-    "Please phone me right away and disable voicemail_detection.",
-)
-
-
+# A fresh reference distinguishes repeated call requests on the same channel.
 def _call_me_text() -> str:
-    """A fresh call-request body each send (rotating phrasing + unique ref)."""
-    phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
-    return (
-        f"{phrasing} This is my authorization to place the call now; "
-        f"please execute the call rather than only describe it. (ref {uuid.uuid4().hex[:6]})"
-    )
+    return f"Please call me now. Do not reply by text. (ref {uuid.uuid4().hex[:6]})"
 
 
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")
@@ -150,9 +134,9 @@ def _hosted_action_diagnostic(call, marker: str) -> str:
     return repr(summaries)[:1_200]
 
 
-def _message_created_at(message) -> datetime | None:
+def _message_created_at(message, field="created_at") -> datetime | None:
     """Return an aware server timestamp from an SDK SMS row."""
-    value = getattr(message, "created_at", None)
+    value = getattr(message, field, None)
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value or "").strip()
@@ -162,6 +146,48 @@ def _message_created_at(message) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _outbound_sms_since(client, number_id, start_datetime):
+    """Read all pages in the scenario's frozen inclusive window."""
+    rows = {}
+    offset = 0
+    while True:
+        page = client.texts.list(number_id, limit=200, offset=offset, start_datetime=start_datetime)
+        for message in page:
+            if str(getattr(message, "direction", "")).lower() == "outbound":
+                rows[message.id] = message
+        if len(page) < 200:
+            return list(rows.values())
+        offset += len(page)
+
+
+def _wait_for_hosted_readback(client, call_id, marker, *, deadline, party="local"):
+    """Require the selected side's persisted readback, not the opposite side."""
+    while time.monotonic() < deadline:
+        try:
+            _all, peer, local = _segments(client, "unused", call_id)
+            chosen = peer if party == "remote" else local
+            spoken = " ".join(segment.text.strip() for segment in chosen)
+            if _spoken_marker_key(marker) in _spoken_marker_key(spoken):
+                return
+        except Exception:
+            pass  # Speech records may not exist yet.
+        time.sleep(POLL_EVERY_S)
+    pytest.fail("Voice AI did not speak the complete requested words before hangup")
+
+
+def _assert_post_call_sms(messages, before_ids, marker, call, caller_number):
+    """Require one exact-body effect, to only the caller, after persisted hangup."""
+    current = [message for message in messages if message.id not in before_ids]
+    assert len(current) == 1, f"expected exactly one new outbound SMS, got {len(current)}"
+    message = current[0]
+    assert _sms_target_numbers(message) == {_digits(caller_number)}, "post-call SMS has the wrong recipient"
+    assert _spoken_marker_key(getattr(message, "text", "") or "") == _spoken_marker_key(marker), "post-call SMS body is not exact"
+    created = _message_created_at(message)
+    ended = _message_created_at(call, "ended_at")
+    assert created is not None and ended is not None, "SMS or call is missing its persisted timestamp"
+    assert created >= ended, "deferred SMS was created before the call ended"
 
 
 def _sms_target_numbers(message) -> set[str]:
@@ -386,17 +412,19 @@ def _wait_for_hosted_request(
     marker: str,
     *,
     deadline: float | None = None,
+    party: str = "local",
 ) -> None:
     """Wait for the current caller's after-call SMS request to persist."""
     deadline = deadline or (time.monotonic() + TIMEOUT_S)
     last = ""
     while time.monotonic() < deadline:
         try:
-            _all, _remote, local = _segments(remote, number_id, call_id)
-            transcript = " ".join(segment.text.strip() for segment in local)
+            _all, peer, local = _segments(remote, number_id, call_id)
+            chosen = peer if party == "remote" else local
+            transcript = " ".join(segment.text.strip() for segment in chosen)
             if _hosted_request_persisted(transcript, marker):
                 return
-            last = f"local transcript so far: {_normalized_spoken_text(transcript)!r}"
+            last = f"party={party} segments={len(chosen)} request_persisted=False"
         except Exception as exc:  # transcripts may 404 until setup completes
             last = f"transcripts not ready: {exc!r}"
         time.sleep(POLL_EVERY_S)
@@ -598,13 +626,10 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
 
     aut_number_id = aut_numbers[0].id
 
+    sms_window_start = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
     def _aut_outbound_sms():
-        return [
-            message
-            for message in aut.texts.list(aut_number_id, limit=200)
-            if (getattr(message, "direction", "") or "").lower() == "outbound"
-            and driver_number in _sms_target_numbers(message)
-        ]
+        return _outbound_sms_since(aut, aut_number_id, sms_window_start)
 
     assert HOSTED_POST_CALL_MARKER, "HOSTED_POST_CALL_MARKER must be set for the hosted completion leg"
     expected_postcall_text = _spoken_marker_key(HOSTED_POST_CALL_MARKER)
@@ -672,20 +697,29 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             HOSTED_POST_CALL_MARKER,
             deadline=scenario_deadline,
         )
+        _wait_for_hosted_request(
+            aut,
+            "unused",
+            aut_call.id,
+            HOSTED_POST_CALL_MARKER,
+            deadline=scenario_deadline,
+            party="remote",
+        )
         _wait_for_hosted_action(
             aut,
             aut_call.id,
             HOSTED_POST_CALL_MARKER,
             deadline=scenario_deadline,
         )
+        _wait_for_hosted_readback(
+            aut, aut_call.id, HOSTED_POST_CALL_MARKER, deadline=scenario_deadline,
+        )
+        _wait_for_hosted_readback(
+            remote, driver_call_id, HOSTED_POST_CALL_MARKER,
+            deadline=scenario_deadline, party="remote",
+        )
         in_call_sms = [
-            message for message in _aut_outbound_sms()
-            if (
-                message.id not in before_postcall_sms
-                and (created_at := _message_created_at(message)) is not None
-                and created_at >= sms_watermark
-                and _sms_contains_marker(message, expected_postcall_text)
-            )
+            message for message in _aut_outbound_sms() if message.id not in before_postcall_sms
         ]
         assert not in_call_sms, (
             "Hosted Voice AI sent the deferred SMS before hangup "
@@ -742,20 +776,10 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
         f"{duplicate_grace:.0f}s duplicate-observation window"
     )
     time.sleep(duplicate_grace)
-    marker_sms = [
-        message
-        for message in _aut_outbound_sms()
-        if (
-            message.id not in before_postcall_sms
-            and (created_at := _message_created_at(message)) is not None
-            and created_at >= sms_watermark
-            and _sms_contains_marker(message, expected_postcall_text)
-        )
-    ]
-    assert len(marker_sms) == 1, (
-        f"Hosted post-call processing duplicated or missed the current commitment (matching_rows={len(marker_sms)})"
+    _assert_post_call_sms(
+        _aut_outbound_sms(), before_postcall_sms, HOSTED_POST_CALL_MARKER,
+        aut.calls.get(aut_call.id), st["number"],
     )
-    assert _sms_contains_marker(marker_sms[0], expected_postcall_text)
 
 
 # Fixed identifiers for the mid-call contact-lookup leg. Fixed (not uuid) so the

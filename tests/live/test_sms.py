@@ -237,6 +237,7 @@ def test_sms_reports_own_identity(sms):
     aut_email = sms["aut"].mailboxes.list()[0].email_address
     body = _ask_sms(sms, "Reply with just your Inkbox email address and phone number — short.")
     assert aut_email in body, f"reply missing email {aut_email!r}\n{body[:200]}"
+    assert _digits(sms["aut_phone"]) in _digits(body), "reply missing full phone number"
 
 
 @real_only
@@ -244,12 +245,11 @@ def test_sms_reports_sender_details(sms):
     aut, remote = sms["aut"], sms["remote"]
     remote_email = remote.mailboxes.list()[0].email_address
     matches = aut.contacts.lookup(email=remote_email)
-    if not matches:
-        pytest.skip("no contact card for the sender to report")
+    assert matches, "the synthetic sender contact fixture is missing"
     name = (getattr(matches[0], "preferred_name", None) or getattr(matches[0], "given_name", None) or "")
+    assert name.strip(), "the synthetic sender contact has no name"
     body = _ask_sms(sms, "Who am I to you? Tell me what you have on file about me.")
-    if name:
-        assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:200]}"
+    assert name.lower() in body, f"reply missing sender name {name!r}\n{body[:200]}"
 
 
 @real_only
@@ -268,7 +268,7 @@ def test_sms_aware_of_inkbox_tools(sms):
         )
         body = _ask_sms(
             sms,
-            "Use your Inkbox contact tools to look up the contact whose email "
+            "Look up the contact whose email "
             f"is {probe_email}, then reply with that contact's full name.",
         )
         assert surname in body, \
