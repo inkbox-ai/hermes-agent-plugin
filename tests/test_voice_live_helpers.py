@@ -167,7 +167,7 @@ def test_message_created_at_normalizes_sdk_timestamp_shapes() -> None:
     assert voice._message_created_at(SimpleNamespace(created_at="bad")) is None
 
 
-@pytest.mark.parametrize("defect", ["prose", "extra_marker", "extra_other", "early", "missing_created", "missing_ended", "wrong_target", "extra_target"])
+@pytest.mark.parametrize("defect", ["prose", "merged_words", "extra_marker", "extra_other", "early", "missing_created", "missing_ended", "wrong_target", "extra_target"])
 def test_post_call_sms_rejects_false_success(defect):
     from datetime import timedelta
 
@@ -178,6 +178,8 @@ def test_post_call_sms_rejects_false_success(defect):
     messages = [message]
     if defect == "prose":
         message.text = "Your words: Alpha Bravo Charlie"
+    elif defect == "merged_words":
+        message.text = "AlphaBravoCharlie"
     elif defect in {"extra_marker", "extra_other"}:
         messages.append(SimpleNamespace(id="extra", text=message.text if defect == "extra_marker" else "Done",
                                         created_at=ended, remote_phone_number="+15551112222", recipients=[]))
