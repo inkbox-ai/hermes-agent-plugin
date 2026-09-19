@@ -138,7 +138,8 @@ jobs:
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway to be ready (tunnel + webhooks)…"
           for i in $(seq 1 36); do      # up to ~180s
-            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+            if "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py" "$(cat "$RUNNER_TEMP/gateway.pid")"; then
               echo "Gateway ready."; exit 0
             fi
             sleep 5

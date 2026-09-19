@@ -187,3 +187,36 @@ def test_setup_display_default_keeps_host_reasoning_out_of_channel_reply(tmp_pat
     assert GatewayTurnMixin._hmwa_prepend_reasoning(
         runner, result, response, source, False,
     ) == response
+
+
+def test_live_readiness_follows_native_runtime_lifecycle(tmp_path, monkeypatch):
+    import json
+    import os
+
+    from gateway import status
+    from tests.ci.check_gateway_ready import gateway_ready
+
+    path = tmp_path / "gateway_state.json"
+    monkeypatch.setattr(status, "_get_runtime_status_path", lambda: path)
+    pid = os.getpid()
+    assert not gateway_ready(pid)
+    status.write_runtime_status(gateway_state="starting", platform="inkbox", platform_state="connected")
+    assert not gateway_ready(pid)
+    status.write_runtime_status(gateway_state="running", platform="inkbox", platform_state="retrying")
+    assert not gateway_ready(pid)
+    status.write_runtime_status(platform="inkbox", platform_state="connected")
+    assert gateway_ready(pid)
+    assert not gateway_ready(pid + 1)
+
+    ready = status.read_runtime_status()
+    for changes in (
+        {"updated_at": "2000-01-01T00:00:00+00:00"},
+        {"start_time": "stale-process"},
+        {"platforms": {"inkbox": {**ready["platforms"]["inkbox"], "writer_pid": pid + 1}}},
+        {"platforms": {"inkbox": {**ready["platforms"]["inkbox"], "writer_start_time": "old-process"}}},
+    ):
+        path.write_text(json.dumps({**ready, **changes}))
+        assert not gateway_ready(pid)
+    path.write_text(json.dumps(ready))
+    status.write_runtime_status(platform="inkbox", platform_state="disconnected")
+    assert not gateway_ready(pid)

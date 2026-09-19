@@ -2397,9 +2397,12 @@ class InkboxAdapter(BasePlatformAdapter):
             self._release_platform_lock()
             return False
 
-        self._mark_connected()
         await self._catch_up_hosted_call_completions()
         await self._catch_up_a2a_tasks()
+        # The host publishes this as live runtime status. Catch-up can still
+        # fail or be cancelled by its connection deadline, so publish only
+        # once every awaited startup operation has finished.
+        self._mark_connected()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
             self._identity_handle, self._public_url, self._host, self._port,
@@ -3642,12 +3645,13 @@ class InkboxAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
+        ready = self.is_connected
         return web.json_response({
-            "status": "ok",
+            "status": "ok" if ready else "starting",
             "platform": "inkbox",
             "identity": self._identity_handle,
             "public_url": self._public_url,
-        })
+        }, status=200 if ready else 503)
 
     def _provider_secret(self, provider_name: str) -> str:
         """Resolve the signing secret / verification key for a webhook provider.
