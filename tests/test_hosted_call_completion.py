@@ -1035,13 +1035,21 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     instance._release_platform_lock = lambda: None
     instance._cleanup = AsyncMock()
     instance._patch_identity_objects = lambda: None
-    instance._mark_connected = lambda: None
     order = []
+    instance._running = False
+
+    def _mark_connected():
+        instance._running = True
+        order.append("connected")
+
+    instance._mark_connected = _mark_connected
 
     async def _catch_up_hosted():
+        assert (await instance._handle_health(None)).status == 503
         order.append("hosted")
 
     async def _catch_up_a2a():
+        assert (await instance._handle_health(None)).status == 503
         order.append("a2a")
 
     instance._catch_up_hosted_call_completions = _catch_up_hosted
@@ -1071,7 +1079,8 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     )
 
     assert asyncio.run(instance.connect()) is True
-    assert order == ["hosted", "a2a"]
+    assert order == ["hosted", "a2a", "connected"]
+    assert asyncio.run(instance._handle_health(None)).status == 200
 
 
 def test_hosted_processing_suppresses_text_for_entire_turn(tmp_path):

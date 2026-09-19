@@ -127,7 +127,8 @@ jobs:
           hermes gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 36); do
-            hermes inkbox doctor 2>/dev/null | grep -q '"ok": true' && exit 0
+            "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py" "$(cat "$RUNNER_TEMP/gateway.pid")" && exit 0
             if ! kill -0 "$(cat "$RUNNER_TEMP/gateway.pid")" 2>/dev/null; then
               echo "::error::gateway exited during startup"
               exit 1

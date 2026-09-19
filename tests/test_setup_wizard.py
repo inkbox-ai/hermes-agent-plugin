@@ -1322,6 +1322,7 @@ def _stub_setup_dependencies(monkeypatch, *, gateway_live):
     monkeypatch.setattr(
         setup_wizard, "_self_signup_flow", lambda *_a, **_k: (identity, "ApiKey_stub", False)
     )
+    monkeypatch.setattr(setup_wizard, "_configure_channel_display", lambda: None)
     monkeypatch.setattr(setup_wizard, "_configure_avatar", lambda *_a, **_k: None)
     monkeypatch.setattr(setup_wizard, "_configure_imessage", lambda *_a, **_k: False)
     monkeypatch.setattr(setup_wizard, "_offer_dedicated_number", lambda *_a, **_k: (identity, False))
@@ -1375,3 +1376,31 @@ def test_dead_gateway_still_gets_the_next_steps_list(monkeypatch, capsys):
     assert "Next steps:" in out
     assert "hermes gateway run" in out
     assert "Your Hermes agent is set up and running" not in out
+
+
+@pytest.mark.parametrize("explicit", [None, False, True])
+def test_channel_display_default_preserves_explicit_settings(monkeypatch, explicit):
+    inkbox_display = {"streaming": False}
+    if explicit is not None:
+        inkbox_display["show_reasoning"] = explicit
+    config = {
+        "display": {
+            "show_reasoning": True,
+            "platforms": {"inkbox": inkbox_display, "other": {"show_reasoning": True}},
+        },
+        "model": {"default": "test-model"},
+    }
+    saved = []
+    host_config = types.ModuleType("hermes_cli.config")
+    host_config.load_config = lambda: config
+    host_config.save_config = saved.append
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", host_config)
+
+    setup_wizard._configure_channel_display()
+    setup_wizard._configure_channel_display()
+
+    assert inkbox_display == {"streaming": False, "show_reasoning": explicit or False}
+    assert config["display"]["show_reasoning"] is True
+    assert config["display"]["platforms"]["other"] == {"show_reasoning": True}
+    assert config["model"] == {"default": "test-model"}
+    assert len(saved) == (1 if explicit is None else 0)

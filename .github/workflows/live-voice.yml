@@ -133,7 +133,8 @@ jobs:
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway (tunnel + webhooks)…"
           for i in $(seq 1 36); do
-            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+            if "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py" "$(cat "$RUNNER_TEMP/gateway.pid")"; then
               echo "Gateway ready."; exit 0
             fi
             sleep 5
@@ -155,15 +156,20 @@ jobs:
             RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS with this exact three-word body: $HOSTED_MARKER. Record that post-call SMS action now. Once the action tool succeeds, read the exact three words back to me. Do not send the SMS during the call."
+            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS with exactly these words: $HOSTED_MARKER. Save one post-call action titled Send SMS, with details exactly $HOSTED_MARKER. After the tool succeeds, read back the SMS body."
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
-            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
-            export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email
-            export VOICE_DRIVER_ANSWER_SETTLE=4
+            export VOICE_DRIVER_LINE="Look up Olivia Parker's contact card. Read her full name and email address aloud. Then wait for me to confirm."
+            # Pytest owns hangup after the direct read and complete persisted
+            # answer. A short media timer can cut a successful lookup mid-reply.
+            export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &

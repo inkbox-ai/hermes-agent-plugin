@@ -74,12 +74,15 @@ def test_full_stack_live_validation_runs_for_pull_requests():
 def test_live_tool_scope_preserves_other_config_and_allows_only_inkbox():
     config = {
         "model": {"default": "test-model"},
+        "display": {"show_reasoning": True},
         "platform_toolsets": {"cli": ["hermes-cli"]},
     }
 
     restricted = restrict_inkbox_platform(config)
 
     assert restricted["model"] == {"default": "test-model"}
+    assert restricted["display"]["show_reasoning"] is True
+    assert restricted["display"]["platforms"]["inkbox"]["show_reasoning"] is False
     assert restricted["platform_toolsets"]["cli"] == ["hermes-cli"]
     assert restricted["platform_toolsets"]["inkbox"] == ["inkbox", "no_mcp"]
 

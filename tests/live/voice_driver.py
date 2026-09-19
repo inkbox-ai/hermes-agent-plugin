@@ -20,10 +20,13 @@ Env:
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
   VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
+  VOICE_DRIVER_TEST_OWNS_HANGUP  leave completion hangup to the asserting test
+  VOICE_DRIVER_WAIT_FOR_PEER  require initial peer speech before the quiet gate
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -49,10 +52,8 @@ LINE = os.environ.get(
     "VOICE_DRIVER_LINE",
     "Hi, this is a quick test call. Please reply out loud with one short sentence, then say goodbye.",
 )
-# Delay before the first ask. A greeting arrives as several final transcripts
-# 1.5-5s apart, so no silence threshold tells "between greeting sentences" from
-# "greeting over" — the first ask is simply allowed to land wherever it lands, and
-# _run_turn re-asks once the agent is actually idle.
+# Wait through the initial greeting before asking: speaking on a fixed timer
+# can clip the request or its marker while the other party is still talking.
 SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "3"))
 # Answering-machine detection scores whoever answers, and a greeting longer than
 # the carrier's `greeting_duration_millis` (3.5s) reads as a voicemail
@@ -73,6 +74,26 @@ MAX_REASKS = int(os.environ.get("VOICE_DRIVER_MAX_REASKS", "2"))
 # Keep the media stream alive briefly after the requested answer reaches the
 # driver so the same final turn can settle on the AUT-owned call transcript.
 ANSWER_SETTLE_S = float(os.environ.get("VOICE_DRIVER_ANSWER_SETTLE", "0"))
+# Some scenarios verify persisted state before hanging up; hearing an email-like
+# fragment is not proof that the requested answer has been completely persisted.
+TEST_OWNS_HANGUP = os.environ.get("VOICE_DRIVER_TEST_OWNS_HANGUP", "0") == "1"
+WAIT_FOR_PEER = os.environ.get("VOICE_DRIVER_WAIT_FOR_PEER", "0") == "1"
+
+
+async def _wait_for_greeting(state: dict[str, float]) -> bool:
+    """Wait for a quiet peer, without leaving a continuously talking call open."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(30.0, SPEAK_AFTER_S + QUIET_GAP_S)
+    await asyncio.sleep(SPEAK_AFTER_S)
+    while True:
+        now = loop.time()
+        quiet_in = QUIET_GAP_S - (now - state["last_heard"])
+        if quiet_in <= 0 and (not WAIT_FOR_PEER or state["last_heard"] > 0):
+            return True
+        if now >= deadline:
+            return False
+        await asyncio.sleep(min(max(quiet_in, 1.0), deadline - now))
+
 
 app = FastAPI()
 
@@ -85,8 +106,6 @@ async def health() -> dict:
 @app.websocket("/phone/media/ws")
 async def phone_media_ws(ws: WebSocket) -> None:
     """Accept the call-media WS in Inkbox STT/TTS mode and run one scripted turn."""
-    import asyncio
-
     # Opt into Inkbox-managed speech both ways → we exchange text, not audio.
     await ws.accept(headers=[
         (b"x-use-inkbox-text-to-speech", b"true"),
@@ -108,9 +127,16 @@ async def phone_media_ws(ws: WebSocket) -> None:
         # is short and lands before the agent's greeting, so it does not eat the
         # caller turn the question needs.
         await _speak(GREETING)
-        await asyncio.sleep(SPEAK_AFTER_S)
+        if not await _wait_for_greeting(state):
+            log.info("peer did not pause before the greeting deadline")
+            await ws.send_text(json.dumps({"event": "stop"}))
+            return
         await _speak(LINE)
         asked_at = loop.time()
+        # text.done acknowledges submission, not completed audio playback. Give
+        # long requests 100 spoken words/minute plus the quiet gap before a
+        # retry can enqueue another copy; short asks retain the configured floor.
+        reask_after = max(REASK_EVERY_S, len(LINE.split()) * 0.6 + QUIET_GAP_S)
         state["last_heard"] = asked_at
         # Hold the call open through the agent's turn, and re-ask if it never got
         # the question: the greeting routinely runs several seconds past our first
@@ -129,7 +155,7 @@ async def phone_media_ws(ws: WebSocket) -> None:
             if (
                 REASK_EVERY_S > 0
                 and reasks < MAX_REASKS
-                and loop.time() - asked_at >= REASK_EVERY_S
+                and loop.time() - asked_at >= reask_after
                 and loop.time() - state["last_heard"] >= QUIET_GAP_S
             ):
                 await _speak(LINE)
@@ -151,12 +177,17 @@ async def phone_media_ws(ws: WebSocket) -> None:
             if kind == "start":
                 log.info("call start: %s", ev.get("stream_id"))
                 convo = asyncio.create_task(_run_turn())
-            elif kind == "transcript" and ev.get("is_final"):
+            elif kind == "transcript":
                 text = ev.get("text") or ""
+                if text.strip():
+                    state["last_heard"] = loop.time()
+                if not ev.get("is_final"):
+                    continue
                 log.info("heard (final): %s", text)
-                state["last_heard"] = loop.time()  # agent is actively talking
                 # The agent recited an email → it answered; stop holding the call.
-                if "@" in text or "example" in text.lower().replace(" ", ""):
+                if not TEST_OWNS_HANGUP and (
+                    "@" in text or "example" in text.lower().replace(" ", "")
+                ):
                     answered.set()
             elif kind == "stop":
                 log.info("call stop: %s", ev.get("reason"))

@@ -149,3 +149,74 @@ def test_deferred_discovery_does_not_execute_but_tool_call_does(monkeypatch):
     ))
     assert result == {"ok": True, "call_id": "synthetic-call"}
     assert called == [{"purpose": "Call me back"}]
+
+
+def test_setup_display_default_keeps_host_reasoning_out_of_channel_reply(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import hermes_cli.config as host_config
+    import gateway.run as host_run
+    from gateway.run_turn import GatewayTurnMixin
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+
+    package = ModuleType("inkbox_display_contract")
+    package.__path__ = [str(Path(__file__).resolve().parents[2])]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    setup_wizard = importlib.import_module("inkbox_display_contract.setup_wizard")
+
+    monkeypatch.setattr(host_config, "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text("display:\n  show_reasoning: true\n")
+    config = host_config.load_config()
+    monkeypatch.setattr(host_run, "_load_gateway_config", lambda: config)
+    monkeypatch.setattr(host_run, "_platform_config_key", lambda _platform: "inkbox")
+    runner = SimpleNamespace(_show_reasoning=True, _REASONING_QUOTE_STYLES={})
+    source = SimpleNamespace(platform="inkbox")
+    result = {"last_reasoning": "Check the requested channel before replying."}
+    response = "Everything is on track for tomorrow."
+
+    assert "**Reasoning:**" in GatewayTurnMixin._hmwa_prepend_reasoning(
+        runner, result, response, source, False,
+    )
+    setup_wizard._configure_channel_display()
+    config = host_config.load_config()
+
+    assert config["display"]["show_reasoning"] is True
+    assert config["display"]["platforms"]["inkbox"]["show_reasoning"] is False
+    assert GatewayTurnMixin._hmwa_prepend_reasoning(
+        runner, result, response, source, False,
+    ) == response
+
+
+def test_live_readiness_follows_native_runtime_lifecycle(tmp_path, monkeypatch):
+    import json
+    import os
+
+    from gateway import status
+    from tests.ci.check_gateway_ready import gateway_ready
+
+    path = tmp_path / "gateway_state.json"
+    monkeypatch.setattr(status, "_get_runtime_status_path", lambda: path)
+    pid = os.getpid()
+    assert not gateway_ready(pid)
+    status.write_runtime_status(gateway_state="starting", platform="inkbox", platform_state="connected")
+    assert not gateway_ready(pid)
+    status.write_runtime_status(gateway_state="running", platform="inkbox", platform_state="retrying")
+    assert not gateway_ready(pid)
+    status.write_runtime_status(platform="inkbox", platform_state="connected")
+    assert gateway_ready(pid)
+    assert not gateway_ready(pid + 1)
+
+    ready = status.read_runtime_status()
+    for changes in (
+        {"updated_at": "2000-01-01T00:00:00+00:00"},
+        {"start_time": "stale-process"},
+        {"platforms": {"inkbox": {**ready["platforms"]["inkbox"], "writer_pid": pid + 1}}},
+        {"platforms": {"inkbox": {**ready["platforms"]["inkbox"], "writer_start_time": "old-process"}}},
+    ):
+        path.write_text(json.dumps({**ready, **changes}))
+        assert not gateway_ready(pid)
+    path.write_text(json.dumps(ready))
+    status.write_runtime_status(platform="inkbox", platform_state="disconnected")
+    assert not gateway_ready(pid)

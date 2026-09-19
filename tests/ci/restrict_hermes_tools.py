@@ -13,6 +13,9 @@ def restrict_inkbox_platform(config: dict) -> dict:
         platform_toolsets = {}
         config["platform_toolsets"] = platform_toolsets
     platform_toolsets["inkbox"] = ["inkbox", "no_mcp"]
+    display = config.setdefault("display", {})
+    platforms = display.setdefault("platforms", {})
+    platforms.setdefault("inkbox", {})["show_reasoning"] = False
     return config
 
 

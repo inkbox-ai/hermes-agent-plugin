@@ -2019,6 +2019,19 @@ def _offer_gateway_restart() -> bool:
     return True
 
 
+def _configure_channel_display() -> None:
+    """Keep terminal reasoning out of channel replies unless explicitly enabled."""
+    from hermes_cli.config import load_config, save_config
+
+    config = load_config()
+    display = config.setdefault("display", {})
+    platforms = display.setdefault("platforms", {})
+    inkbox_display = platforms.setdefault("inkbox", {})
+    if "show_reasoning" not in inkbox_display:
+        inkbox_display["show_reasoning"] = False
+        save_config(config)
+
+
 def interactive_setup() -> None:
     print_header("Inkbox")
     print_info("API-first email + SMS + voice + identity for AI agents.")
@@ -2076,6 +2089,7 @@ def interactive_setup() -> None:
     if base_url != INKBOX_BASE_URL_DEFAULT or _env("INKBOX_BASE_URL"):
         _save("INKBOX_BASE_URL", base_url)
 
+    _configure_channel_display()
     _configure_avatar(base_url, api_key, identity, is_signup=not has_key)
 
     _save("INKBOX_ALLOW_ALL_USERS", "true")
