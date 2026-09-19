@@ -222,3 +222,93 @@ def test_long_request_does_not_requeue_before_playback_and_peer_quiet(
         (105.0, driver.LINE),
         (expected_retry, driver.LINE),
     ]
+
+
+def test_required_peer_greeting_has_bounded_wait(driver, monkeypatch):
+    state = {"last_heard": 0.0}
+    now, _pauses = _clock(driver, monkeypatch, state)
+    monkeypatch.setattr(driver, "WAIT_FOR_PEER", True)
+
+    assert not asyncio.run(driver._wait_for_greeting(state))
+    assert now() == 130
+
+
+@pytest.mark.parametrize(
+    "test_owns_hangup, external_stop, expected_stops",
+    [(False, 130, [120.0]), (True, 130, []), (True, None, [296.0])],
+)
+def test_contact_peer_waits_for_late_greeting_and_test_owned_completion(
+    driver, monkeypatch, test_owns_hangup, external_stop, expected_stops,
+):
+    now = 100.0
+    pending = [
+        (107, {"event": "transcript", "text": "Hi", "is_final": False}),
+        (110, {"event": "transcript", "text": "Hi, caller", "is_final": True}),
+        # An incomplete email-like answer must not stop a test-owned call.
+        (120, {"event": "transcript", "text": "example", "is_final": True}),
+    ]
+    if external_stop is not None:
+        pending.append((external_stop, {"event": "stop"}))
+    incoming = None
+
+    async def advance(delay):
+        nonlocal now
+        target = now + delay
+        while pending and pending[0][0] <= target:
+            now, event = pending.pop(0)
+            incoming.put_nowait(json.dumps(event))
+            await asyncio.sleep(0)
+        now = target
+        await asyncio.sleep(0)
+
+    async def wait_for(awaitable, timeout):
+        awaitable.close()
+        await advance(timeout)
+        raise asyncio.TimeoutError
+
+    loop = SimpleNamespace(time=lambda: now)
+    monkeypatch.setattr(driver, "asyncio", SimpleNamespace(
+        get_event_loop=lambda: loop, get_running_loop=lambda: loop,
+        sleep=advance, wait_for=wait_for, Event=asyncio.Event,
+        create_task=asyncio.create_task, TimeoutError=asyncio.TimeoutError,
+    ))
+    monkeypatch.setattr(driver, "WAIT_FOR_PEER", True)
+    monkeypatch.setattr(driver, "TEST_OWNS_HANGUP", test_owns_hangup)
+    monkeypatch.setattr(driver, "SPEAK_AFTER_S", 5)
+    monkeypatch.setattr(driver, "QUIET_GAP_S", 6)
+    monkeypatch.setattr(driver, "LISTEN_S", 180)
+    monkeypatch.setattr(driver, "REASK_EVERY_S", 0)
+
+    async def run():
+        nonlocal incoming
+        incoming = asyncio.Queue()
+        incoming.put_nowait(json.dumps({"event": "start"}))
+
+        class Socket:
+            client_state = "disconnected"
+
+            def __init__(self):
+                self.sent = []
+
+            async def accept(self, **_kwargs):
+                pass
+
+            async def send_text(self, raw):
+                event = json.loads(raw)
+                self.sent.append((now, event))
+                if event["event"] == "stop":
+                    incoming.put_nowait(json.dumps({"event": "stop"}))
+
+            async def receive_text(self):
+                return await incoming.get()
+
+        socket = Socket()
+        await driver.phone_media_ws(socket)
+        return socket.sent
+
+    sent = asyncio.run(run())
+    assert [(when, event["delta"]) for when, event in sent if "delta" in event] == [
+        (100.0, driver.GREETING), (116.0, driver.LINE),
+    ]
+    stops = [when for when, event in sent if event["event"] == "stop"]
+    assert stops == expected_stops

@@ -162,9 +162,12 @@ jobs:
             export VOICE_DRIVER_LISTEN=180
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
-            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
-            export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email
-            export VOICE_DRIVER_ANSWER_SETTLE=4
+            export VOICE_DRIVER_LINE="Look up Olivia Parker's contact card. Read her full name and email address aloud. Then wait for me to confirm."
+            # Pytest owns hangup after the direct read and complete persisted
+            # answer. A short media timer can cut a successful lookup mid-reply.
+            export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
