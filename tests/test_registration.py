@@ -73,6 +73,7 @@ def test_yaml_contact_memories_config_is_forwarded():
     assert module._apply_yaml_config({}, {"contact_memories_enabled": False}) == {
         "contact_memories_enabled": False
     }
+    assert module._apply_yaml_config({}, {"companion_max_bytes": 20000}) == {"companion_max_bytes": 20000}
 
 
 def test_yaml_voice_config_is_forwarded():

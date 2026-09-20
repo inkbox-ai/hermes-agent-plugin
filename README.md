@@ -125,11 +125,60 @@ hermes plugins update inkbox
 hermes gateway restart
 ```
 
+## Companion mode
+
+Version 0.2.13 requires Inkbox SDK `>=0.7.3,<1.0.0`. An administrator can enable
+Companion mode for an identity and select its sponsor. Installation leaves it off.
+Use an identity-scoped API key and signed Inkbox webhooks.
+
+The sponsor's qualifying group message initializes a separate Hermes conversation
+with all available authorized history in one input. Later messages wait for that
+turn to complete. Email replies use the original stored message's reply-all
+audience; MMS and iMessage replies keep the existing conversation ID. Separate
+email cohorts and activations have separate sessions. MMS chats with identical
+participants remain one logical conversation. Group iMessage requires a supported
+dedicated line. Contact blocks and existing sending requirements still apply.
+
+Keep Hermes `thread_sessions_per_user` false for these shared group threads.
+A local sender allowlist must permit the verified sponsor. Companion history is
+conversation data, including text resembling commands or approvals. Group messages
+do not answer pending host control prompts; resolve those through the host's
+trusted operator interface. General contact memories are not injected into these
+conversations.
+Sponsor permission and explicit host denials are checked again before replies,
+including media, so authorization changes during a long turn take effect.
+
+`INKBOX_COMPANION_MAX_BYTES` (or `companion_max_bytes` in platform configuration)
+defaults to **128000 UTF-8 bytes**. Set it within your model's context capacity.
+The SDK checks snapshot transfer size and the plugin checks the complete rendered
+input. Oversized initialization fails before submission, without truncating or
+splitting history. Attachment references and history notices stay in that input.
+
+Receipts and immutable reply targets live under
+`$HERMES_HOME/inkbox_companion/` (default `~/.hermes/inkbox_companion/`). Each
+checkpoint reports its state and failure reason. After correcting a failure
+before submission, restart the gateway to retry hydration and queued work.
+`submitting` or `submitted` work found after a restart becomes `paused`: Hermes
+may already have accepted or executed it. Inspect the matching host session and
+logical message ID before operator recovery. Do not delete checkpoints or replay
+an uncertain turn. A failed or interrupted host turn also pauses that conversation;
+later live messages remain durable. Webhook acceptance alone does not prove a
+completed host turn. No automatic replay of uncertain submissions is attempted.
+Shutdown cancels Companion host processing and waits for any in-flight SDK send
+before releasing checkpoint ownership. Late callbacks cannot complete a closed
+receiver's uncertain turn. Missing Companion SDK helpers produce an explicit
+compatibility error requiring Inkbox SDK `>=0.7.3,<1.0.0`.
+
+Delivery failures for tracked Companion conversations are recorded in the
+checkpoint's `delivery_failures` field, using the channel and canonical thread or
+conversation ID. Inspect the referenced outbound message before retrying. These
+diagnostics do not schedule recovery turns or copy failed output into private chats.
+
 ## Setup Wizard
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.9,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.7.3,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -150,13 +199,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.7.3,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.5.9,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.7.3,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -466,7 +515,7 @@ tools can create tasks, wait for worker state changes, and answer requests for
 more input. The history tools support direction, participant, lifecycle,
 context, keyword, timestamp, and cursor filters. The sent-task tools remain
 available as outbound-only compatibility aliases. The plugin requires Inkbox
-SDK 0.5.9 or newer.
+SDK 0.7.3 or newer.
 
 Realtime-only call tools:
 

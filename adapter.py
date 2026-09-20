@@ -137,6 +137,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
+    from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
     from .a2a_context import (
         enqueue_a2a_turn_context,
         read_a2a_turn_context,
@@ -171,6 +172,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
     from a2a_context import (
         enqueue_a2a_turn_context,
         read_a2a_turn_context,
@@ -2204,10 +2206,27 @@ class InkboxAdapter(BasePlatformAdapter):
             "inkbox_hosted_call_completions.json"
         )
         self._hosted_call_registry_owner = uuid.uuid4().hex
+        self._companion: Optional[CompanionReceiver] = None
+        self._companion_max_bytes = _int_setting(
+            extra, "companion_max_bytes", "INKBOX_COMPANION_MAX_BYTES", DEFAULT_MAX_BYTES,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    async def _start_companion(self) -> None:
+        """Recover durable Companion receipts for this configured identity."""
+        import hashlib
+
+        identity_key = hashlib.sha256(json.dumps([
+            self._base_url, self._identity_handle, self._identity_id,
+        ]).encode()).hexdigest()
+        self._companion = CompanionReceiver(
+            self, _inkbox_state_path().parent / "inkbox_companion" / identity_key,
+            self._companion_max_bytes,
+        )
+        await self._companion.start()
 
     async def connect(self, is_reconnect: bool = False, **kwargs) -> bool:
         if not check_inkbox_requirements():
@@ -2314,6 +2333,13 @@ class InkboxAdapter(BasePlatformAdapter):
             self._release_platform_lock()
             return False
 
+        try:
+            await self._start_companion()
+        except Exception:
+            logger.error("[Inkbox] Companion checkpoint recovery failed; gateway startup stopped")
+            await self._cleanup()
+            self._release_platform_lock()
+            return False
         self._mark_connected()
         await self._catch_up_hosted_call_completions()
         await self._catch_up_a2a_tasks()
@@ -2332,6 +2358,9 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        if self._companion is not None:
+            await self._companion.close()
+            self._companion = None
         for task in list(self._pending_sms_text_batch_tasks.values()):
             if not task.done():
                 task.cancel()
@@ -2660,6 +2689,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
     ) -> bool:
         """Whether a native media send belongs on the iMessage channel."""
+        if str(chat_id).startswith("companion:"):
+            row = self._companion.rows.get(str(chat_id).removeprefix("companion:")) if self._companion else None
+            return bool(row and row["meta"]["channel"] == "imessage")
         meta = metadata or {}
         explicit_mode = str(meta.get("mode") or "").lower().strip()
         if explicit_mode:
@@ -2680,6 +2712,14 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
     ) -> Tuple[str, str, str]:
         """Resolve conversation id, recipient number, and thread id."""
+        if str(chat_id).startswith("companion:"):
+            receiver = self._companion
+            row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+            if row is None or receiver.closed or row["state"] in {"paused", "failed", "revoked"} or str(chat_id) not in receiver.active:
+                return "", "", ""
+            if row["meta"].get("activation_id"):
+                await receiver._revalidate(row)
+            return row["meta"]["conversation_id"], "", ""
         meta = metadata or {}
         thread_id = str(meta.get("thread_id") or "").strip()
         inbound = getattr(self, "_last_inbound_imessage", {})
@@ -2715,6 +2755,11 @@ class InkboxAdapter(BasePlatformAdapter):
         local_path: Optional[str] = None,
     ) -> SendResult:
         """Upload local media when needed, then send one native iMessage attachment."""
+        receiver = self._companion if str(chat_id).startswith("companion:") else None
+        row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+        turn = receiver.active.get(str(chat_id)) if receiver else None
+        if str(chat_id).startswith("companion:") and (row is None or turn is None or receiver.closed):
+            return SendResult(success=False, error="Companion reply requires an active receiver and turn")
         if bool(media_url) == bool(local_path):
             return SendResult(
                 success=False,
@@ -2832,7 +2877,10 @@ class InkboxAdapter(BasePlatformAdapter):
             payload["to"] = to_number
             target_label = redact_phone(to_number)
         try:
-            msg = await asyncio.to_thread(send_imessage, **payload)
+            if receiver is not None:
+                msg = await receiver.dispatch_reply(row, turn, send_imessage, **payload)
+            else:
+                msg = await asyncio.to_thread(send_imessage, **payload)
             raw_response = _text_message_metadata(msg, mode="imessage")
             logger.info(
                 "[Inkbox] iMessage media queued to %s: id=%s status=%s",
@@ -2856,6 +2904,8 @@ class InkboxAdapter(BasePlatformAdapter):
                 raw_response=raw_response,
             )
         except Exception as exc:
+            if receiver is not None:
+                return SendResult(success=False, error=f"Companion reply failed ({type(exc).__name__})")
             failure = _imessage_send_failure(
                 exc, target=conversation_id or to_number,
             )
@@ -3000,6 +3050,11 @@ class InkboxAdapter(BasePlatformAdapter):
 
         if str(chat_id).startswith("a2a:"):
             return await self._send_a2a_reply(chat_id, content)
+
+        if str(chat_id).startswith("companion:"):
+            if self._companion is None:
+                return SendResult(success=False, error="Companion receiver is unavailable")
+            return await self._companion.send(str(chat_id), content, reply_to)
 
         # The [SILENT] marker is the cron scheduler's "I have nothing to
         # say" sentinel and is also instructed to the agent in the
@@ -3594,6 +3649,36 @@ class InkboxAdapter(BasePlatformAdapter):
         # Trusted source label. ``None`` means no registered provider claimed
         # the request — an unknown/unverifiable third party.
         source = provider.name if provider is not None else None
+
+        receiver = getattr(self, "_companion", None)
+        if source == "inkbox" and receiver is not None:
+            failure_rows = receiver.delivery_failure_rows(envelope)
+            if failure_rows:
+                if not provider.verify(
+                    body=body, headers=dict(request.headers), url=str(request.url),
+                    secret=self._provider_secret("inkbox"),
+                ):
+                    return web.Response(status=401, text="Companion mode requires an authenticated webhook")
+                if receiver.closed:
+                    return web.Response(status=503, text="Companion receiver is closing")
+                receiver.record_delivery_failure(envelope, failure_rows)
+                return web.Response(status=200, text="Companion delivery failure recorded")
+
+        if envelope.get("companion") is not None and source == "inkbox":
+            if not provider.verify(
+                body=body, headers=dict(request.headers), url=str(request.url),
+                secret=self._provider_secret("inkbox"),
+            ):
+                return web.Response(status=401, text="Companion mode requires an authenticated webhook")
+            if self._companion is None:
+                return web.Response(status=503, text="Companion receiver is not ready")
+            try:
+                await self._companion.accept(envelope)
+            except IncompatibleCompanionSDK as exc:
+                return web.Response(status=503, text=str(exc))
+            except (ValueError, TypeError, KeyError):
+                return web.Response(status=400, text="Invalid Companion event")
+            return web.Response(status=202, text="Companion event saved")
 
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
@@ -4637,6 +4722,8 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        if getattr(self, "_companion", None) is not None and self._companion.processing(event):
+            return
         hosted = self._hosted_call_processing_data(event)
         if hosted is not None:
             call_id, event_id = hosted
@@ -4692,6 +4779,8 @@ class InkboxAdapter(BasePlatformAdapter):
         event: MessageEvent,
         outcome: Any,
     ) -> None:
+        if getattr(self, "_companion", None) is not None and self._companion.processing(event, outcome):
+            return
         chat_id = str(event.source.chat_id)
         hosted = self._hosted_call_processing_data(event)
         if hosted is not None:
@@ -8240,11 +8329,12 @@ class InkboxAdapter(BasePlatformAdapter):
         chosen = primary or (phones[0] if phones else None)
         return getattr(chosen, "value", None) if chosen else None
 
-    async def _enqueue(self, event: MessageEvent) -> None:
+    async def _enqueue(self, event: MessageEvent) -> asyncio.Task:
         """Dispatch an inbound event to the gateway runner as a background task."""
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+        return task
 
 
 # ---------------------------------------------------------------------------

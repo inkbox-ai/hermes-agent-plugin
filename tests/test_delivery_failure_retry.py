@@ -12,10 +12,12 @@ TTL, replay-deduped webhooks.
 """
 
 import asyncio
+import json
 import sys
 import time
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -640,6 +642,29 @@ def test_mail_failure_events_are_subscribed():
     assert "message.bounced" in adapter_mod._DESIRED_MAIL_EVENTS
     assert "message.failed" in adapter_mod._DESIRED_MAIL_EVENTS
     assert "message.received" in adapter_mod._DESIRED_MAIL_EVENTS
+
+
+@pytest.mark.parametrize("event_type", ["message.bounced", "message.failed", "text.delivery_failed", "imessage.delivery_failed"])
+def test_gateway_mode_off_preserves_delivery_failure_recovery(monkeypatch, event_type):
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
+    adapter._companion = None
+    adapter._require_signature = True
+    adapter._signing_key = "synthetic-signing-key"
+    provider = types.SimpleNamespace(name="inkbox", verify=Mock(return_value=True))
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda _headers: provider)
+    failed = {
+        "id": "failed-message", "direction": "outbound", "status": "delivery_failed",
+        "thread_id": "mail-thread", "conversation_id": "phone-conversation",
+        "to_addresses": ["kim@example.com"], "remote_phone_number": "+15555550101", "remote_number": "+15555550101",
+        "snippet": "Ordinary reply", "text": "Ordinary reply", "content": "Ordinary reply",
+    }
+    envelope = {"event_type": event_type, "data": {"text_message" if event_type.startswith("text.") else "message": failed}}
+    request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(envelope).encode()),
+                                    headers={}, url="https://example.com/webhook")
+    assert asyncio.run(adapter._handle_webhook(request)).status == 200
+    assert len(adapter._enqueued) == 1
+    assert adapter._enqueued[0].source.chat_id == "contact-123"
+    assert "Ordinary reply" in adapter._enqueued[0].text
 
 
 # ── Budget mechanics across surfaces ────────────────────────────────────

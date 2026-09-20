@@ -67,6 +67,10 @@ def inkbox_base_url_kwargs(base_url: str | None = None) -> Dict[str, str]:
 @lru_cache(maxsize=1)
 def plugin_user_agent() -> str:
     """Identifies this plugin ahead of the SDK's own ``User-Agent`` token."""
+    manifest = Path(__file__).with_name("plugin.yaml")
+    if manifest.is_file():
+        version = next(line.split(":", 1)[1].strip() for line in manifest.read_text().splitlines() if line.startswith("version:"))
+        return f"{USER_AGENT_NAME}/{version}"
     try:
         version = importlib.metadata.version(DISTRIBUTION_NAME)
     except importlib.metadata.PackageNotFoundError:

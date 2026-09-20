@@ -35,6 +35,7 @@ def test_unknown_distribution_still_yields_a_token(monkeypatch):
         raise importlib.metadata.PackageNotFoundError
 
     monkeypatch.setattr(importlib.metadata, "version", _missing)
+    monkeypatch.setattr(config_mod.Path, "is_file", lambda _self: False)
     config_mod.plugin_user_agent.cache_clear()
 
     assert config_mod.plugin_user_agent() == "inkbox-hermes/unknown"

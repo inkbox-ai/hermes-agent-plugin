@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.11
+version: 0.2.13
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
@@ -65,6 +65,10 @@ optional_env:
   - name: INKBOX_CONTACT_MEMORIES_ENABLED
     description: "Include generated contact memories as background context for inbound conversations. Defaults to true."
     prompt: "Enable contact memories"
+    secret: false
+  - name: INKBOX_COMPANION_MAX_BYTES
+    description: "Maximum complete Companion input in UTF-8 bytes. Defaults to 128000; larger inputs fail before submission."
+    prompt: "Companion context byte limit"
     secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."

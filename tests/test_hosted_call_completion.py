@@ -1012,12 +1012,16 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     instance._mark_connected = lambda: None
     order = []
 
+    async def _start_companion():
+        order.append("companion")
+
     async def _catch_up_hosted():
         order.append("hosted")
 
     async def _catch_up_a2a():
         order.append("a2a")
 
+    instance._start_companion = _start_companion
     instance._catch_up_hosted_call_completions = _catch_up_hosted
     instance._catch_up_a2a_tasks = _catch_up_a2a
 
@@ -1045,7 +1049,7 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     )
 
     assert asyncio.run(instance.connect()) is True
-    assert order == ["hosted", "a2a"]
+    assert order == ["companion", "hosted", "a2a"]
 
 
 def test_hosted_processing_suppresses_text_for_entire_turn(tmp_path):

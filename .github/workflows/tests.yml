@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'inkbox>=0.5.9,<1.0.0' \
+            'inkbox>=0.7.3,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -74,7 +74,7 @@ jobs:
         run: |
           uv venv --python 3.12
           uv pip install \
-            'inkbox>=0.5.9,<1.0.0' \
+            'inkbox>=0.7.3,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
