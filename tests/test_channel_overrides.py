@@ -148,3 +148,15 @@ def test_contact_binding_wins_over_modality_binding():
     )
     _, skills = adapter._resolve_channel_overrides("voice", "contact_1", None)
     assert skills == ["inkbox:inkbox-outbound-calling"]
+
+
+def test_text_channels_distinguish_discovery_from_execution():
+    adapter = _adapter({"channel_prompts": {"sms": "Be concise."}})
+    for modality in ("sms", "imessage", "email"):
+        prompt, _ = adapter._resolve_channel_overrides(modality, "contact_1", None)
+        assert "a text reply does not perform that action" in prompt
+        assert "If Hermes exposes tool_search, tool_describe, and tool_call" in prompt
+        assert "passing its name and arguments" in prompt
+        assert "If the tool is directly available, call it directly" in prompt
+        assert "unless its tool result confirms success" in prompt
+    assert adapter._resolve_channel_overrides("sms", "contact_1", None)[0].endswith("Be concise.")

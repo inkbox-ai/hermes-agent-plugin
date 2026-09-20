@@ -14,11 +14,11 @@ jobs:
   # and the contract tests auto-skip. Fast signal on our own code — cheap enough to
   # run on every push, including draft PRs (the heavy live suite is what we gate).
   unit:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v7
@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'inkbox>=0.7.3,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -53,7 +53,7 @@ jobs:
   # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
   # Same suite the canary runs on a schedule; this is the per-PR gate version.
   contract-pr:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@v7
@@ -74,7 +74,7 @@ jobs:
         run: |
           uv venv --python 3.12
           uv pip install \
-            'inkbox>=0.7.3,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
@@ -86,3 +86,12 @@ jobs:
             --override-ini pythonpath= \
             --import-mode=importlib \
             "$GITHUB_WORKSPACE/tests/contract" -v
+
+      - name: Verify Hermes plugin security scan
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin-scan"
+          git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$RUNNER_TEMP/plugin-scan"
+          "$GITHUB_WORKSPACE/.venv/bin/python" \
+            "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
+            "$RUNNER_TEMP/plugin-scan"

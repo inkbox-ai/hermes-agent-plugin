@@ -25,7 +25,8 @@ Status: gateway platform adapter, setup wizard, doctor checks, SMS/MMS batching,
 - The recommended Hermes installer for macOS, Linux, or WSL2:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o hermes-install.sh && \
+  bash hermes-install.sh && rm hermes-install.sh
 source ~/.bashrc
 hermes setup
 ```
@@ -127,7 +128,7 @@ hermes gateway restart
 
 ## Companion mode
 
-Version 0.2.13 requires Inkbox SDK `>=0.7.3,<1.0.0`. An administrator can enable
+Version 0.2.16 requires Inkbox SDK `>=0.7.3,<1.0.0`. An administrator can enable
 Companion mode for an identity and select its sponsor. Installation leaves it off.
 Use an identity-scoped API key and signed Inkbox webhooks.
 
@@ -221,6 +222,17 @@ INKBOX_SIGNING_KEY=xxxxxxxxxxxx
 INKBOX_ALLOW_ALL_USERS=true
 ```
 
+Setup also defaults `display.platforms.inkbox.show_reasoning` to `false` in
+Hermes config, preserving any explicit Inkbox setting. This keeps terminal-style
+reasoning blocks out of email, SMS, iMessage, and spoken replies without changing
+the agent's reasoning. For an existing install, apply the same setting and restart
+the gateway:
+
+```bash
+hermes config set display.platforms.inkbox.show_reasoning false
+hermes gateway restart
+```
+
 Optional:
 
 ```bash
@@ -231,6 +243,7 @@ INKBOX_HOME_CHANNEL=contact-or-phone
 INKBOX_ALLOWED_USERS=contact-or-phone,another-contact
 INKBOX_REQUIRE_SIGNATURE=true
 INKBOX_CONTACT_MEMORIES_ENABLED=true
+INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=180
 ```
 
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
@@ -303,6 +316,8 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
+Realtime calls negotiate HD mono PCM16 audio at 16 kHz. The bridge resamples to and from the realtime session’s 24 kHz PCM format, with legacy 8 kHz call compatibility.
+
 ### Two calling lines
 
 Calls — inbound and outbound — can run over either of two lines, and the agent picks the one that matches the channel it's talking on:
@@ -329,7 +344,7 @@ If a person disconnects the agent, outbound sends to that conversation fail unti
 
 Native attachments work in both outbound paths. In a normal channel reply, Hermes `MEDIA:/absolute/path` directives are securely validated, uploaded with the Inkbox SDK, and sent as iMessage media. For explicit `inkbox_send_imessage` calls, use `mediaPaths` for local files; use `mediaUrls` only for already-hosted public HTTP(S) URLs. iMessage supports one attachment of up to 10 MiB per message.
 
-Group iMessage uses the same conversation-first behavior as group SMS. `inkbox_list_imessage_conversations` includes groups by default, `inkbox_get_imessage_conversation` returns their history, and `inkbox_send_imessage` replies with `conversationId`. To start a group, pass 2–8 distinct E.164 recipients in `to`; the plugin verifies that the identity has a dedicated outbound iMessage line first. Inbound group messages share a conversation session, include sender and participant context, and only trigger a visible reply when the agent is addressed or expected to act. Typing indicators and read receipts remain 1:1-only.
+Group iMessage uses the same conversation-first behavior as group SMS. `inkbox_list_imessage_conversations` returns groups by default, `inkbox_get_imessage_conversation` returns their history, and `inkbox_send_imessage` replies with `conversationId`. To start a group, pass 2–8 distinct E.164 recipients in `to`; the plugin verifies that the identity has a dedicated outbound iMessage line first. Inbound group messages reuse one conversation session, carry sender and participant details, and only trigger a visible reply when the agent is addressed or expected to act. Typing indicators and read receipts remain 1:1-only.
 
 Once someone is connected over iMessage, the agent can also place and receive **voice calls** with them over that same shared line — see [Two calling lines](#two-calling-lines). This works even for an agent that has no dedicated phone number.
 
@@ -416,13 +431,15 @@ After the gateway starts:
 | `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret. Required for signed inbound email, SMS, iMessage, and calls. |
 | `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound Inkbox webhooks unless set to `false`. |
 | `INKBOX_EXTERNAL_EVENTS_ENABLED` | no | `false` | Gates whether **unverified/unknown** webhooks reach the agent: a source with no registered provider, or an Inkbox-signed payload with no matching handler. Off by default. **Verified registered third-party providers** (e.g. a configured GitHub secret via `INKBOX_WEBHOOK_SECRET_GITHUB`) are always delivered regardless of this flag; unverified sources are handed to the agent with a directive forbidding irreversible action. |
+| `INKBOX_SKIP_WEBHOOK_RECONCILE` | no | `false` | Leave webhook subscriptions untouched on connect. For deployments that provision them ahead of time, where the destination is fixed or the agent's key may not change it. The subscriptions must already point at this agent's webhook URL, or nothing will arrive. |
 | `INKBOX_BASE_URL` | no | SDK default | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
 | `INKBOX_TUNNEL_NAME` | no | identity handle | Override Inkbox tunnel name. |
 | `INKBOX_HOME_CHANNEL` | no | - | Default Inkbox chat/contact id for cron or notification delivery. |
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
 | `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. Setup writes `true`. |
-| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include generated memories for the matched sender or caller as background context. `platforms.inkbox.contact_memories_enabled` takes precedence. |
+| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Add generated memories for the matched sender or caller to inbound turns. `platforms.inkbox.contact_memories_enabled` takes precedence. |
+| `INKBOX_A2A_PROGRESS_INTERVAL_SECONDS` | no | `180` | Seconds between progress updates for an active inbound A2A task. Set to `0` to disable periodic updates. `platforms.inkbox.a2a_progress_interval_seconds` takes precedence. |
 | `INKBOX_VOICE_STACK` | no | legacy migration | Phone call stack: `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
 | `INKBOX_VOICE_AI_AUTHORITY_MODE` | Voice AI | `contact_scoped` | Voice AI tool authority: `contact_scoped` or `yolo`. |
 | `INKBOX_VOICEMAIL_DETECTION` | no | `enabled` | Outbound call voicemail detection: `enabled` or `disabled`. Live CI sets `disabled`; ordinary calls keep `enabled`. |
@@ -505,17 +522,26 @@ Hermes direct tools:
 - `inkbox_delete_contact`
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
-After durable binding and queueing, the plugin sends a non-terminal progress
-receipt; generic assistant text never completes the task. The three A2A outcome
-tools are accepted only during a verified inbound A2A turn and are the only way
-to complete, fail, or request input for that task. `hermes inkbox doctor` reports
-the A2A subscription, recent delivery result, and bounded local dispatch phases
-without including task content or webhook response bodies. Outbound delegation
-tools can create tasks, wait for worker state changes, and answer requests for
-more input. The history tools support direction, participant, lifecycle,
-context, keyword, timestamp, and cursor filters. The sent-task tools remain
-available as outbound-only compatibility aliases. The plugin requires Inkbox
-SDK 0.7.3 or newer.
+After durable binding, the plugin immediately sends a non-terminal receipt that
+states the configured progress cadence, then sends a concise update every three
+minutes by default while the worker turn remains active.
+Periodic summaries use the task text and sanitized activity categories; raw tool
+inputs, tool results, and model reasoning are excluded. Configure the interval
+under `platforms.inkbox.a2a_progress_interval_seconds`, or set it to `0` to
+disable periodic updates. Hermes exposes the summarizer as the
+`inkbox_a2a_progress` auxiliary model task; if the auxiliary call is unavailable,
+the plugin sends a deterministic update instead.
+
+Generic assistant text never completes the task. The three A2A outcome tools are
+accepted only during a verified inbound A2A turn and are the only way to complete,
+fail, or request input for that task. `hermes inkbox doctor` reports the A2A
+subscription, recent delivery result, and bounded local dispatch phases without
+including task content or webhook response bodies. Outbound delegation tools can
+create tasks, wait for worker state changes, and answer requests for more input.
+The history tools support direction, participant, lifecycle, context, keyword,
+timestamp, and cursor filters. The sent-task tools remain available as
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.3 or
+newer.
 
 Realtime-only call tools:
 

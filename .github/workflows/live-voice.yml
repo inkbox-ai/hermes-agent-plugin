@@ -51,7 +51,7 @@ concurrency:
 
 jobs:
   voice:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -89,7 +89,7 @@ jobs:
           "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.7.3,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' fastapi uvicorn
 
       - name: Configure AUT identity + model + speech path (${{ matrix.scenario }})
@@ -99,13 +99,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          HANDLE="$("$PY" - <<'PYEOF'
-          import os
-          from inkbox import Inkbox
-          c = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"], base_url=os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai"))
-          print(c.mailboxes.list()[0].email_address.split("@", 1)[0])
-          PYEOF
-          )"
+          HANDLE="$("$PY" "$GITHUB_WORKSPACE/tests/ci/resolve_inkbox_identity.py")"
           echo "AUT handle: $HANDLE"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
@@ -120,7 +114,7 @@ jobs:
           # the chat model; send it straight to OpenAI as-is.
           hermes config set model.provider custom || true
           hermes config set model.base_url https://api.openai.com/v1 || true
-          hermes config set model.default gpt-5.6-terra || true
+          hermes config set model.default gpt-5.6-sol || true
           if [ "${{ matrix.scenario }}" = "outbound_hosted" ]; then
             echo "INKBOX_VOICE_STACK=inkbox_voice_ai" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=false" >> "$HERMES_HOME/.env"
@@ -130,6 +124,7 @@ jobs:
           else
             echo "INKBOX_VOICE_STACK=openai_realtime" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
+            echo "INKBOX_REALTIME_MODEL=gpt-realtime-2" >> "$HERMES_HOME/.env"
           fi
 
       - name: Start gateway and wait for readiness
@@ -138,7 +133,8 @@ jobs:
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway (tunnel + webhooks)…"
           for i in $(seq 1 36); do
-            if hermes inkbox doctor 2>/dev/null | grep -q '"ok": true'; then
+            if "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py" "$(cat "$RUNNER_TEMP/gateway.pid")"; then
               echo "Gateway ready."; exit 0
             fi
             sleep 5
@@ -160,18 +156,20 @@ jobs:
             RUN_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             HOSTED_MARKER="$("$PY" "$GITHUB_WORKSPACE/tests/live/voice_marker.py" "$RUN_TOKEN")"
             echo "HOSTED_POST_CALL_MARKER=$HOSTED_MARKER" >> "$GITHUB_ENV"
-            export VOICE_DRIVER_LINE="After we hang up, send me one SMS with this exact three-word body: $HOSTED_MARKER. Record that post-call SMS action now. Once the action tool succeeds, read the exact three words back to me. Do not send the SMS during the call."
+            export VOICE_DRIVER_LINE="Do not text during this call. After we hang up, send me one SMS with exactly these words: $HOSTED_MARKER. Save one post-call action titled Send SMS, with details exactly $HOSTED_MARKER. After the tool succeeds, read back the SMS body."
             # Pytest owns the early hangup after both the transcript and open
             # action gates pass. This is only the media peer's safety ceiling.
             export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           elif [ "${{ matrix.scenario }}" = "outbound_realtime_contact" ]; then
             # Must name the contact the test seeds (see test_voice.py LOOKUP_CONTACT_*).
-            export VOICE_DRIVER_LINE="Hi! What email address do you have on file for your contact Olivia Parker? Please read the email out loud, then wait while I confirm I heard it."
-            export VOICE_DRIVER_LISTEN=40   # stay on the line for the tool round-trip + spoken email
-            export VOICE_DRIVER_ANSWER_SETTLE=4
-            # No driver re-ask (VOICE_DRIVER_REASK defaults to 0): the realtime
-            # path now says its own filler during the silent contact read, so the
-            # call stays alive without the caller nudging. Set REASK>0 to re-enable.
+            export VOICE_DRIVER_LINE="Look up Olivia Parker's contact card. Read her full name and email address aloud. Then wait for me to confirm."
+            # Pytest owns hangup after the direct read and complete persisted
+            # answer. A short media timer can cut a successful lookup mid-reply.
+            export VOICE_DRIVER_LISTEN=180
+            export VOICE_DRIVER_TEST_OWNS_HANGUP=1
+            export VOICE_DRIVER_WAIT_FOR_PEER=1
           fi
           VOICE_DRIVER_STATE="$DRIVER_STATE" VOICE_DRIVER_PORT=8090 \
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &

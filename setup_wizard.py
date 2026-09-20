@@ -75,7 +75,10 @@ except Exception:  # pragma: no cover - local tests without Hermes
 
 
 INKBOX_MIN_VERSION = "0.7.3"
-INKBOX_REQUIREMENTS = (f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5")
+INKBOX_REQUIREMENTS = (
+    f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
+    "audioop-lts>=0.2.1; python_version >= '3.13'",
+)
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 _AVATAR_PATH = Path(__file__).resolve().parent / "assets" / "hermes_with_iphone.png"
 _RAW_AVATAR_BASE_URL_DEFAULT = "https://inkbox.ai"
@@ -1803,14 +1806,7 @@ def _gateway_runtime_state() -> tuple[bool | None, bool]:
         return bool(snapshot.running), bool(snapshot.service_installed)
     except Exception:
         pass
-    # Fallback: the PID/lock file the gateway writes for itself. It knows
-    # nothing about installed services, so callers only get liveness here.
-    try:
-        from gateway.status import is_gateway_running
-
-        return bool(is_gateway_running()), False
-    except Exception:
-        return None, False
+    return None, False
 
 
 def _run_gateway_command(action: str) -> bool:
@@ -2023,6 +2019,19 @@ def _offer_gateway_restart() -> bool:
     return True
 
 
+def _configure_channel_display() -> None:
+    """Keep terminal reasoning out of channel replies unless explicitly enabled."""
+    from hermes_cli.config import load_config, save_config
+
+    config = load_config()
+    display = config.setdefault("display", {})
+    platforms = display.setdefault("platforms", {})
+    inkbox_display = platforms.setdefault("inkbox", {})
+    if "show_reasoning" not in inkbox_display:
+        inkbox_display["show_reasoning"] = False
+        save_config(config)
+
+
 def interactive_setup() -> None:
     print_header("Inkbox")
     print_info("API-first email + SMS + voice + identity for AI agents.")
@@ -2080,6 +2089,7 @@ def interactive_setup() -> None:
     if base_url != INKBOX_BASE_URL_DEFAULT or _env("INKBOX_BASE_URL"):
         _save("INKBOX_BASE_URL", base_url)
 
+    _configure_channel_display()
     _configure_avatar(base_url, api_key, identity, is_signup=not has_key)
 
     _save("INKBOX_ALLOW_ALL_USERS", "true")

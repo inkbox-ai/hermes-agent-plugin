@@ -17,6 +17,7 @@ try:
         mark_a2a_reply_committed,
         read_a2a_turn_context,
     )
+    from .a2a_progress import fence_a2a_progress_delivery
     from .config import (
         VoiceStack,
         inkbox_client_kwargs,
@@ -27,6 +28,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
+    from a2a_progress import fence_a2a_progress_delivery
     from config import (
         VoiceStack,
         inkbox_client_kwargs,
@@ -71,6 +73,10 @@ def _a2a_intent(intent: str, text: str, session_id: str) -> str:
     try:
         _, _, identity = _client_and_identity()
         task_id = str(context["task_id"])
+        fence_a2a_progress_delivery(
+            task_id,
+            str(context.get("message_id") or ""),
+        )
         try:
             result = identity.a2a_reply(
                 task_id,

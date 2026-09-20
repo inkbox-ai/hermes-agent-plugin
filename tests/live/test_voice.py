@@ -42,7 +42,10 @@ _CALL_ME_PHRASINGS = (
 def _call_me_text() -> str:
     """A fresh call-request body each send (rotating phrasing + unique ref)."""
     phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
-    return f"{phrasing} (ref {uuid.uuid4().hex[:6]})"
+    return (
+        f"{phrasing} This is my authorization to place the call now; "
+        f"please execute the call rather than only describe it. (ref {uuid.uuid4().hex[:6]})"
+    )
 
 
 REMOTE_KEY = os.environ.get("REMOTE_INKBOX_API_KEY")
@@ -675,6 +678,19 @@ def test_outbound_call_inkbox_voice_ai_and_completion():
             HOSTED_POST_CALL_MARKER,
             deadline=scenario_deadline,
         )
+        in_call_sms = [
+            message for message in _aut_outbound_sms()
+            if (
+                message.id not in before_postcall_sms
+                and (created_at := _message_created_at(message)) is not None
+                and created_at >= sms_watermark
+                and _sms_contains_marker(message, expected_postcall_text)
+            )
+        ]
+        assert not in_call_sms, (
+            "Hosted Voice AI sent the deferred SMS before hangup "
+            f"(matching_rows={len(in_call_sms)})"
+        )
     finally:
         _hangup_fresh_calls(remote, _driver_inbound, before_driver)
         _hangup_fresh_calls(aut, _aut_outbound, before_aut)
@@ -911,6 +927,9 @@ def test_outbound_call_realtime_direct_contact_lookup():
             "the AUT call transcript did not persist the requested contact details"
         )
 
+        assert f"call_id={aut_call.id} audio_format=pcm_s16le sample_rate=16000" in _gateway_log_text(), (
+            "realtime call did not negotiate HD 16 kHz PCM audio"
+        )
         tts, stt = _aut_speech_mode(aut, aut_call.id)
         assert tts is False and stt is False, (
             f"call must be on the realtime path (Inkbox speech off), got tts={tts} stt={stt}"
@@ -976,6 +995,9 @@ def test_outbound_call_realtime():
         )
         assert agent_said, "agent produced no speech on the outbound call"
 
+        assert f"call_id={aut_call.id} audio_format=pcm_s16le sample_rate=16000" in _gateway_log_text(), (
+            "realtime call did not negotiate HD 16 kHz PCM audio"
+        )
         tts, stt = _aut_speech_mode(aut, aut_call.id)
         assert tts is False and stt is False, (
             f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"

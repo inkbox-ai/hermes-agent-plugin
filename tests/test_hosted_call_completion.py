@@ -255,6 +255,8 @@ def test_hosted_sms_commitment_uses_exact_tool_success_contract(tmp_path):
     assert len(events) == 1
     prompt = events[0].text
     assert "SMS post-call tool contract:" in prompt
+    assert "copy it verbatim" in prompt
+    assert "acknowledgment, summary, or generic follow-up" in prompt
     assert "use inkbox_send_sms" in prompt
     assert "tool_search" in prompt
     assert "`to` set to the exact authoritative remote number `+15551112222`" in prompt
@@ -484,6 +486,29 @@ def test_hosted_sms_binding_failure_aborts_turn_without_affecting_other_sessions
     assert receipt["retryable"] is False
 
 
+def test_hosted_sms_binds_injected_store_with_wrapped_handler(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    bound_handler = instance._message_handler
+    instance._session_store = bound_handler.__self__.session_store
+
+    async def wrapped(event):
+        return bound_handler(event)
+
+    instance._message_handler = wrapped
+    payload = _payload()
+    payload["data"]["post_call_action_items"] = [{
+        "action": "Text release-ready",
+        "status": "open",
+    }]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+
+    context = activate_next_hosted_turn_context("bound-session")
+    assert context["call_id"] == "call-1"
+    assert context["sms_required"] is True
+
+
 def test_hosted_sms_context_persist_failure_blocks_send(
     tmp_path,
     monkeypatch,
@@ -526,6 +551,7 @@ def test_hosted_sms_missing_tool_enqueues_one_correction(tmp_path, monkeypatch):
     assert len(events) == 2
     correction = events[1]
     assert "only correction attempt" in correction.text
+    assert "copy it verbatim" in correction.text
     assert "Do not reply [SILENT] or skip the tool" in correction.text
     assert correction.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
     receipt = instance._read_hosted_call_registry()["call-1"]
@@ -1009,16 +1035,24 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     instance._release_platform_lock = lambda: None
     instance._cleanup = AsyncMock()
     instance._patch_identity_objects = lambda: None
-    instance._mark_connected = lambda: None
     order = []
+    instance._running = False
+
+    def _mark_connected():
+        instance._running = True
+        order.append("connected")
+
+    instance._mark_connected = _mark_connected
 
     async def _start_companion():
         order.append("companion")
 
     async def _catch_up_hosted():
+        assert (await instance._handle_health(None)).status == 503
         order.append("hosted")
 
     async def _catch_up_a2a():
+        assert (await instance._handle_health(None)).status == 503
         order.append("a2a")
 
     instance._start_companion = _start_companion
@@ -1049,7 +1083,8 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     )
 
     assert asyncio.run(instance.connect()) is True
-    assert order == ["companion", "hosted", "a2a"]
+    assert order == ["companion", "hosted", "a2a", "connected"]
+    assert asyncio.run(instance._handle_health(None)).status == 200
 
 
 def test_hosted_processing_suppresses_text_for_entire_turn(tmp_path):
@@ -1148,3 +1183,61 @@ def test_hosted_completion_enqueue_failure_allows_webhook_retry(tmp_path):
         asyncio.run(instance._on_call_ended(_payload()))
 
     assert instance._read_hosted_call_registry() == {}
+
+
+def test_concurrent_distinct_events_for_one_call_enqueue_once(tmp_path, monkeypatch):
+    instance, events = _adapter(tmp_path)
+
+    async def scenario():
+        fetching = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_fetch(fn, *args):
+            fetching.set()
+            await release.wait()
+            return fn(*args)
+
+        monkeypatch.setattr(adapter_mod.asyncio, "to_thread", delayed_fetch)
+        first = asyncio.create_task(instance._on_call_ended(_payload(event_id="first")))
+        await fetching.wait()
+        duplicate = await instance._on_call_ended(_payload(event_id="second"))
+        assert duplicate.text == "duplicate"
+        assert not events
+        release.set()
+        assert (await first).status == 200
+        assert len(events) == 1
+        assert not instance._hosted_call_admissions
+
+    asyncio.run(scenario())
+
+
+def test_failed_admission_releases_call_for_retry(tmp_path):
+    instance, events = _adapter(tmp_path)
+    enqueue = instance._enqueue
+
+    async def fail_enqueue(event):
+        raise RuntimeError("queue unavailable")
+
+    instance._enqueue = fail_enqueue
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        asyncio.run(instance._on_call_ended(_payload()))
+    assert not instance._hosted_call_admissions
+    instance._enqueue = enqueue
+    assert asyncio.run(instance._on_call_ended(_payload())).status == 200
+    assert len(events) == 1
+
+
+def test_sms_correction_preserves_exact_action_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    body = "Banana! Telescope? Library."
+    payload["data"]["post_call_action_items"] = [
+        {"action": "Email the release details", "status": "open"},
+        {"action": "Send the caller an SMS.", "details": f"Exact body: {body}", "status": "open"},
+    ]
+    asyncio.run(instance._on_call_ended(payload))
+    asyncio.run(instance.on_processing_start(events[0]))
+    asyncio.run(instance.on_processing_complete(events[0], "success"))
+    assert body in events[1].text
+    assert "Email the release details" not in events[1].text

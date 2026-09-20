@@ -1,9 +1,9 @@
 name: Live — Agent2Agent
 
-# Four real protocol legs cover both roles and conversation lengths:
-# inbound/outbound × single-turn/multi-turn. The plugin and remote identities
-# are preconfigured to allow one another in both directions. A local model
-# fixture chooses tools deterministically while the protocol remains live.
+# Five real protocol scenarios cover both roles, conversation lengths, and a
+# long-running worker turn. The plugin and remote identities are preconfigured
+# to allow one another in both directions. A local model fixture chooses tools
+# deterministically while the protocol remains live.
 on:
   workflow_call:
     inputs:
@@ -43,13 +43,13 @@ concurrency:
 
 jobs:
   a2a:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 12
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        scenario: ${{ fromJSON(inputs.scenario != '' && format('["{0}"]', inputs.scenario) || '["inbound-single","inbound-multi","outbound-single","outbound-multi"]') }}
+        scenario: ${{ fromJSON(inputs.scenario != '' && format('["{0}"]', inputs.scenario) || '["inbound-single","inbound-multi","outbound-single","outbound-multi","inbound-progress"]') }}
 
     steps:
       - uses: actions/checkout@v7
@@ -85,7 +85,7 @@ jobs:
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install \
             --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'inkbox>=0.7.3,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
 
       - name: Configure the deterministic model and AUT identity
         env:
@@ -93,19 +93,14 @@ jobs:
           HERMES_INKBOX_SIGNING_KEY: ${{ secrets.HERMES_INKBOX_SIGNING_KEY }}
         run: |
           PY="$HERMES_HOME/hermes-agent/venv/bin/python3"
-          HANDLE="$("$PY" - <<'PY'
-          import os
-          from inkbox import Inkbox
-          client = Inkbox(api_key=os.environ["HERMES_INKBOX_API_KEY"])
-          print(client.mailboxes.list()[0].email_address.split("@", 1)[0])
-          PY
-          )"
+          HANDLE="$("$PY" "$GITHUB_WORKSPACE/tests/ci/resolve_inkbox_identity.py")"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
             echo "INKBOX_IDENTITY=$HANDLE"
             echo "INKBOX_SIGNING_KEY=$HERMES_INKBOX_SIGNING_KEY"
             echo "INKBOX_ALLOW_ALL_USERS=true"
             echo "INKBOX_VOICEMAIL_DETECTION=disabled"
+            echo "INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=60"
             echo "OPENAI_API_KEY=sk-mock-not-used"
             echo "OPENAI_BASE_URL=http://127.0.0.1:8088/v1"
           } >> "$HERMES_HOME/.env"
@@ -132,7 +127,8 @@ jobs:
           hermes gateway run > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           for _ in $(seq 1 36); do
-            hermes inkbox doctor 2>/dev/null | grep -q '"ok": true' && exit 0
+            "$HERMES_HOME/hermes-agent/venv/bin/python3" \
+              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py" "$(cat "$RUNNER_TEMP/gateway.pid")" && exit 0
             if ! kill -0 "$(cat "$RUNNER_TEMP/gateway.pid")" 2>/dev/null; then
               echo "::error::gateway exited during startup"
               exit 1
@@ -145,7 +141,7 @@ jobs:
       - name: Run ${{ matrix.scenario }}
         env:
           A2A_SCENARIO: ${{ matrix.scenario }}
-          A2A_TIMEOUT_S: ${{ inputs.timeout_s || '90' }}
+          A2A_TIMEOUT_S: ${{ matrix.scenario == 'inbound-progress' && '210' || (inputs.timeout_s || '90') }}
           AUT_INKBOX_API_KEY: ${{ secrets.HERMES_INKBOX_API_KEY }}
           REMOTE_INKBOX_API_KEY: ${{ secrets.REMOTE_INKBOX_API_KEY }}
         run: |

@@ -1,11 +1,12 @@
 [project]
 name = "hermes-agent-plugin"
-version = "0.2.13"
+version = "0.2.16"
 description = "Inkbox platform plugin for Hermes Agent"
 # Inkbox requires Python 3.11 or newer.
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
+  "audioop-lts>=0.2.1; python_version >= '3.13'",
   "inkbox>=0.7.3,<1.0.0",
   "segno>=1.5",
 ]

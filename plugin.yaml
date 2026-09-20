@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.13
+version: 0.2.16
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
@@ -63,12 +63,16 @@ optional_env:
     prompt: "Enable Realtime"
     secret: false
   - name: INKBOX_CONTACT_MEMORIES_ENABLED
-    description: "Include generated contact memories as background context for inbound conversations. Defaults to true."
+    description: "Add generated contact memories to inbound turns. Defaults to true."
     prompt: "Enable contact memories"
     secret: false
   - name: INKBOX_COMPANION_MAX_BYTES
     description: "Maximum complete Companion input in UTF-8 bytes. Defaults to 128000; larger inputs fail before submission."
     prompt: "Companion context byte limit"
+    secret: false
+  - name: INKBOX_A2A_PROGRESS_INTERVAL_SECONDS
+    description: "Seconds between progress updates for active inbound A2A tasks. Defaults to 180; set to 0 to disable."
+    prompt: "A2A progress interval"
     secret: false
   - name: INKBOX_REALTIME_MODEL
     description: "Realtime voice model. Defaults to gpt-realtime-2."
@@ -124,3 +128,7 @@ provides_tools:
   - inkbox_list_a2a_messages
   - inkbox_list_a2a_sent_tasks
   - inkbox_get_a2a_sent_task
+provides_hooks:
+  - post_tool_call
+  - pre_llm_call
+  - pre_tool_call

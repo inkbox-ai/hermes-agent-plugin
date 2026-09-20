@@ -5,6 +5,7 @@ import copy
 import json
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
@@ -21,6 +22,7 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
+from gateway.run_adapters import GatewayAdapterLifecycleMixin
 from gateway.session import SessionStore, build_session_key
 from inkbox.companion import CompanionResource
 from inkbox_plugin import adapter as adapter_module
@@ -51,7 +53,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
         cancelled = asyncio.Event()
         finish_cancellation = asyncio.Event()
 
-        class Runner(GatewayAuthorizationMixin):
+        class Runner(GatewayAuthorizationMixin, GatewayAdapterLifecycleMixin):
             def __init__(self):
                 self.session_store = store
                 self.config = config
@@ -60,10 +62,13 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             def _pairing_store_for(self, source):
                 return None
 
+            def _standalone_launch_scope(self):
+                return nullcontext()
+
             def _session_key_for_source(self, source):
                 return build_session_key(source)
 
-            async def handle(self, incoming):
+            async def _handle_message(self, incoming):
                 assert self._is_user_authorized(incoming.source)
                 assert incoming.get_command() is None
                 submissions.append(incoming)
@@ -75,7 +80,10 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
                 return "[SILENT]" if scenario == "complete" else "Group reply"
 
         runner = Runner()
-        adapter.set_message_handler(runner.handle)
+        adapter.gateway_runner = runner
+        adapter.set_session_store(store)
+        adapter.set_message_handler(runner._primary_message_handler())
+        assert getattr(adapter._message_handler, "__self__", None) is None
         adapter._resolve_contact_full = AsyncMock(return_value=None)
         adapter._resolve_channel_overrides = lambda *_args: (None, None)
         adapter._identity_id = str(UUID(int=100))
@@ -249,6 +257,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             return
         await receiver.close()
         runner.session_store = SessionStore(tmp_path / "sessions", config)
+        adapter.set_session_store(runner.session_store)
         recovered = CompanionReceiver(adapter, tmp_path / "receipts")
         adapter._companion = recovered
         await recovered.start()

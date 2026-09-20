@@ -101,6 +101,10 @@ if not _real_host_available() and "gateway.config" not in sys.modules:
         def build_source(self, **kwargs):
             return types.SimpleNamespace(**kwargs)
 
+        @property
+        def is_connected(self):
+            return self._running
+
     def validate_media_delivery_path(path):
         from pathlib import Path
 

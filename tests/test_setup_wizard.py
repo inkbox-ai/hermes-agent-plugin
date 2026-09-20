@@ -13,6 +13,15 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import setup_wizard
 
 
+@pytest.mark.parametrize(("installed", "expected"), [("0.5.9", False), ("0.7.2", False), ("0.7.3", True), ("0.7.4", True)])
+@pytest.mark.parametrize("with_packaging", [True, False])
+def test_installed_sdk_meets_companion_minimum(monkeypatch, installed, expected, with_packaging):
+    monkeypatch.setattr(setup_wizard.importlib.metadata, "version", lambda _name: installed)
+    if not with_packaging:
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
+    assert setup_wizard._inkbox_version_ok() is expected
+
+
 def test_avatar_base_url_defaults_to_public_api():
     assert setup_wizard._avatar_base_url("") == "https://inkbox.ai"
     assert setup_wizard._avatar_base_url("https://proxy.example/") == "https://proxy.example"
@@ -110,6 +119,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "inkbox>=0.7.3,<1.0.0",
         "aiohttp>=3.9",
         "segno>=1.5",
+        "audioop-lts>=0.2.1; python_version >= '3.13'",
     ]]
 
 
@@ -118,10 +128,10 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
 
     assert setup_wizard._install_commands() == [
-        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.3,<1.0.0", "aiohttp>=3.9", "segno>=1.5"]],
+        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.3,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"]],
         [
             ["/tmp/hermes/venv/bin/python", "-m", "ensurepip", "--upgrade"],
-            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.3,<1.0.0", "aiohttp>=3.9", "segno>=1.5"],
+            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.3,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"],
         ],
     ]
 
@@ -187,7 +197,7 @@ def test_admin_api_key_flow_selects_existing_identity_and_mints_agent_key(monkey
 
         def create(self, **kwargs):
             self.created.append(kwargs)
-            return types.SimpleNamespace(api_key="ApiKey_agent_selected")
+            return types.SimpleNamespace(api_key="agent-key")
 
     class FakeInkbox:
         instance = None
@@ -239,7 +249,7 @@ def test_admin_api_key_flow_selects_existing_identity_and_mints_agent_key(monkey
     )
 
     assert identity.agent_handle == "selected-agent"
-    assert agent_key == "ApiKey_agent_selected"
+    assert agent_key == "agent-key"
     assert did_provision_phone is False
     assert authority_identity is identity
     assert FakeInkbox.instance.api_keys.created == [
@@ -1321,6 +1331,7 @@ def _stub_setup_dependencies(monkeypatch, *, gateway_live):
     monkeypatch.setattr(
         setup_wizard, "_self_signup_flow", lambda *_a, **_k: (identity, "ApiKey_stub", False)
     )
+    monkeypatch.setattr(setup_wizard, "_configure_channel_display", lambda: None)
     monkeypatch.setattr(setup_wizard, "_configure_avatar", lambda *_a, **_k: None)
     monkeypatch.setattr(setup_wizard, "_configure_imessage", lambda *_a, **_k: False)
     monkeypatch.setattr(setup_wizard, "_offer_dedicated_number", lambda *_a, **_k: (identity, False))
@@ -1374,3 +1385,31 @@ def test_dead_gateway_still_gets_the_next_steps_list(monkeypatch, capsys):
     assert "Next steps:" in out
     assert "hermes gateway run" in out
     assert "Your Hermes agent is set up and running" not in out
+
+
+@pytest.mark.parametrize("explicit", [None, False, True])
+def test_channel_display_default_preserves_explicit_settings(monkeypatch, explicit):
+    inkbox_display = {"streaming": False}
+    if explicit is not None:
+        inkbox_display["show_reasoning"] = explicit
+    config = {
+        "display": {
+            "show_reasoning": True,
+            "platforms": {"inkbox": inkbox_display, "other": {"show_reasoning": True}},
+        },
+        "model": {"default": "test-model"},
+    }
+    saved = []
+    host_config = types.ModuleType("hermes_cli.config")
+    host_config.load_config = lambda: config
+    host_config.save_config = saved.append
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", host_config)
+
+    setup_wizard._configure_channel_display()
+    setup_wizard._configure_channel_display()
+
+    assert inkbox_display == {"streaming": False, "show_reasoning": explicit or False}
+    assert config["display"]["show_reasoning"] is True
+    assert config["display"]["platforms"]["other"] == {"show_reasoning": True}
+    assert config["model"] == {"default": "test-model"}
+    assert len(saved) == (1 if explicit is None else 0)
