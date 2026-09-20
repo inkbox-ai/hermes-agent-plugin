@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  INKBOX_SDK_REV: 449966c885208d41f995d09c54072e012df9eb1a
+
 jobs:
   # Offline unit suite + lint. No Hermes host installed → conftest stubs gateway.*
   # and the contract tests auto-skip. Fast signal on our own code — cheap enough to
@@ -35,11 +38,19 @@ jobs:
             ~/.cache/uv
           key: ${{ runner.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
 
+      - name: Build pinned Inkbox SDK wheel
+        run: |
+          git init "$RUNNER_TEMP/inkbox-sdk"
+          git -C "$RUNNER_TEMP/inkbox-sdk" fetch --depth=1 https://github.com/inkbox-ai/inkbox "$INKBOX_SDK_REV"
+          git -C "$RUNNER_TEMP/inkbox-sdk" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/inkbox-sdk" rev-parse HEAD)" = "$INKBOX_SDK_REV"
+          uv build --wheel --out-dir "$RUNNER_TEMP/inkbox-sdk-wheel" "$RUNNER_TEMP/inkbox-sdk/sdk/python"
+
       - name: Install dependencies
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' "$RUNNER_TEMP/inkbox-sdk-wheel/inkbox-0.7.3-py3-none-any.whl" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -70,11 +81,19 @@ jobs:
         with:
           version: "latest"
 
+      - name: Build pinned Inkbox SDK wheel
+        run: |
+          git init "$RUNNER_TEMP/inkbox-sdk"
+          git -C "$RUNNER_TEMP/inkbox-sdk" fetch --depth=1 https://github.com/inkbox-ai/inkbox "$INKBOX_SDK_REV"
+          git -C "$RUNNER_TEMP/inkbox-sdk" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/inkbox-sdk" rev-parse HEAD)" = "$INKBOX_SDK_REV"
+          uv build --wheel --out-dir "$RUNNER_TEMP/inkbox-sdk-wheel" "$RUNNER_TEMP/inkbox-sdk/sdk/python"
+
       - name: Install test deps + real Hermes host (main)
         run: |
           uv venv --python 3.12
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.3,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' "$RUNNER_TEMP/inkbox-sdk-wheel/inkbox-0.7.3-py3-none-any.whl" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 

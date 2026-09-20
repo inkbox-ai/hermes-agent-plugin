@@ -572,6 +572,12 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 
 ## Development Commands
 
+Development installs and PR checks use SDK 0.7.3 from the public
+[`inkbox` source at `449966c885208d41f995d09c54072e012df9eb1a`](https://github.com/inkbox-ai/inkbox/tree/449966c885208d41f995d09c54072e012df9eb1a/sdk/python).
+The uv source override and lockfile pin that revision; CI builds its wheel before
+installing test dependencies. This validates a source build, not a registry release.
+The package requirement remains `inkbox>=0.7.3,<1.0.0`.
+
 ```bash
 python -m pytest
 python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.py
