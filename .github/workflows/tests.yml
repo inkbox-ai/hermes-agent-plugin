@@ -95,3 +95,13 @@ jobs:
           "$GITHUB_WORKSPACE/.venv/bin/python" \
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
             "$RUNNER_TEMP/plugin-scan"
+
+  windows-setup:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Install test dependencies
+        run: uv sync --extra test --frozen --python 3.12
+      - name: Check native Windows setup and readiness
+        run: uv run --frozen python -m pytest tests/test_windows_setup.py -v

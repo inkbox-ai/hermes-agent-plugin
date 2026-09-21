@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import sys
 from typing import Any
 
 SETUP_COMMAND = "hermes inkbox setup"
@@ -55,3 +57,31 @@ def inkbox_api_error_message(exc: BaseException, action: str) -> str:
             "Re-run `hermes inkbox setup` or check that INKBOX_IDENTITY belongs to the configured API key."
         )
     return f"{exc}. {SETUP_HINT}"
+
+
+WINDOWS_TUNNEL_MIN_VERSION = "0.7.4"
+
+
+def windows_tunnel_issue(public_url: str = "") -> str | None:
+    """Check the local runtime without connecting or changing the identity."""
+    if sys.platform != "win32" or public_url:
+        return None
+    try:
+        installed = importlib.metadata.version("inkbox")
+        try:
+            from packaging.version import Version
+
+            supported = Version(installed) >= Version(WINDOWS_TUNNEL_MIN_VERSION)
+        except ImportError:
+            supported = tuple(int(part) for part in installed.split(".")) >= (0, 7, 4)
+        if supported:
+            return None
+    except (importlib.metadata.PackageNotFoundError, ValueError):
+        installed = "unknown"
+    return (
+        f"Native Windows inbound delivery requires Inkbox SDK {WINDOWS_TUNNEL_MIN_VERSION} or newer "
+        f"(installed: {installed}). Older SDKs can send messages but cannot open the built-in tunnel. "
+        "Run `hermes inkbox setup` to upgrade the SDK in the Hermes Python environment, "
+        "keep your existing identity and API key, then restart `hermes gateway run`. "
+        "WSL is not required with the updated SDK."
+    )

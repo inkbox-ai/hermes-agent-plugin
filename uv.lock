@@ -541,7 +541,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.15"
+version = "0.2.16"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

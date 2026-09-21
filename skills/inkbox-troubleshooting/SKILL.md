@@ -21,6 +21,15 @@ Use this skill when an Inkbox tool fails, the user asks why Inkbox is not workin
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
 | `Vault is locked` | Export `INKBOX_VAULT_KEY=<the vault key>` in the shell launching this plugin's gateway process, or use the configured `vault.keyEnvVar`. |
 
+## Native Windows inbound delivery
+
+If outbound tools work but incoming messages never reach Hermes, run `hermes inkbox doctor`.
+The built-in tunnel requires Python Inkbox SDK 0.7.4 or newer on native Windows.
+Update the plugin and run `hermes inkbox setup` to upgrade the SDK in the Hermes
+Python environment, then restart the gateway. Keep the existing identity and API
+key; decline reconfiguration after the SDK upgrade. WSL is optional, not required
+with the updated SDK. Verify an incoming SMS and reply, not just an API call.
+
 ## Vault unlock pattern
 
 Vault tools are optional and must be allowlisted before use. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.

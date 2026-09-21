@@ -173,6 +173,23 @@ def read_runtime_config() -> InkboxPluginConfig:
     return read_config(_RUNTIME_EXTRA)
 
 
+def configured_public_url() -> str:
+    """Resolve the receiver for CLI checks before gateway config is applied."""
+    runtime_url = read_runtime_config().public_url
+    if runtime_url:
+        return runtime_url
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+        platform = config.get("platforms", {}).get("inkbox", {})
+        extra = platform.get("extra") or {}
+        value = extra.get("public_url", platform.get("public_url", platform.get("publicUrl", "")))
+        return str(value or "").strip()
+    except (ImportError, AttributeError, TypeError, OSError):
+        return ""
+
+
 def public_call_ws_url(cfg: InkboxPluginConfig, identity: Any | None = None) -> str:
     """Derive the call WebSocket URL used for outbound Inkbox calls."""
     if cfg.public_url:

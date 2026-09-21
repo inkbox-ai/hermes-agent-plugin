@@ -126,11 +126,39 @@ hermes plugins update inkbox
 hermes gateway restart
 ```
 
+### Native Windows
+
+Native Windows inbound messages require **Inkbox Python SDK 0.7.4 or newer**.
+Older SDKs can send messages and provision an identity, but cannot open the
+built-in tunnel, so incoming SMS, email, and other events never reach Hermes.
+WSL is not required with the updated SDK.
+
+For an existing installation, update the plugin and rerun setup in the same
+Hermes environment. Keep the existing identity and API key; do not create a
+replacement identity:
+
+```powershell
+hermes plugins update inkbox
+hermes inkbox setup
+hermes gateway run
+```
+
+Setup offers to upgrade the SDK using the Python interpreter running Hermes.
+If it then asks **Reconfigure Inkbox?**, answer **No** to preserve the existing
+identity and configuration.
+If a gateway is already running, restart it after upgrading. In another terminal,
+run `hermes inkbox doctor`, then send a test SMS and verify a reply in the same
+thread. Successful outbound API calls alone do not verify inbound delivery.
+
+An explicitly configured `INKBOX_PUBLIC_URL` uses your own reachable receiver
+and does not require the built-in tunnel. WSL2 remains an optional alternative;
+run both Hermes and its plugin inside WSL when choosing that option.
+
 ## Setup Wizard
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.5.9,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.5.9,<1.0.0` (at least `0.7.4` for the built-in tunnel on native Windows) and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
