@@ -110,7 +110,6 @@ class _Client:
 def _install_fakes(monkeypatch, identity: _Identity):
     clients = {}
     saved = {}
-    monkeypatch.setattr(bootstrap_module, "windows_tunnel_issue", lambda _url: None)
 
     class FakeInkbox:
         def __new__(cls, *, api_key, **_kwargs):
@@ -250,7 +249,6 @@ def test_bootstrap_rejects_agent_key_for_another_identity(monkeypatch):
 
 
 def test_bootstrap_redacts_credentials_from_errors(monkeypatch):
-    monkeypatch.setattr(bootstrap_module, "windows_tunnel_issue", lambda _url: None)
     monkeypatch.setattr(
         bootstrap_module,
         "_load_inkbox_symbols",

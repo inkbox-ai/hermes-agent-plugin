@@ -10,12 +10,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .config import INKBOX_BASE_URL_DEFAULT, VoiceStack, inkbox_client_kwargs, configured_public_url
-    from .diagnostics import windows_tunnel_issue
+    from .config import INKBOX_BASE_URL_DEFAULT, VoiceStack, inkbox_client_kwargs
     from .setup_wizard import _enum_value, _env, _load_inkbox_symbols, _save, _seed_identity_state
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from config import INKBOX_BASE_URL_DEFAULT, VoiceStack, inkbox_client_kwargs, configured_public_url
-    from diagnostics import windows_tunnel_issue
+    from config import INKBOX_BASE_URL_DEFAULT, VoiceStack, inkbox_client_kwargs
     from setup_wizard import _enum_value, _env, _load_inkbox_symbols, _save, _seed_identity_state
 
 
@@ -303,10 +301,6 @@ def bootstrap(
         return {"status": "error", "error": "identity is required"}
     if not api_key.strip():
         return {"status": "error", "error": "API key is required"}
-
-    tunnel_issue = windows_tunnel_issue(configured_public_url())
-    if tunnel_issue:
-        return {"status": "error", "error": tunnel_issue}
 
     actions: list[str] = []
     secrets = [api_key.strip()]

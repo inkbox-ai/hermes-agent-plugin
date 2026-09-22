@@ -165,10 +165,7 @@ try:
         resolve_voice_stack,
         set_runtime_config_extra,
     )
-    from .diagnostics import (
-        inkbox_api_error_message, missing_config_message, is_inkbox_auth_error,
-        is_inkbox_identity_error, windows_tunnel_issue,
-    )
+    from .diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from .webhook_providers import match_provider
     from .realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
@@ -211,10 +208,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         resolve_voice_stack,
         set_runtime_config_extra,
     )
-    from diagnostics import (
-        inkbox_api_error_message, missing_config_message, is_inkbox_auth_error,
-        is_inkbox_identity_error, windows_tunnel_issue,
-    )
+    from diagnostics import inkbox_api_error_message, missing_config_message, is_inkbox_auth_error, is_inkbox_identity_error
     from webhook_providers import match_provider
     from realtime import (
         DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
@@ -2325,11 +2319,6 @@ class InkboxAdapter(BasePlatformAdapter):
                 "Generate one with `hermes inkbox setup` or set "
                 "INKBOX_REQUIRE_SIGNATURE=false for local-only testing.",
             )
-            return False
-
-        tunnel_issue = windows_tunnel_issue(self._public_url_override)
-        if tunnel_issue:
-            logger.error("[Inkbox] %s", tunnel_issue)
             return False
 
         if not self._acquire_platform_lock(

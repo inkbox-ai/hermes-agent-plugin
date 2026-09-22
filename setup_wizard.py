@@ -27,7 +27,6 @@ try:
         inkbox_client_kwargs,
         public_call_ws_url,
         resolve_voice_stack,
-        configured_public_url,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import (
@@ -38,13 +37,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         inkbox_client_kwargs,
         public_call_ws_url,
         resolve_voice_stack,
-        configured_public_url,
     )
-
-try:
-    from .diagnostics import INKBOX_MIN_VERSION, windows_tunnel_issue
-except ImportError:  # pragma: no cover - direct local import/test fallback
-    from diagnostics import INKBOX_MIN_VERSION, windows_tunnel_issue
 
 try:
     from hermes_cli.colors import Colors, color
@@ -81,6 +74,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
+INKBOX_MIN_VERSION = "0.7.4"
 INKBOX_REQUIREMENTS = (
     f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
     "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -389,8 +383,6 @@ def _parse_version(value: str) -> tuple[int, ...]:
 
 
 def _inkbox_version_ok() -> bool:
-    if windows_tunnel_issue(configured_public_url()):
-        return False
     try:
         installed = importlib.metadata.version("inkbox")
     except Exception:
@@ -409,10 +401,7 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
         symbols = _load_inkbox_symbols()
         if _inkbox_version_ok():
             return symbols
-        first_error = (
-            windows_tunnel_issue(configured_public_url())
-            or f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
-        )
+        first_error = f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
     except Exception as exc:
         first_error = exc
 

@@ -133,6 +133,16 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     ]
 
 
+def test_setup_rechecks_version_after_install(monkeypatch):
+    monkeypatch.setattr(setup_wizard.importlib.metadata, "version", lambda _: "0.7.1")
+    monkeypatch.setattr(setup_wizard, "_load_inkbox_symbols", lambda: {"Inkbox": object()})
+    monkeypatch.setattr(setup_wizard, "_is_interactive_stdin", lambda: True)
+    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_: True)
+    monkeypatch.setattr(setup_wizard, "_run_install_plan", lambda: True)
+    monkeypatch.setattr(setup_wizard, "_purge_inkbox_modules", lambda: None)
+    assert setup_wizard._ensure_inkbox_sdk() is None
+
+
 def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     def fail_import():
         raise ImportError("No module named 'inkbox'")

@@ -14,9 +14,8 @@ try:
         inkbox_state_path,
         object_summary,
         read_runtime_config,
-        configured_public_url,
     )
-    from .diagnostics import inkbox_api_error_message, missing_config_message, windows_tunnel_issue
+    from .diagnostics import inkbox_api_error_message, missing_config_message
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from config import (
         VoiceStack,
@@ -24,9 +23,8 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         inkbox_state_path,
         object_summary,
         read_runtime_config,
-        configured_public_url,
     )
-    from diagnostics import inkbox_api_error_message, missing_config_message, windows_tunnel_issue
+    from diagnostics import inkbox_api_error_message, missing_config_message
 
 
 _DESIRED_A2A_EVENTS = frozenset({
@@ -266,14 +264,6 @@ def run_doctor() -> Dict[str, Any]:
                 "OpenAI Realtime is selected but no Realtime API key is configured. "
                 "Run `hermes inkbox setup` to validate and save one."
             ),
-        })
-
-    tunnel_issue = windows_tunnel_issue(configured_public_url())
-    if tunnel_issue:
-        findings.append({
-            "id": "inkbox/windows-tunnel-sdk-upgrade",
-            "severity": "error",
-            "message": tunnel_issue,
         })
 
     sdk_available = True
