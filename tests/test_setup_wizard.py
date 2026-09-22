@@ -107,7 +107,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "install",
         "--python",
         "/tmp/hermes/venv/bin/python",
-        f"inkbox>={setup_wizard._required_sdk_version()},<1.0.0",
+        f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0",
         "aiohttp>=3.9",
         "segno>=1.5",
         "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -118,7 +118,7 @@ def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
     requirements = [
-        f"inkbox>={setup_wizard._required_sdk_version()},<1.0.0",
+        f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0",
         "aiohttp>=3.9",
         "segno>=1.5",
         "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -148,7 +148,7 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     assert "/tmp/hermes/venv/bin/python" in out
     expected_command = "& '/bin/uv' 'pip' 'install' '--python'" if sys.platform == "win32" else "/bin/uv pip install --python"
     assert expected_command in out
-    assert f"inkbox>={setup_wizard._required_sdk_version()},<1.0.0" in out
+    assert f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0" in out
     assert "aiohttp>=3.9" in out
 
 

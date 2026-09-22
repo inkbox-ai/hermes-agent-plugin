@@ -560,7 +560,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
-    { name = "inkbox", specifier = ">=0.5.9,<1.0.0" },
+    { name = "inkbox", specifier = ">=0.7.4,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -633,7 +633,7 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.5.9"
+version = "0.7.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -643,9 +643,9 @@ dependencies = [
     { name = "h2" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fc/3f/b23559404c52f17a1be8da7e5534460abe83edaeb05a926de446f985f6c4/inkbox-0.5.9.tar.gz", hash = "sha256:b600b02ab88109c5a6dff05ddf50f74a8c6ca57154dfdd5a065eea4f6213cf8f", size = 381507, upload-time = "2026-07-31T18:23:54.751Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/71/94112f158b0e13fe6f5db5fb669729d86f5b06382abd4ab2c92a6de37929/inkbox-0.7.4.tar.gz", hash = "sha256:9ab6fd78b8dbee08c165493c8ee1412ff77697da4e07d59dcc4ecad6bd1ab6ee", size = 459486, upload-time = "2026-09-22T00:05:18.456Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/d3/43d4a41b31b6a644f130b8bd6a7904db080c4e9aab5e74281d90f96dfe7d/inkbox-0.5.9-py3-none-any.whl", hash = "sha256:a970a8ce8e4aab1687d25cf4e37261fec65171a558ad49d5b4b2b2b47f67d812", size = 261368, upload-time = "2026-07-31T18:23:53.585Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/08/8239e0205bca8682b9aee2b4c8e37d60b9608d42b9fb7e2ae600776cb8e7/inkbox-0.7.4-py3-none-any.whl", hash = "sha256:8cd020840a1eba4deebda0367f35446074fd58e354d4dbaebcddafca907a63c2", size = 301277, upload-time = "2026-09-22T00:05:17.161Z" },
 ]
 
 [[package]]

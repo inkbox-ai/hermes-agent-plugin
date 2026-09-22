@@ -59,15 +59,15 @@ def test_windows_installer_targets_host_python_and_fixed_version(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", r"C:\Users\Example User\Hermes\python.exe")
     command = setup_wizard._install_commands()[0][0]
     assert command[:4] == [sys.executable, "-m", "pip", "install"]
-    assert f"inkbox>={diagnostics.WINDOWS_TUNNEL_MIN_VERSION},<1.0.0" in command
+    assert f"inkbox>={diagnostics.INKBOX_MIN_VERSION},<1.0.0" in command
     assert setup_wizard._install_command_text().startswith("& 'C:\\Users\\Example User\\Hermes\\python.exe'")
 
 
-def test_public_receiver_does_not_require_windows_tunnel_upgrade(monkeypatch):
+def test_public_receiver_bypasses_tunnel_check_but_keeps_setup_minimum(monkeypatch):
     monkeypatch.setenv("INKBOX_PUBLIC_URL", "https://receiver.example")
     monkeypatch.setattr(setup_wizard.importlib.metadata, "version", lambda _: "0.7.1")
-    assert setup_wizard._inkbox_version_ok()
-    assert setup_wizard._required_sdk_version() == setup_wizard.INKBOX_MIN_VERSION
+    assert diagnostics.windows_tunnel_issue("https://receiver.example") is None
+    assert not setup_wizard._inkbox_version_ok()
 
 
 def test_doctor_reports_old_windows_runtime_before_api_check(monkeypatch):
@@ -121,6 +121,5 @@ def test_yaml_receiver_is_resolved_without_gateway_startup(monkeypatch, platform
     host_config.load_config = lambda: {"platforms": {"inkbox": platform_config}}
     monkeypatch.setitem(sys.modules, "hermes_cli.config", host_config)
     monkeypatch.setattr(diagnostics.importlib.metadata, "version", lambda _: "0.7.1")
-    assert setup_wizard._required_sdk_version() == setup_wizard.INKBOX_MIN_VERSION
-    assert setup_wizard._inkbox_version_ok()
+    assert not setup_wizard._inkbox_version_ok()
     assert not any(f["id"] == "inkbox/windows-tunnel-sdk-upgrade" for f in doctor.run_doctor()["findings"])

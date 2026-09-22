@@ -42,9 +42,9 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     )
 
 try:
-    from .diagnostics import WINDOWS_TUNNEL_MIN_VERSION, windows_tunnel_issue
+    from .diagnostics import INKBOX_MIN_VERSION, windows_tunnel_issue
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from diagnostics import WINDOWS_TUNNEL_MIN_VERSION, windows_tunnel_issue
+    from diagnostics import INKBOX_MIN_VERSION, windows_tunnel_issue
 
 try:
     from hermes_cli.colors import Colors, color
@@ -81,7 +81,6 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_MIN_VERSION = "0.5.9"
 INKBOX_REQUIREMENTS = (
     f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
     "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -307,23 +306,16 @@ def _detect_openai_realtime_key() -> tuple[str, str] | None:
     return None
 
 
-def _required_sdk_version() -> str:
-    if sys.platform == "win32" and not configured_public_url():
-        return WINDOWS_TUNNEL_MIN_VERSION
-    return INKBOX_MIN_VERSION
-
-
 def _install_commands() -> list[list[list[str]]]:
-    requirements = (f"inkbox>={_required_sdk_version()},<1.0.0", *INKBOX_REQUIREMENTS[1:])
     plans: list[list[list[str]]] = []
     uv = shutil.which("uv")
     if uv:
-        plans.append([[uv, "pip", "install", "--python", sys.executable, *requirements]])
-    plans.append([[sys.executable, "-m", "pip", "install", *requirements]])
+        plans.append([[uv, "pip", "install", "--python", sys.executable, *INKBOX_REQUIREMENTS]])
+    plans.append([[sys.executable, "-m", "pip", "install", *INKBOX_REQUIREMENTS]])
     plans.append(
         [
             [sys.executable, "-m", "ensurepip", "--upgrade"],
-            [sys.executable, "-m", "pip", "install", *requirements],
+            [sys.executable, "-m", "pip", "install", *INKBOX_REQUIREMENTS],
         ]
     )
     return plans
@@ -406,10 +398,10 @@ def _inkbox_version_ok() -> bool:
     try:
         from packaging.version import Version
 
-        return Version(installed) >= Version(_required_sdk_version())
+        return Version(installed) >= Version(INKBOX_MIN_VERSION)
     except Exception:
         # Fall back to a simple parsed-tuple comparison when packaging is unavailable.
-        return _parse_version(installed) >= _parse_version(_required_sdk_version())
+        return _parse_version(installed) >= _parse_version(INKBOX_MIN_VERSION)
 
 
 def _ensure_inkbox_sdk() -> dict[str, Any] | None:
@@ -419,7 +411,7 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
             return symbols
         first_error = (
             windows_tunnel_issue(configured_public_url())
-            or f"inkbox SDK is older than {_required_sdk_version()}; an upgrade is required."
+            or f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
         )
     except Exception as exc:
         first_error = exc
@@ -446,7 +438,7 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
     try:
         symbols = _load_inkbox_symbols()
         if not _inkbox_version_ok():
-            raise RuntimeError(f"Inkbox SDK {_required_sdk_version()} or newer is still required.")
+            raise RuntimeError(f"Inkbox SDK {INKBOX_MIN_VERSION} or newer is still required.")
         return symbols
     except Exception as retry_exc:
         print_error(f"Inkbox SDK still cannot be imported: {retry_exc}")
