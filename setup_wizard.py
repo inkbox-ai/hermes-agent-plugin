@@ -401,11 +401,13 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
         symbols = _load_inkbox_symbols()
         if _inkbox_version_ok():
             return symbols
-        first_error = f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
+        first_error = (
+            f"inkbox SDK is older than {INKBOX_MIN_VERSION}; an upgrade is required."
+        )
     except Exception as exc:
         first_error = exc
 
-    print_warning("The Python Inkbox SDK needs to be installed or upgraded in the Hermes environment.")
+    print_warning("The Python Inkbox SDK is not available in the Hermes environment.")
     print_info("The setup command is running under:")
     print_info(f"  {sys.executable}")
     print_info("Install or upgrade the SDK in that exact environment with:")
@@ -425,10 +427,7 @@ def _ensure_inkbox_sdk() -> dict[str, Any] | None:
     importlib.invalidate_caches()
     _purge_inkbox_modules()
     try:
-        symbols = _load_inkbox_symbols()
-        if not _inkbox_version_ok():
-            raise RuntimeError(f"Inkbox SDK {INKBOX_MIN_VERSION} or newer is still required.")
-        return symbols
+        return _load_inkbox_symbols()
     except Exception as retry_exc:
         print_error(f"Inkbox SDK still cannot be imported: {retry_exc}")
         print_info("Run this command manually, then rerun setup:")

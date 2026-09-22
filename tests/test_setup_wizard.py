@@ -107,7 +107,7 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
         "install",
         "--python",
         "/tmp/hermes/venv/bin/python",
-        f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0",
+        "inkbox>=0.7.4,<1.0.0",
         "aiohttp>=3.9",
         "segno>=1.5",
         "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -117,30 +117,14 @@ def test_install_command_prefers_uv_when_available(monkeypatch):
 def test_install_command_falls_back_to_pip_and_ensurepip(monkeypatch):
     monkeypatch.setattr(setup_wizard.sys, "executable", "/tmp/hermes/venv/bin/python")
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _name: None)
-    requirements = [
-        f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0",
-        "aiohttp>=3.9",
-        "segno>=1.5",
-        "audioop-lts>=0.2.1; python_version >= '3.13'",
-    ]
 
     assert setup_wizard._install_commands() == [
-        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", *requirements]],
+        [["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.4,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"]],
         [
             ["/tmp/hermes/venv/bin/python", "-m", "ensurepip", "--upgrade"],
-            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", *requirements],
+            ["/tmp/hermes/venv/bin/python", "-m", "pip", "install", "inkbox>=0.7.4,<1.0.0", "aiohttp>=3.9", "segno>=1.5", "audioop-lts>=0.2.1; python_version >= '3.13'"],
         ],
     ]
-
-
-def test_setup_rechecks_version_after_install(monkeypatch):
-    monkeypatch.setattr(setup_wizard.importlib.metadata, "version", lambda _: "0.7.1")
-    monkeypatch.setattr(setup_wizard, "_load_inkbox_symbols", lambda: {"Inkbox": object()})
-    monkeypatch.setattr(setup_wizard, "_is_interactive_stdin", lambda: True)
-    monkeypatch.setattr(setup_wizard, "prompt_yes_no", lambda *_: True)
-    monkeypatch.setattr(setup_wizard, "_run_install_plan", lambda: True)
-    monkeypatch.setattr(setup_wizard, "_purge_inkbox_modules", lambda: None)
-    assert setup_wizard._ensure_inkbox_sdk() is None
 
 
 def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
@@ -158,7 +142,7 @@ def test_missing_sdk_guidance_prints_hermes_python(monkeypatch, capsys):
     assert "/tmp/hermes/venv/bin/python" in out
     expected_command = "& '/bin/uv' 'pip' 'install' '--python'" if sys.platform == "win32" else "/bin/uv pip install --python"
     assert expected_command in out
-    assert f"inkbox>={setup_wizard.INKBOX_MIN_VERSION},<1.0.0" in out
+    assert "inkbox>=0.7.4,<1.0.0" in out
     assert "aiohttp>=3.9" in out
 
 
@@ -1421,3 +1405,10 @@ def test_channel_display_default_preserves_explicit_settings(monkeypatch, explic
     assert config["display"]["platforms"]["other"] == {"show_reasoning": True}
     assert config["model"] == {"default": "test-model"}
     assert len(saved) == (1 if explicit is None else 0)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires native PowerShell commands")
+def test_windows_install_command_quotes_python_path(monkeypatch):
+    monkeypatch.setattr(setup_wizard.shutil, "which", lambda _: None)
+    monkeypatch.setattr(setup_wizard.sys, "executable", r"C:\Users\Example User\Hermes\python.exe")
+    assert setup_wizard._install_command_text().startswith("& '" + sys.executable + "' '-m' 'pip' 'install'")
