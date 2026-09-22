@@ -948,7 +948,8 @@ def test_queued_hosted_completion_recovers_once_after_adapter_restart(tmp_path):
     assert asyncio.run(first._on_call_ended(_payload())).status == 200
     assert len(first_events) == 1
     receipt = first._read_hosted_call_registry()["call-1"]
-    assert first._hosted_call_registry_path.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert first._hosted_call_registry_path.stat().st_mode & 0o777 == 0o600
     assert receipt["envelope"]["data"]["call"]["id"] == "call-1"
     assert "transcript" not in receipt["envelope"]["data"]
     assert "_inkbox_hosted_sms_context" not in receipt["envelope"]

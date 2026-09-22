@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from tests.ci.restrict_hermes_tools import restrict_inkbox_platform
 
@@ -111,8 +114,8 @@ def test_live_identity_resolution_uses_the_configured_api(monkeypatch):
     assert calls == [{"api_key": "test-key", "base_url": "https://example.com"}]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="exercises the POSIX Bash installer")
 def test_installer_retries_a_hung_attempt_without_waiting_for_job_timeout(tmp_path):
-    import os
     import subprocess
 
     bin_dir = tmp_path / "bin"
