@@ -265,3 +265,51 @@ def test_real_host_pre_admission_drop_releases_quiet_context(tmp_path, monkeypat
         assert "wake" in journal.row("sms:group-1")["completed_routes"]
         assert not adapter._group_dispatch_lanes
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("command", ["/new", "/clear"])
+@pytest.mark.parametrize("outcome", ["reset", "denied", "failed", "reset_then_failed"])
+def test_real_store_reset_clears_quiet_only_after_session_rotation(tmp_path, monkeypatch, command, outcome):
+    from unittest.mock import AsyncMock
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "mention"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        journal = adapter._conversation_journal
+        journal.quiet("sms:group-1", "quiet", "Old context")
+        journal.quiet("sms:other", "other", "Other group's context")
+        journal.remember("sms:group-1", "old-turn", {"chat_id": "sms:group-1"})
+        source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id="+15555550101",
+                                      thread_id="sms:group-1")
+        store = SessionStore(tmp_path / "sessions", GatewayConfig())
+        original = store.get_or_create_session(source)
+        adapter.set_session_store(store)
+        key = adapter._conversation_session_key(source)
+
+        async def handler(incoming):
+            assert incoming.get_command() == "new"
+            if outcome in {"reset", "reset_then_failed"}:
+                assert store.reset_session(key).session_id != original.session_id
+            if outcome in {"failed", "reset_then_failed"}:
+                raise RuntimeError("Synthetic command failure")
+            # Deliberately identical text: a reply must never be reset evidence.
+            return "Started a fresh session."
+
+        adapter.set_message_handler(handler)
+        adapter.send = AsyncMock(return_value=SendResult(success=True))
+        incoming = MessageEvent(text="[inkbox:group_sms] " + command, message_type=MessageType.TEXT,
+                                source=source, message_id="command", raw_message={"event_type": "text.received", "data": {
+                                    "text_message": {"id": "command", "sender_phone_number": "+15555550101", "text": command}}})
+        await (await adapter._enqueue(incoming))
+        await asyncio.gather(*list(adapter._background_tasks))
+        assert bool(journal.row("sms:group-1")["quiet"]) == (outcome in {"denied", "failed"})
+        assert journal.row("sms:other")["quiet"][0]["text"] == "Other group's context"
+        assert "old-turn" in journal.row("sms:group-1")["routes"]
+    asyncio.run(run())

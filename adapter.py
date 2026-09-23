@@ -8998,7 +8998,23 @@ class InkboxAdapter(BasePlatformAdapter):
     def set_message_handler(self, handler: Any) -> None:
         """Wrap the host completion boundary without changing its protocol."""
         async def checkpointed(event: MessageEvent) -> Any:
-            response = await handler(event)
+            peek = None
+            if ((event.metadata or {}).get("inkbox_control") and
+                    event.text.strip().casefold() in {"/new", "/clear"}):
+                peek = getattr(self._host_session_store(), "peek_session_id", None)
+            if callable(peek):
+                key = self._conversation_session_key(event.source)
+                previous = peek(key)
+            try:
+                response = await handler(event)
+            finally:
+                # Observe the host's actual local session rotation, never a
+                # response string or a command before authorization. Inline
+                # controls do not emit the normal processing-complete hook.
+                if callable(peek):
+                    current = peek(key)
+                    if current and current != previous:
+                        self._conversation_state().reset_context(str(event.source.chat_id))
             if getattr(self, "_companion", None):
                 self._companion.capture_result(event, response)
             return response
@@ -9180,7 +9196,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if control:
             # These channel aliases keep the host's own authorization,
             # command response, and active-session bypass behavior.
-            event.text = {"/cancel": "/stop", "/health": "/status"}.get(event.text.strip().casefold(), event.text)
+            event.text = {"/clear": "/new", "/cancel": "/stop", "/health": "/status"}.get(event.text.strip().casefold(), event.text)
         if (event.metadata or {}).pop("inkbox_buffer_context", False):
             prior = self._conversation_state().consume(str(event.source.chat_id), str(event.message_id))
             if prior:

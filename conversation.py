@@ -150,3 +150,10 @@ class ConversationState:
             if item.get("turn") == message_id:
                 item.pop("turn", None)
         self._complete_route(key, message_id)
+
+    def reset_context(self, key: str) -> None:
+        """A confirmed host reset discards context, not immutable delivery routes."""
+        row = self.row(key)
+        row["quiet"] = []
+        row.pop("active_author", None)
+        self.save(key)
