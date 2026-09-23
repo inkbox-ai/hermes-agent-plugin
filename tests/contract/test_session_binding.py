@@ -313,3 +313,122 @@ def test_real_store_reset_clears_quiet_only_after_session_rotation(tmp_path, mon
         assert journal.row("sms:other")["quiet"][0]["text"] == "Other group's context"
         assert "old-turn" in journal.row("sms:group-1")["routes"]
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("behavior", ["ordinary", "capture", "unknown", "quiet", "approval", "status", "denied_source", "denied_bot"])
+def test_native_group_interruption_preserves_fifo_and_protects_nonordinary_work(tmp_path, monkeypatch, behavior):
+    import threading
+    from unittest.mock import AsyncMock, Mock
+    from run_agent import AIAgent
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from gateway.run_turn import GatewayTurnMixin
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState, reply_route
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "mention"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        adapter.send = AsyncMock(return_value=SendResult(success=True))
+        model = AIAgent.__new__(AIAgent)
+        model._interrupt_requested, model._interrupt_message = False, None
+        model._hard_interrupt_requested = threading.Event()
+        model._execution_thread_id = None
+        model._active_children, model._active_children_lock = [], threading.Lock()
+        model.quiet_mode = True
+        model.interrupt = Mock(wraps=model.interrupt)
+        started, release, cancelled, finish_cancel = (asyncio.Event() for _ in range(4))
+        seen = []
+
+        class Runner:
+            state = SimpleNamespace(turn=SimpleNamespace(event=None, agent=None))
+            _draining = False
+
+            def _peek_session_state(self, key):
+                return self.state
+
+            def _is_user_authorized_for_source(self, source):
+                return behavior != "denied_source"
+
+            def _admit_bot_message_for_source(self, source):
+                return behavior != "denied_bot"
+
+            def _promote_queued_event(self, key, transport, pending):
+                return pending
+
+            async def handle(self, incoming):
+                route = reply_route.get()
+                seen.append((incoming.message_id, route["author"], route["message_id"]))
+                if incoming.message_id != "first":
+                    return incoming.message_id
+                self.state.turn.event, self.state.turn.agent = incoming, model
+                if behavior == "unknown":
+                    self.state.turn.event = SimpleNamespace(metadata={}, raw_message={})
+                started.set()
+                try:
+                    await release.wait()
+                    return "first"
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await finish_cancel.wait()
+                    # Simulate a host/transport returning a late partial despite
+                    # cancellation. The plugin must not deliver this as a reply.
+                    return "Stale partial from first"
+                finally:
+                    self.state.turn.agent = None
+
+        runner = Runner()
+        adapter.set_message_handler(runner.handle)
+
+        def incoming(message_id, author, text):
+            source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id=author,
+                                          user_id_alt=author, thread_id="sms:group-1")
+            return MessageEvent(text="[inkbox:group_sms] " + text, message_type=MessageType.TEXT,
+                                source=source, message_id=message_id, raw_message={"event_type": "text.received", "data": {
+                                    "text_message": {"id": message_id, "sender_phone_number": author, "text": text}}})
+
+        first_event = incoming("first", "+15555550101", "@agent first")
+        if behavior == "capture":
+            adapter._prepare_conversation_event(first_event)
+            first_event.raw_message = {"synthetic": "delivery_failure"}
+        first = await adapter._enqueue(first_event)
+        await asyncio.wait_for(started.wait(), 2)
+        if behavior == "approval":
+            adapter._pending_conversation_control = lambda source: True
+        second_event = incoming("second", "+15555550101" if behavior == "approval" else "+15555550102",
+                                {"quiet": "Unaddressed context", "approval": "allow", "status": "/status"}.get(behavior, "@agent second"))
+        submitting = asyncio.create_task(adapter._enqueue(second_event))
+        if behavior == "ordinary":
+            await asyncio.wait_for(cancelled.wait(), 2)
+            assert submitting.done(), "Webhook admission must not wait for model cancellation cleanup"
+            third = await adapter._enqueue(incoming("third", "+15555550103", "@agent third"))
+            model.interrupt.assert_called_once_with()
+            assert model._interrupt_requested and model._interrupt_message is None
+            key = adapter._event_session_key(first_event)
+            assert await GatewayTurnMixin._run_agent_drain_pending(
+                runner, {"interrupted": True, "interrupt_message": model._interrupt_message}, adapter, first_event.source, key,
+            ) == (None, None)
+            finish_cancel.set()
+        else:
+            await asyncio.sleep(0.02)
+            model.interrupt.assert_not_called()
+            assert not cancelled.is_set()
+            release.set()
+            third = None
+        second = await submitting
+        await asyncio.wait_for(asyncio.gather(first, second, *([third] if third else []), return_exceptions=True), 3)
+        await asyncio.sleep(0)
+        if behavior == "ordinary":
+            assert seen == [("first", "+15555550101", "first"), ("second", "+15555550102", "second"),
+                            ("third", "+15555550103", "third")]
+            assert [call.kwargs.get("content", call.args[1] if len(call.args) > 1 else None)
+                    for call in adapter.send.call_args_list] == ["second", "third"]
+        elif behavior in {"quiet", "denied_source", "denied_bot"}:
+            assert [item[0] for item in seen] == ["first"]
+        else:
+            assert [item[0] for item in seen] == ["first", "second"]
+        assert not adapter._group_dispatch_lanes
+    asyncio.run(run())

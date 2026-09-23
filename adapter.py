@@ -5313,6 +5313,11 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        event_key = getattr(self, "_event_session_key", None)
+        if getattr(self, "_active_sessions", None) and callable(event_key):
+            guard = self._active_sessions.get(event_key(event))
+            if guard is not None:
+                guard._inkbox_event = event
         route = (event.metadata or {}).get("inkbox_reply_route")
         if route:
             reply_route.set(route)
@@ -9015,6 +9020,8 @@ class InkboxAdapter(BasePlatformAdapter):
                     current = peek(key)
                     if current and current != previous:
                         self._conversation_state().reset_context(str(event.source.chat_id))
+            if (event.metadata or {}).get("inkbox_interrupted"):
+                return None
             if getattr(self, "_companion", None):
                 self._companion.capture_result(event, response)
             return response
@@ -9174,6 +9181,56 @@ class InkboxAdapter(BasePlatformAdapter):
             await self.handle_message(event)
             await self._wait_group_session_idle(key)
 
+    async def _interrupt_normal_group_turn(self, event: MessageEvent, key: str) -> bool:
+        """New ordinary input interrupts ordinary work, never a capture/recovery turn."""
+        owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+        peek = getattr(owner, "_peek_session_state", None)
+        authorize = getattr(owner, "_is_user_authorized_for_source", None)
+        admit = getattr(owner, "_admit_bot_message_for_source", None)
+        if not all(callable(method) for method in (peek, authorize, admit)):
+            return True
+        state = peek(key)
+        turn = getattr(state, "turn", None)
+        active = getattr(turn, "event", None)
+        agent = getattr(turn, "agent", None)
+        guard = self._active_sessions.get(key)
+
+        def ordinary(item: Any) -> bool:
+            meta = getattr(item, "metadata", None) or {}
+            raw = getattr(item, "raw_message", None)
+            return (not getattr(item, "internal", False) and meta.get("inkbox_prepared") and
+                    not meta.get("inkbox_control") and isinstance(raw, dict) and
+                    raw.get("event_type") in {"text.received", "imessage.received", "message.received", "imessage.reaction_received"})
+
+        if (active is event or not ordinary(event) or not ordinary(active) or not callable(getattr(agent, "interrupt", None)) or
+                getattr(guard, "_inkbox_event", None) is not active or key not in self._session_tasks):
+            return True
+        # Use the same local admission gates as native busy handling before
+        # letting an arriving sender affect another participant's running turn.
+        if not authorize(event.source):
+            return False
+        if not getattr(event, "_bot_loop_admitted", False):
+            if not admit(event.source):
+                return False
+            event._bot_loop_admitted = True
+        try:
+            # Text passed to interrupt() can become a synthetic native follow-up.
+            # Our FIFO already owns this receipt, so request only an interrupt.
+            agent.interrupt()
+        except Exception as exc:
+            logger.error("[Inkbox] Group turn interruption failed (%s)", type(exc).__name__)
+            return True
+        active.metadata = {**(active.metadata or {}), "inkbox_interrupted": True}
+        try:
+            # Cancel delivery of the aborted turn without invoking our /stop
+            # override (which intentionally drops all queued work).
+            await super().cancel_session_processing(key, release_guard=False, discard_pending=False)
+        except Exception as exc:
+            logger.error("[Inkbox] Group turn interruption failed (%s)", type(exc).__name__)
+        finally:
+            self._release_session_guard(key, guard=guard)
+        return True
+
     async def cancel_session_processing(self, session_key: str, **kwargs: Any) -> None:
         """Native stop/reset cancels plugin-queued group turns at the same boundary."""
         lane = getattr(self, "_group_dispatch_lanes", {}).get(session_key)
@@ -9226,12 +9283,31 @@ class InkboxAdapter(BasePlatformAdapter):
                     self._group_dispatch_lanes.pop(lane_key, None)
             # No native completion hook fires for a pre-admission drop, or a
             # queued receipt cancelled before it reached handle_message.
-            failed = done.cancelled() or done.exception() is not None
+            error = None if done.cancelled() else done.exception()
+            if error is not None:
+                logger.error("[Inkbox] Inbound dispatch failed (%s)", type(error).__name__)
+            failed = done.cancelled() or error is not None
             if route and (getattr(event, "_gateway_accepted", None) is False or
                           (failed and not getattr(event, "_gateway_accepted", False))):
                 self._conversation_state().release(str(event.source.chat_id), str(event.message_id))
 
         task.add_done_callback(settled)
+        if lane is not None:
+            async def interrupt_or_reject() -> None:
+                if not await self._interrupt_normal_group_turn(event, lane_key):
+                    task.cancel()
+
+            # Native cancellation can wait for model/tool cleanup. Keep that
+            # work off the signed webhook acknowledgement path.
+            interrupt_task = asyncio.create_task(interrupt_or_reject())
+            self._background_tasks.add(interrupt_task)
+
+            def interrupt_finished(done: asyncio.Task) -> None:
+                self._background_tasks.discard(done)
+                if not done.cancelled() and (error := done.exception()) is not None:
+                    logger.error("[Inkbox] Group interruption dispatch failed (%s)", type(error).__name__)
+
+            interrupt_task.add_done_callback(interrupt_finished)
         return task
 
 

@@ -171,9 +171,11 @@ conversation scope and saved sponsor email anchor without network authorization
 lookups after model completion. Local authorization policy still applies.
 
 Ordinary SMS and iMessage groups use one session per conversation across
-participants. Eligible group turns run in order without interrupting or merging
-different participants' messages; controls and approval answers still work during
-an active turn. `/clear` uses Hermes `/new`, `/cancel` uses `/stop`, and `/health`
+participants. New eligible messages interrupt an active ordinary turn, while
+queued messages retain their individual order and reply routes. Quiet messages
+never interrupt, and capture/recovery work runs to completion. Controls and
+approval answers still work during an active turn. `/clear` uses Hermes `/new`,
+`/cancel` uses `/stop`, and `/health`
 uses `/status`. A confirmed session reset also clears buffered quiet context.
 Reactions stay in that group, and automatic email replies preserve
 To, Cc, and threading using the stored message's reply-all operation. Private
