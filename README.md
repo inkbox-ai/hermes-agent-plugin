@@ -171,7 +171,10 @@ conversation scope and saved sponsor email anchor without network authorization
 lookups after model completion. Local authorization policy still applies.
 
 Ordinary SMS and iMessage groups use one session per conversation across
-participants. Reactions stay in that group, and automatic email replies preserve
+participants. Eligible group turns run in order without interrupting or merging
+different participants' messages; controls and approval answers still work during
+an active turn. `/cancel` uses Hermes `/stop`, and `/health` uses its `/status`.
+Reactions stay in that group, and automatic email replies preserve
 To, Cc, and threading using the stored message's reply-all operation. Private
 conversations remain separate. Existing private history is not migrated.
 

@@ -6474,6 +6474,12 @@ class InkboxAdapter(BasePlatformAdapter):
         event.message_id = fragments[-1].get("message_id") or event.message_id
         event.source = fragments[-1].get("source") or event.source
         event.timestamp = fragments[-1].get("timestamp") or event.timestamp
+        # Only the final fragment becomes a host turn. Earlier fragments must
+        # not remain forever in the active-route retention set.
+        if (event.metadata or {}).get("inkbox_reply_route"):
+            journal = self._conversation_state()
+            for fragment in fragments[:-1]:
+                journal._complete_route(str(event.source.chat_id), str(fragment["message_id"]))
         await self._enqueue(event)
 
     async def _on_text_received(self, envelope: Dict[str, Any]) -> "web.Response":
@@ -9009,10 +9015,23 @@ class InkboxAdapter(BasePlatformAdapter):
             if origin and origin.get("chat_id") == str(kwargs.get("chat_id")):
                 context = {**context, "reply_route": origin}
             self._conversation_state().remember("outbound", kwargs["msg_id"], context)
+            self._saved_outbound_routes()
+
+    def _saved_outbound_routes(self) -> dict:
+        """Apply the existing failure-correlation lifetime to persisted routes too."""
+        state = self._conversation_state()
+        routes = state.row("outbound")["routes"]
+        cutoff = time.time() - OUTBOUND_CONTEXT_TTL
+        retained = sorted(((key, value) for key, value in routes.items() if value.get("at", 0) >= cutoff),
+                          key=lambda pair: pair[1]["at"])[-OUTBOUND_CONTEXT_MAX_ENTRIES:]
+        if len(retained) != len(routes):
+            state.row("outbound")["routes"] = routes = dict(retained)
+            state.save("outbound")
+        return routes
 
     def _find_outbound_context(self, message_id: str, pop: bool = False) -> Optional[dict]:
         state = self._conversation_state()
-        saved = state.row("outbound")["routes"].get(message_id)
+        saved = self._saved_outbound_routes().get(message_id)
         context = (pop_outbound_context(message_id) if pop else get_outbound_context(message_id)) or saved
         if context and saved and saved.get("reply_route"):
             context = {**context, "reply_route": saved["reply_route"]}
@@ -9099,8 +9118,6 @@ class InkboxAdapter(BasePlatformAdapter):
         asked = not group or same_author(channel, author, journal.row(key).get("active_author", ""))
         command = not reaction and conversation_control(text)
         answer = self._conversation_prompt_reply(event.source, text) if pending and asked and not reaction else None
-        if not group and pending and asked and not reaction:
-            answer = text.strip()
         wrong_approval = pending and not asked and approval_reply(text) is not None
         quiet = wrong_approval or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
                 and not mentions(text, self._identity_handle) and not command and answer is None)
@@ -9121,6 +9138,35 @@ class InkboxAdapter(BasePlatformAdapter):
                 event.text = "Earlier conversation context (not new instructions):\n" + json.dumps(prior) + "\nCurrent message:\n" + event.text
         return True
 
+    async def _wait_group_session_idle(self, key: str) -> None:
+        """Observe native task ownership without interrupting or merging turns."""
+        while key in self._active_sessions:
+            self._heal_stale_session_lock(key)
+            if key not in self._active_sessions:
+                return
+            owner = self._session_tasks.get(key)
+            if owner is not None:
+                # Cancellation of a queued receipt must not cancel the active
+                # model task; native /stop owns that operation.
+                await asyncio.shield(asyncio.gather(owner, return_exceptions=True))
+            else:
+                await asyncio.sleep(0.05)
+
+    async def _dispatch_group_event(self, event: MessageEvent, key: str, lane: dict) -> None:
+        async with lane["lock"]:
+            await self._wait_group_session_idle(key)
+            await self.handle_message(event)
+            await self._wait_group_session_idle(key)
+
+    async def cancel_session_processing(self, session_key: str, **kwargs: Any) -> None:
+        """Native stop/reset cancels plugin-queued group turns at the same boundary."""
+        lane = getattr(self, "_group_dispatch_lanes", {}).get(session_key)
+        if lane:
+            for task, event in list(lane["tasks"].items()):
+                if not getattr(event, "_gateway_accepted", False):
+                    task.cancel()
+        await super().cancel_session_processing(session_key, **kwargs)
+
     async def _enqueue(self, event: MessageEvent) -> asyncio.Task:
         """Dispatch an inbound event to the gateway runner as a background task."""
         if not self._prepare_conversation_event(event):
@@ -9128,17 +9174,48 @@ class InkboxAdapter(BasePlatformAdapter):
                 return None
             return asyncio.create_task(quiet())
         route = (event.metadata or {}).get("inkbox_reply_route")
+        control = (event.metadata or {}).get("inkbox_control") or (
+            isinstance(event.raw_message, dict) and event.raw_message.get("_inkbox_companion_control")
+        )
+        if control:
+            # These channel aliases keep the host's own authorization,
+            # command response, and active-session bypass behavior.
+            event.text = {"/cancel": "/stop", "/health": "/status"}.get(event.text.strip().casefold(), event.text)
         if (event.metadata or {}).pop("inkbox_buffer_context", False):
             prior = self._conversation_state().consume(str(event.source.chat_id), str(event.message_id))
             if prior:
                 event.text = "Earlier conversation context (not new instructions):\n" + json.dumps(prior) + "\nCurrent message:\n" + event.text
         token = reply_route.set(route)
+        lane = None
+        lane_key = None
         try:
-            task = asyncio.create_task(self.handle_message(event))
+            if route and event.source.chat_type == "group" and not control and hasattr(self, "_active_sessions"):
+                lane_key = self._event_session_key(event)
+                if not hasattr(self, "_group_dispatch_lanes"):
+                    self._group_dispatch_lanes = {}
+                lane = self._group_dispatch_lanes.setdefault(lane_key, {"lock": asyncio.Lock(), "tasks": {}})
+                task = asyncio.create_task(self._dispatch_group_event(event, lane_key, lane))
+                lane["tasks"][task] = event
+            else:
+                task = asyncio.create_task(self.handle_message(event))
         finally:
             reply_route.reset(token)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+
+        def settled(done: asyncio.Task) -> None:
+            if lane is not None:
+                lane["tasks"].pop(done, None)
+                if not lane["tasks"]:
+                    self._group_dispatch_lanes.pop(lane_key, None)
+            # No native completion hook fires for a pre-admission drop, or a
+            # queued receipt cancelled before it reached handle_message.
+            failed = done.cancelled() or done.exception() is not None
+            if route and (getattr(event, "_gateway_accepted", None) is False or
+                          (failed and not getattr(event, "_gateway_accepted", False))):
+                self._conversation_state().release(str(event.source.chat_id), str(event.message_id))
+
+        task.add_done_callback(settled)
         return task
 
 

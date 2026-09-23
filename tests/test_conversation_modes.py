@@ -363,7 +363,19 @@ def test_ordinary_private_prompt_preserves_cross_channel_sender_behavior(tmp_pat
     answer.source.chat_type = "dm"
     assert adapter._prepare_conversation_event(answer)
     assert answer.allow_gateway_control is True
-    assert answer.text == "allow"
+    assert answer.text == "/approve"
+
+
+def test_private_non_answer_keeps_framing_and_batching_while_permission_pending(tmp_path):
+    adapter = ordinary_adapter(tmp_path)
+    adapter._pending_conversation_control = lambda source: True
+    incoming = ordinary_event(1, "+15555550101", "An unrelated follow-up")
+    incoming.source.chat_type = "dm"
+    assert adapter._prepare_conversation_event(incoming)
+    assert incoming.text == "Group data: An unrelated follow-up"
+    assert incoming.metadata["inkbox_buffer_context"]
+    assert not incoming.metadata.get("inkbox_control")
+    assert not incoming.allow_gateway_control
 
 
 def test_async_host_startup_failure_retries_before_acceptance(factory):
@@ -480,7 +492,7 @@ def test_batch_and_pending_keys_use_canonical_profile_namespace(tmp_path):
     assert adapter._pending_conversation_control(source)
 
 
-def test_private_sms_batch_consumes_quiet_context_under_flushed_receipt(tmp_path):
+def test_private_sms_batch_consumes_quiet_context_under_flushed_receipt(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
     async def run():
         adapter = ordinary_adapter(tmp_path)
@@ -490,8 +502,11 @@ def test_private_sms_batch_consumes_quiet_context_under_flushed_receipt(tmp_path
         adapter._sms_text_batch_max_messages = 10
         adapter._sms_text_batch_max_chars = 10000
         adapter._sms_text_batch_key = lambda incoming: "batch"
-        adapter.handle_message = AsyncMock()
+        async def accept(incoming):
+            incoming._gateway_accepted = True
+        adapter.handle_message = AsyncMock(side_effect=accept)
         journal = adapter._conversation_journal
+        monkeypatch.setattr("inkbox_plugin.conversation.COMPLETED_ROUTE_LIMIT", 1)
         journal.quiet("sms:group-1", "old", "Retained earlier context")
         for number in (1, 2):
             incoming = ordinary_event(number, "+15555550101", f"Fragment {number}")
@@ -508,4 +523,45 @@ def test_private_sms_batch_consumes_quiet_context_under_flushed_receipt(tmp_path
         assert journal.row("sms:group-1")["quiet"][0]["turn"] == "2"
         journal.complete("sms:group-1", "2")
         assert not journal.row("sms:group-1")["quiet"]
+        assert set(journal.row("sms:group-1")["routes"]) == {"2"}
     asyncio.run(run())
+
+
+def test_pre_admission_drop_releases_quiet_context_without_completion_hook(tmp_path):
+    async def run():
+        adapter = ordinary_adapter(tmp_path)
+        journal = adapter._conversation_journal
+        journal.quiet("sms:group-1", "quiet", "A useful fact")
+        async def drop(incoming):
+            incoming._gateway_accepted = False
+        adapter.handle_message = drop
+        await (await adapter._enqueue(ordinary_event(1, "+15555550101", "@agent summarize")))
+        assert "turn" not in journal.row("sms:group-1")["quiet"][0]
+    asyncio.run(run())
+
+
+def test_outbound_routes_survive_restart_with_existing_ttl_and_capacity(tmp_path, monkeypatch):
+    from inkbox_plugin import adapter as module
+    from inkbox_plugin.conversation import reply_route
+
+    monkeypatch.setattr(module, "OUTBOUND_CONTEXT_MAX_ENTRIES", 2)
+    monkeypatch.setattr(module, "_GLOBAL_OUTBOUND_CONTEXT", {})
+    now = [10000.0]
+    monkeypatch.setattr(module.time, "time", lambda: now[0])
+    adapter = ordinary_adapter(tmp_path)
+    for number in range(3):
+        now[0] += 1
+        route = {"chat_id": "sms:original", "author": f"sender-{number}", "conversation_id": "original"}
+        token = reply_route.set(route)
+        try:
+            adapter._remember_outbound_context(msg_id=f"sent-{number}", channel="sms", chat_id="sms:original",
+                                               recipient="", body="An answer", conversation_id="original")
+        finally:
+            reply_route.reset(token)
+    module._GLOBAL_OUTBOUND_CONTEXT.clear()
+    restarted = ordinary_adapter(tmp_path)
+    assert restarted._find_outbound_context("sent-0") is None
+    assert restarted._find_outbound_context("sent-1")["reply_route"]["author"] == "sender-1"
+    now[0] += module.OUTBOUND_CONTEXT_TTL + 1
+    assert restarted._find_outbound_context("sent-2") is None
+    assert not restarted._conversation_journal.row("outbound")["routes"]

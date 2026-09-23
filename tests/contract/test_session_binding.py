@@ -166,3 +166,102 @@ def test_group_numeric_clarify_answer_is_not_rewritten_as_approval(tmp_path, mon
         assert prompt.event.is_set()
     finally:
         clarify_gateway.clear_session(session_key)
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_real_host_group_queue_preserves_turns_routes_and_inline_controls(tmp_path, monkeypatch, stop):
+    from unittest.mock import AsyncMock
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState, reply_route
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "auto"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        adapter.send = AsyncMock(return_value=SendResult(success=True))
+        adapter._busy_session_handler = AsyncMock(side_effect=AssertionError("Ordinary turns must not enter native interrupt/merge handling"))
+        started, release = asyncio.Event(), asyncio.Event()
+        seen = []
+
+        async def handler(incoming):
+            route = reply_route.get()
+            seen.append((incoming.message_id, incoming.get_command(), route["author"], route["message_id"]))
+            if incoming.message_id == "first":
+                started.set()
+                await release.wait()
+            return "Acknowledged"
+        adapter.set_message_handler(handler)
+
+        def incoming(author, message_id, text):
+            source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id=author,
+                                          user_id_alt=author, thread_id="sms:group-1", message_id=message_id)
+            return MessageEvent(text="[inkbox:group_sms] " + text, message_type=MessageType.TEXT, source=source,
+                                message_id=message_id, raw_message={"event_type": "text.received", "data": {"text_message": {
+                                    "id": message_id, "conversation_id": "group-1", "sender_phone_number": author, "text": text,
+                                }}})
+
+        first = await adapter._enqueue(incoming("+15555550101", "first", "First question"))
+        await asyncio.wait_for(started.wait(), 2)
+        second = await adapter._enqueue(incoming("+15555550102", "second", "Second question"))
+        third = await adapter._enqueue(incoming("+15555550103", "third", "Third question"))
+        await asyncio.sleep(0.02)
+        assert [item[0] for item in seen] == ["first"]
+
+        adapter._pending_conversation_control = lambda source: True
+        await (await adapter._enqueue(incoming("+15555550101", "approval", "allow")))
+        assert seen[-1] == ("approval", "approve", "+15555550101", "approval")
+        adapter._pending_conversation_control = lambda source: False
+
+        # Health is a real native inline status command, not a queued model turn.
+        await (await adapter._enqueue(incoming("+15555550102", "health", "/health")))
+        assert seen[-1] == ("health", "status", "+15555550102", "health")
+        if stop:
+            await (await adapter._enqueue(incoming("+15555550101", "stop", "/cancel")))
+            assert seen[-1] == ("stop", "stop", "+15555550101", "stop")
+        else:
+            release.set()
+        await asyncio.wait_for(asyncio.gather(first, second, third, return_exceptions=True), 3)
+        if stop:
+            assert second.cancelled() and third.cancelled()
+            assert not any(item[0] in {"second", "third"} for item in seen)
+        else:
+            assert seen[-2:] == [("second", None, "+15555550102", "second"),
+                                 ("third", None, "+15555550103", "third")]
+        adapter._busy_session_handler.assert_not_awaited()
+        await asyncio.sleep(0)  # Flush done callbacks for an already-finished owner.
+        assert not adapter._group_dispatch_lanes
+        assert not adapter._active_sessions
+    asyncio.run(run())
+
+
+def test_real_host_pre_admission_drop_releases_quiet_context(tmp_path, monkeypatch):
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "mention"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        journal = adapter._conversation_journal
+        journal.quiet("sms:group-1", "quiet", "Retained context")
+        source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id="+15555550101",
+                                      thread_id="sms:group-1")
+        incoming = MessageEvent(text="[inkbox:group_sms] @agent summarize", message_type=MessageType.TEXT,
+                                source=source, message_id="wake", raw_message={"event_type": "text.received", "data": {
+                                    "text_message": {"id": "wake", "sender_phone_number": "+15555550101", "text": "@agent summarize"}}})
+        # No registered native message handler: handle_message drops this before
+        # acceptance without ever firing on_processing_complete.
+        await (await adapter._enqueue(incoming))
+        assert incoming._gateway_accepted is False
+        assert "turn" not in journal.row("sms:group-1")["quiet"][0]
+        assert "wake" in journal.row("sms:group-1")["completed_routes"]
+        assert not adapter._group_dispatch_lanes
+    asyncio.run(run())
