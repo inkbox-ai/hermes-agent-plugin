@@ -1,6 +1,7 @@
 """Current-message wake gates, durable quiet context, and original reply routing."""
 import asyncio
 import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -111,7 +112,8 @@ def ordinary_event(number, author, text):
     return MessageEvent(text="Group data: " + text, message_type=MessageType.TEXT,
                         source=types.SimpleNamespace(chat_id="sms:group-1", chat_type="group", thread_id="sms:group-1",
                                                      user_id=author, user_id_alt=author),
-                        message_id=str(number), raw_message={"event_type": "text.received", "data": {"text_message": item}})
+                        message_id=str(number), timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=number),
+                        raw_message={"event_type": "text.received", "data": {"text_message": item}})
 
 
 def ordinary_adapter(tmp_path):

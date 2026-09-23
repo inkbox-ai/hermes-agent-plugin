@@ -9045,7 +9045,7 @@ class InkboxAdapter(BasePlatformAdapter):
                              ("tools.clarify_gateway", "get_pending_for_session"), ("tools.slash_confirm", "get_pending")):
             try:
                 import importlib
-                if getattr(importlib.import_module(module), name)(key):
+                if getattr(importlib.import_module(module), name)(key, **({"include_choice_prompts": True} if module == "tools.clarify_gateway" else {})):
                     return True
             except ImportError:
                 continue
@@ -9061,7 +9061,7 @@ class InkboxAdapter(BasePlatformAdapter):
             for module, name in (("tools.clarify_gateway", "get_pending_for_session"), ("tools.slash_confirm", "get_pending")):
                 try:
                     import importlib
-                    if getattr(importlib.import_module(module), name)(key):
+                    if getattr(importlib.import_module(module), name)(key, **({"include_choice_prompts": True} if module == "tools.clarify_gateway" else {})):
                         return text.strip()
                 except ImportError:
                     continue

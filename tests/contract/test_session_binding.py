@@ -133,3 +133,36 @@ def test_group_approval_author_gate_before_real_host_active_dispatch(tmp_path, m
         adapter._active_sessions.clear()
         adapter._session_tasks.clear()
     asyncio.run(run())
+
+
+def test_group_numeric_clarify_answer_is_not_rewritten_as_approval(tmp_path, monkeypatch):
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType
+    from tools import clarify_gateway
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+    adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "mention"}))
+    adapter._identity_handle = "sample-agent"
+    adapter._conversation_journal = ConversationState(tmp_path / "routes")
+    adapter._conversation_journal.row("sms:group-1")["active_author"] = "+15555550101"
+    session_key = "profile-a:choice-question"
+    adapter.gateway_runner = SimpleNamespace(_session_key_for_source=lambda source: session_key)
+    source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id="+15555550101",
+                                  user_id_alt="+15555550101", thread_id="sms:group-1")
+    prompt = clarify_gateway.register("choice-question", session_key, "Which one?", ["First", "Second"])
+    try:
+        assert clarify_gateway.get_pending_for_session(session_key) is None
+        assert adapter._pending_conversation_control(source)
+        incoming = MessageEvent(text="[inkbox:group_sms] 1", message_type=MessageType.TEXT, source=source,
+                                message_id="answer", raw_message={"event_type": "text.received", "data": {"text_message": {
+                                    "id": "answer", "sender_phone_number": "+15555550101", "conversation_id": "group-1", "text": "1",
+                                }}})
+        assert adapter._prepare_conversation_event(incoming)
+        assert incoming.text == "1" and incoming.allow_gateway_control
+        assert clarify_gateway.resolve_text_response_for_session(session_key, incoming.text)
+        assert prompt.event.is_set()
+    finally:
+        clarify_gateway.clear_session(session_key)
