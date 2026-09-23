@@ -9187,7 +9187,8 @@ class InkboxAdapter(BasePlatformAdapter):
         peek = getattr(owner, "_peek_session_state", None)
         authorize = getattr(owner, "_is_user_authorized_for_source", None)
         admit = getattr(owner, "_admit_bot_message_for_source", None)
-        if not all(callable(method) for method in (peek, authorize, admit)):
+        evict = getattr(owner, "_evict_cached_agent", None)
+        if not all(callable(method) for method in (peek, authorize, admit, evict)):
             return True
         state = peek(key)
         turn = getattr(state, "turn", None)
@@ -9217,6 +9218,11 @@ class InkboxAdapter(BasePlatformAdapter):
             # Text passed to interrupt() can become a synthetic native follow-up.
             # Our FIFO already owns this receipt, so request only an interrupt.
             agent.interrupt()
+            # A finished model can still own the runner slot. Never reuse its
+            # now-interrupted cache entry, or clear a still-unwinding worker's
+            # interrupt. Native eviction preserves the session/history and skips
+            # resource teardown while this exact agent still owns the turn.
+            evict(key)
         except Exception as exc:
             logger.error("[Inkbox] Group turn interruption failed (%s)", type(exc).__name__)
             return True

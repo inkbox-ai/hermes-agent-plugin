@@ -381,6 +381,7 @@ def test_native_group_interruption_preserves_fifo_and_protects_nonordinary_work(
                     self.state.turn.agent = None
 
         runner = Runner()
+        runner._evict_cached_agent = Mock()
         adapter.set_message_handler(runner.handle)
 
         def incoming(message_id, author, text):
@@ -431,4 +432,143 @@ def test_native_group_interruption_preserves_fifo_and_protects_nonordinary_work(
         else:
             assert [item[0] for item in seen] == ["first", "second"]
         assert not adapter._group_dispatch_lanes
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("lifecycle", ["finished_model", "executor_unwinding", "wedged_owner"])
+def test_native_interrupted_agent_is_not_reused_while_executor_unwinds(tmp_path, monkeypatch, lifecycle):
+    """Adapter-task completion is not evidence that the native worker thread exited."""
+    import threading
+    from unittest.mock import AsyncMock, Mock
+    from run_agent import AIAgent
+    from agent.turn_context import _bind_interrupt_scope
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from gateway.run import GatewayRunner
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState, reply_route
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "0")
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        adapter.send = AsyncMock(return_value=SendResult(success=True))
+        started, cancelled, finish_owner = (asyncio.Event() for _ in range(3))
+        finish_worker = threading.Event()
+        loop = asyncio.get_running_loop()
+        models, received = [], []
+
+        def new_model():
+            model = AIAgent.__new__(AIAgent)
+            model._interrupt_requested, model._interrupt_message = False, None
+            model._hard_interrupt_requested = threading.Event()
+            model._execution_thread_id = None
+            model._active_children, model._active_children_lock = [], threading.Lock()
+            model.quiet_mode = True
+            model.interrupt = Mock(wraps=model.interrupt)
+            model.clear_interrupt = Mock(wraps=model.clear_interrupt)
+            models.append(model)
+            return model
+
+        class Runner(GatewayRunner):
+            def _get_executor(self):
+                return None
+
+            def _is_user_authorized_for_source(self, source):
+                return True
+
+            def _admit_bot_message_for_source(self, source):
+                return True
+
+            async def handle(self, event):
+                key = adapter._event_session_key(event)
+                entry = self.session_store.get_or_create_session(event.source)
+                received.append((event.message_id, entry.session_id, reply_route.get()["author"]))
+                model = self._agent_cache.get(key)
+                if model is None:
+                    self._agent_cache[key] = model = new_model()
+                if event.message_id != "first":
+                    # Use native turn-start binding: it deliberately preserves
+                    # a pending interrupt, so a stale cached agent loses B.
+                    _bind_interrupt_scope(model, lambda: SimpleNamespace(_set_interrupt=lambda *a, **kw: None))
+                    return None if model._interrupt_requested else event.message_id
+                self._session_state(key).turn.event = event
+                self._session_state(key).turn.agent = model
+
+                def run_model():
+                    if lifecycle != "finished_model":
+                        loop.call_soon_threadsafe(started.set)
+                        assert finish_worker.wait(12)
+                    model.clear_interrupt()
+                    return "first"
+
+                ctx = SimpleNamespace(agent_holder=[model], session_key=key, run_generation=None, session_id=entry.session_id)
+                self.worker = self._run_agent_start_turn_worker(ctx, run_model)
+                try:
+                    result = await self._run_agent_await_turn_worker(self.worker, ctx, asyncio.Event(), None)
+                    started.set()
+                    await finish_owner.wait()  # Executor finished; runner slot still belongs to A.
+                    return result
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    if lifecycle == "wedged_owner":
+                        await finish_owner.wait()
+                    return "Cancelled A must never be delivered"
+                finally:
+                    self._session_state(key).turn.agent = None
+
+        runner = Runner.__new__(Runner)
+        runner.config = GatewayConfig()
+        runner.session_store = SessionStore(tmp_path / "sessions", runner.config)
+        runner._agent_cache, runner._agent_cache_lock = {}, threading.Lock()
+        runner._spawn_release_thread = Mock(side_effect=AssertionError("Eviction must not tear down the still-owned agent"))
+        adapter.set_message_handler(runner.handle)
+
+        def incoming(message_id, author):
+            source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id=author,
+                                          user_id_alt=author, thread_id="sms:group-1")
+            return MessageEvent(text="[inkbox:group_sms] " + message_id, message_type=MessageType.TEXT,
+                                source=source, message_id=message_id, raw_message={"event_type": "text.received", "data": {
+                                    "text_message": {"id": message_id, "sender_phone_number": author, "text": message_id}}})
+
+        first_event = incoming("first", "+15555550101")
+        first = await adapter._enqueue(first_event)
+        await asyncio.wait_for(started.wait(), 2)
+        original = models[0]
+        initial_clear_count = original.clear_interrupt.call_count
+        key = adapter._event_session_key(first_event)
+        owner = adapter._session_tasks[key]
+        try:
+            second = await adapter._enqueue(incoming("second", "+15555550102"))
+            await asyncio.wait_for(cancelled.wait(), 2)
+            if lifecycle == "wedged_owner":
+                for _ in range(120):
+                    if key not in adapter._active_sessions:
+                        break
+                    await asyncio.sleep(0.05)
+                assert not owner.done()
+                assert key not in runner._agent_cache
+                assert original._interrupt_requested
+                assert not runner.worker.worker_done.is_set()
+                finish_owner.set()
+            await asyncio.wait_for(asyncio.gather(first, second), 3)
+            assert owner.done()
+            original.interrupt.assert_called_once_with()
+            assert original.clear_interrupt.call_count == initial_clear_count
+            assert original._interrupt_requested, "Never clear an interrupt based only on the adapter task finishing"
+            assert runner._agent_cache[key] is not original
+            runner._spawn_release_thread.assert_not_called()
+            assert received[0][1] == received[1][1], "Evicting a model must preserve the native conversation session"
+            assert [item[2] for item in received] == ["+15555550101", "+15555550102"]
+            assert [call.kwargs.get("content", call.args[1] if len(call.args) > 1 else None)
+                    for call in adapter.send.call_args_list] == ["second"]
+            assert runner.worker.worker_done.is_set() == (lifecycle == "finished_model")
+        finally:
+            finish_owner.set()
+            finish_worker.set()
+            await asyncio.wait_for(runner.worker.executor_task, 2)
+            await asyncio.gather(*list(adapter._background_tasks), return_exceptions=True)
     asyncio.run(run())
