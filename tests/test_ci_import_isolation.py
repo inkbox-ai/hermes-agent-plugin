@@ -13,7 +13,7 @@ def test_plugin_does_not_import_removed_hermes_modules():
     plugin_sources = [*ROOT.glob("*.py"), *(ROOT / "webhook_providers").glob("*.py")]
 
     for path in plugin_sources:
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.ImportFrom) and node.module in removed_modules:
                 violations.append(f"{path.relative_to(ROOT)}:{node.lineno} imports {node.module}")
             elif isinstance(node, ast.Import):
@@ -29,7 +29,7 @@ def test_plugin_does_not_import_removed_hermes_modules():
     ["live-channels.yml", "live-voice.yml", "live-external-events.yml"],
 )
 def test_live_workflow_uses_isolated_pytest_entrypoint(workflow_name):
-    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
 
     assert 'PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"' in workflow
     assert '"$PY" -m pytest' not in workflow
@@ -45,6 +45,6 @@ def test_live_workflow_uses_isolated_pytest_entrypoint(workflow_name):
     ],
 )
 def test_agent_capable_live_workflow_disables_voicemail_detection(workflow_name):
-    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+    workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
 
     assert "INKBOX_VOICEMAIL_DETECTION=disabled" in workflow

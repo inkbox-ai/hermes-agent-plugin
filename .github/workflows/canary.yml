@@ -29,13 +29,10 @@ jobs:
           path: .upstream-hermes
           fetch-depth: 1
 
-      - name: Build pinned Inkbox SDK wheel
-        run: bash tests/ci/build_inkbox_sdk.sh
-
       - name: Install test deps + real Hermes host (main)
         run: |
           uv venv --python 3.12
-          uv pip install --no-sources -r pyproject.toml --extra test "$INKBOX_SDK_WHEEL"
+          uv pip install --no-sources -r pyproject.toml --extra test
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
       - name: Complete offline suite vs real Hermes main

@@ -54,13 +54,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v8.1.0
-        with:
-          version: "latest"
-
-      - name: Build pinned Inkbox SDK wheel
-        run: bash tests/ci/build_inkbox_sdk.sh
-
       - name: Set up runtime paths
         run: |
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
@@ -87,13 +80,12 @@ jobs:
         run: |
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
-          "$HERMES_HOME/bin/uv" pip install --python "$HERMES_HOME/hermes-agent/venv/bin/python3" "$INKBOX_SDK_WHEEL"
           hermes plugins enable inkbox
           "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
           "$HERMES_HOME/bin/uv" pip install \
             --python "$HERMES_HOME/hermes-agent/venv/bin/python3" \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' "$INKBOX_SDK_WHEEL" 'aiohttp>=3.9' 'segno>=1.5'
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.6,<1.0.0' 'aiohttp>=3.9' 'segno>=1.5'
 
       - name: Configure the deterministic model and AUT identity
         env:

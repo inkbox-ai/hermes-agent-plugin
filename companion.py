@@ -211,7 +211,7 @@ class CompanionReceiver:
         resource = getattr(self.adapter._inkbox, "companion", None)
         if any(not callable(getattr(resource, name, None)) for name in ("load_initialization", "activation_messages")):
             raise IncompatibleCompanionSDK(
-                "Incompatible Inkbox SDK: Companion mode requires inkbox>=0.7.3,<1.0.0 "
+                "Incompatible Inkbox SDK: Companion mode requires inkbox>=0.7.6,<1.0.0 "
                 "with companion.load_initialization and companion.activation_messages; upgrade the installed SDK."
             )
         return resource
