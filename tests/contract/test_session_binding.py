@@ -53,7 +53,7 @@ def test_a2a_ingestion_with_real_host_session_wiring(tmp_path, monkeypatch):
     assert len(adapter._enqueued) == len(adapter._a2a_receipts) == 1
 
 
-def test_group_sources_share_real_host_session_without_merging_private_chat(tmp_path):
+def test_group_sources_share_real_host_session_without_merging_private_chat(tmp_path, monkeypatch):
     """Both contact-backed participants use one shared conversation session."""
     from gateway.platforms.base import MessageType
     from gateway.config import PlatformConfig
@@ -61,6 +61,7 @@ def test_group_sources_share_real_host_session_without_merging_private_chat(tmp_
     from datetime import datetime, timezone
     from unittest.mock import Mock
 
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
     adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
     adapter._resolve_channel_overrides = Mock(return_value=(None, None))

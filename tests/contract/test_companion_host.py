@@ -189,12 +189,10 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             await asyncio.sleep(0.01)
         if scenario == "sponsor_denied":
             assert len(submissions) == 1 and count.call_count == 1
-            # Already-completed output retains its original signed route;
-            # local permission changes apply before the next model input.
-            method = {"mail": identity.reply_all_email, "phone": identity.send_text, "imessage": identity.send_imessage}[channel]
-            method.assert_called_once()
+            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage):
+                method.assert_not_called()
             row = next(iter(receiver.rows.values()))
-            assert row["state"] == "failed" and row["turns"][1]["state"] == "pending"
+            assert row["state"] == "paused" and row["turns"][1]["state"] == "pending"
             await receiver.close()
             return
         assert len(submissions) == 2 and count.call_count == 2

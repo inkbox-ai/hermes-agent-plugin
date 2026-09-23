@@ -659,10 +659,10 @@ def test_reply_reuses_signed_route_without_authorization_reads(factory, channel,
         else:
             instance.host.denied.add("nancy@example.com" if channel == "mail" else "+15555550103")
         result = await instance.adapter.send(incoming.source.chat_id, "Group reply", reply_to=incoming.message_id)
-        assert result.success
+        assert not result.success
         instance.resource.activation_messages.assert_not_called()
-        method = {"mail": "reply_all_email", "phone": "send_text", "imessage": "send_imessage"}[channel]
-        getattr(instance.identity, method).assert_called_once()
+        for name in ("reply_all_email", "send_email", "send_text", "send_imessage"):
+            getattr(instance.identity, name).assert_not_called()
         await instance.receiver.close()
     asyncio.run(run())
 

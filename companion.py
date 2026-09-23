@@ -27,6 +27,7 @@ FAILURE_CHANNELS = {
 }
 MODES = {"mail": "email", "phone": "sms", "imessage": "imessage"}
 DEFAULT_MAX_BYTES = 128_000
+_WINDOWS = os.name == "nt"
 
 
 class IncompatibleCompanionSDK(RuntimeError):
@@ -135,14 +136,21 @@ class CompanionReceiver:
         self._owner_file = None
 
     def _acquire(self) -> None:
-        import fcntl
-
         if self._owner_file is not None:
             return
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        handle = open(self.root / ".lock", "a")
+        handle = open(self.root / ".lock", "a+b")
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _WINDOWS:
+                import msvcrt
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             handle.close()
             raise RuntimeError("Another Companion receiver owns this identity") from None
@@ -159,11 +167,12 @@ class CompanionReceiver:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
-        directory = os.open(self.root, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if not _WINDOWS:
+            directory = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
 
     async def start(self) -> None:
         """Resume pre-submission work and pause ambiguous host outcomes."""
@@ -176,7 +185,10 @@ class CompanionReceiver:
                 if row["key"] != path.stem:
                     raise ValueError("Invalid Companion checkpoint")
                 self.rows[row["key"]] = row
-                if row["state"] == "failed":
+                unresolved = [turn for turn in row["turns"] if turn["state"] not in {"pending", "ready", "completed", "context_only"}]
+                recoverable = bool(unresolved) and all(turn.get("result_ready") and turn.get("delivery", {}).get("state")
+                                                       not in {"sending", "uncertain"} for turn in unresolved)
+                if row["state"] == "failed" or (row["state"] == "paused" and recoverable):
                     row["state"] = (
                         "initialized" if any(turn["phase"] == "initialization" and turn["state"] == "completed"
                                              for turn in row["turns"])
@@ -315,14 +327,14 @@ class CompanionReceiver:
             return False
         receipt = turn["envelope"]
         item = message(receipt)
-        if not wakes(self.adapter, row["meta"]["channel"], item) or not same_author(
-            row["meta"]["channel"], sender(receipt), active["author"],
-        ):
+        if not wakes(self.adapter, row["meta"]["channel"], item):
             return False
-        source = await self._authorized_source(row, {"author": sender(receipt), "id": turn["id"]})
         is_sponsor_command = control_text(raw_text(item), self.adapter._identity_handle).startswith("/") and same_author(
             row["meta"]["channel"], sender(receipt), row.get("sponsor", ""),
         )
+        if not is_sponsor_command and not same_author(row["meta"]["channel"], sender(receipt), active["author"]):
+            return False
+        source = await self._authorized_source(row, {"author": sender(receipt), "id": turn["id"]})
         if not is_sponsor_command and not self.adapter._pending_conversation_control(source):
             return False
         event = MessageEvent(text=control_text(raw_text(item), self.adapter._identity_handle),
@@ -539,13 +551,15 @@ class CompanionReceiver:
         source = adapter.build_source(
             chat_id=chat_id, chat_name="Companion conversation", chat_type="group",
             thread_id=f"{MODES[meta['channel']]}:{meta['conversation_id']}:{meta['scope_id']}",
-            user_id=turn["author"], user_name=turn["author"], message_id=turn["id"],
+            user_id=turn["author"], user_id_alt=turn["author"], user_name=turn["author"], message_id=turn["id"],
         )
         if row.get("sponsor"):
             sponsor = copy.copy(source)
             sponsor.user_id = row["sponsor"]
+            sponsor.user_id_alt = row["sponsor"]
             if not await self._authorize(authorize, sponsor):
                 raise PermissionError("Companion sponsor is not permitted by Hermes")
+            turn["sponsor_user_id"] = sponsor.user_id
             for entry in row["turns"][0].get("entries", []):
                 participant = copy.copy(source)
                 participant.user_id = entry["author"]
@@ -558,7 +572,37 @@ class CompanionReceiver:
                     raise PermissionError("Companion conversation is not permitted by Hermes")
         elif not await self._authorize(authorize, source):
             raise PermissionError("Companion ordinary sender is not permitted by Hermes")
+        turn["source_user_id"] = source.user_id
+        turn["source_role_authorized"] = bool(getattr(source, "role_authorized", False))
         return source
+
+    def _check_local_reply_authority(self, row: dict, turn: dict) -> None:
+        """Recheck local host policy without a contact or activation API read."""
+        check = getattr(self._host_owner(), "_is_user_authorized", None)
+        if not callable(check):
+            raise RuntimeError("Companion mode requires the Hermes authorization interface")
+        source = self.adapter.build_source(
+            chat_id=f"companion:{row['key']}", chat_type="group",
+            thread_id=f"{MODES[row['meta']['channel']]}:{row['meta']['conversation_id']}:{row['meta']['scope_id']}",
+            user_id=turn.get("source_user_id", turn["author"]), user_id_alt=turn["author"],
+        )
+        source.role_authorized = turn.get("source_role_authorized", False)
+        if not check(source):
+            raise PermissionError("Companion sender is not permitted by Hermes")
+        if row.get("sponsor"):
+            sponsor = copy.copy(source)
+            sponsor.user_id = turn.get("sponsor_user_id", row["sponsor"])
+            sponsor.user_id_alt = row["sponsor"]
+            sponsor.role_authorized = False
+            if not check(sponsor):
+                raise PermissionError("Companion sponsor is not permitted by Hermes")
+            for entry in row["turns"][0].get("entries", []):
+                participant = copy.copy(source)
+                participant.user_id = entry["author"]
+                participant.user_id_alt = entry["author"]
+                participant.role_authorized = True
+                if not check(participant):
+                    raise PermissionError("Companion participant is explicitly denied by Hermes")
 
     async def _event(self, row: dict, turn: dict) -> MessageEvent:
         adapter = self.adapter
@@ -773,6 +817,7 @@ class CompanionReceiver:
     async def dispatch_reply(self, row: dict, turn: dict, method: Any, *args: Any, **kwargs: Any) -> Any:
         """Retain the originating receipt and ownership until the SDK send finishes."""
         self._require_owner()
+        self._check_local_reply_authority(row, turn)
         if row["state"] in {"paused", "failed", "revoked"}:
             raise RuntimeError("Companion conversation is paused")
         if turn["state"] not in {"submitting", "submitted", "completed"}:
