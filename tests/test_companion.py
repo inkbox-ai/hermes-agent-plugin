@@ -394,7 +394,7 @@ def test_external_companion_json_does_not_authorize(factory, monkeypatch):
         monkeypatch.setattr(adapter_module, "match_provider", lambda headers: None)
         request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(event()).encode()), headers={}, url="https://example.com/webhook")
         response = await instance.adapter._handle_webhook(request)
-        assert response.status == 200 and not instance.receiver.rows
+        assert response.status == 401 and not instance.receiver.rows
     asyncio.run(run())
 
 
@@ -747,4 +747,28 @@ def test_failure_interception_requires_canonical_channel_and_conversation(factor
         ordinary.assert_awaited_once_with(envelope)
         assert checkpoint.read_bytes() == before
         await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_missing_or_null_companion_uses_ordinary_request_dedup(factory, monkeypatch, explicit_null):
+    from aiohttp import web
+    from inkbox_plugin import adapter as adapter_module
+
+    async def run():
+        instance = factory()
+        provider = types.SimpleNamespace(name="inkbox", verify=Mock(return_value=True))
+        monkeypatch.setattr(adapter_module, "match_provider", lambda headers: provider)
+        incoming = event()
+        incoming.pop("companion")
+        if explicit_null:
+            incoming["companion"] = None
+        instance.adapter._on_mail_received = AsyncMock(return_value=web.Response(status=200))
+        request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(incoming).encode()),
+                                        headers={"X-Inkbox-Request-Id": "ordinary-request"}, url="https://example.com/webhook")
+        assert (await instance.adapter._handle_webhook(request)).status == 200
+        duplicate = await instance.adapter._handle_webhook(request)
+        assert duplicate.status == 200 and duplicate.text == "duplicate"
+        instance.adapter._on_mail_received.assert_awaited_once()
+        assert not instance.receiver.rows
     asyncio.run(run())

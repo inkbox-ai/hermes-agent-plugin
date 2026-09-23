@@ -85,3 +85,51 @@ def test_group_sources_share_real_host_session_without_merging_private_chat(tmp_
     other = adapter.build_source(chat_id="sms:group-2", chat_type="group", user_id="+15555550101", thread_id="sms:group-2")
     assert len({sessions[0], store.get_or_create_session(private).session_id,
                 store.get_or_create_session(other).session_id}) == 3
+
+
+def test_group_approval_author_gate_before_real_host_active_dispatch(tmp_path, monkeypatch):
+    """Exercise the actual host active-session command path, not only its flag."""
+    from unittest.mock import AsyncMock
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from inkbox_plugin.adapter import InkboxAdapter
+    from inkbox_plugin.conversation import ConversationState
+
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent", "group_reply_mode": "auto"}))
+        adapter._identity_handle = "sample-agent"
+        adapter._conversation_journal = ConversationState(tmp_path / "routes")
+        adapter._conversation_journal.row("sms:group-1")["active_author"] = "+15555550101"
+        adapter._pending_conversation_control = lambda source: True
+        handler = AsyncMock(return_value="Approval recorded")
+        adapter._message_handler = handler
+        adapter.send = AsyncMock(return_value=SendResult(success=True))
+        adapter._handle_message_while_active = AsyncMock(wraps=adapter._handle_message_while_active)
+
+        def incoming(author, message_id):
+            source = adapter.build_source(chat_id="sms:group-1", chat_type="group", user_id=author,
+                                          user_id_alt=author, thread_id="sms:group-1", message_id=message_id)
+            return MessageEvent(text="[inkbox:group_sms] /approve", message_type=MessageType.TEXT, source=source,
+                                message_id=message_id, raw_message={"event_type": "text.received", "data": {"text_message": {
+                                    "id": message_id, "conversation_id": "group-1", "sender_phone_number": author,
+                                    "text": "/approve",
+                                }}})
+        bystander = incoming("+15555550102", "bystander")
+        key = adapter._event_session_key(bystander)
+        adapter._active_sessions[key] = asyncio.Event()
+        adapter._session_tasks[key] = asyncio.current_task()
+        await (await adapter._enqueue(bystander))
+        adapter._handle_message_while_active.assert_not_awaited()
+        handler.assert_not_awaited()
+
+        asked = incoming("+15555550101", "asked")
+        await (await adapter._enqueue(asked))
+        adapter._handle_message_while_active.assert_awaited_once()
+        handler.assert_awaited_once()
+        assert handler.call_args.args[0].get_command() == "approve"
+        adapter.send.assert_awaited_once()
+        adapter._active_sessions.clear()
+        adapter._session_tasks.clear()
+    asyncio.run(run())

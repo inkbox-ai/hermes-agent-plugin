@@ -566,7 +566,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.4 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.6 or
 newer.
 
 Realtime-only call tools:

@@ -10,6 +10,8 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
+COMPLETED_ROUTE_LIMIT = 512
+
 reply_route: ContextVar[dict | None] = ContextVar("inkbox_reply_route", default=None)
 
 
@@ -49,6 +51,27 @@ def control_text(text: str, handle: str) -> str:
     return text.strip()
 
 
+def conversation_control(text: str) -> bool:
+    """Only whole conversation controls bypass addressing, never approvals."""
+    return text.strip().casefold() in {"/clear", "/new", "/stop", "/cancel", "/resume", "/status", "/usage", "/health"}
+
+
+def approval_reply(text: str) -> str | None:
+    """Translate recognized permission answers to the host's native commands."""
+    word = text.strip().casefold().rstrip(".!")
+    if word.split(maxsplit=1)[:1] in [["/approve"], ["/deny"]]:
+        return text.strip()
+    if word in {"y", "yes", "ok", "okay", "sure", "approve", "allow", "go", "1", "confirm", "👍"}:
+        return "/approve"
+    if word in {"always", "allow always", "yes always", "approve always", "always approve", "2"}:
+        return "/approve always"
+    if word in {"session", "approve session", "session approve"}:
+        return "/approve session"
+    if word in {"n", "no", "deny", "stop", "block", "don't", "dont", "3", "reject", "cancel", "👎"}:
+        return "/deny"
+    return None
+
+
 def wakes(adapter: Any, channel: str, item: dict) -> bool:
     """Admission and addressing describe the current message, never history."""
     if mode(adapter, "companion_response_mode") == "safe" and item.get("sender_access") != "direct":
@@ -73,6 +96,10 @@ class ConversationState:
         if key not in self.rows:
             path = self.root / (hashlib.sha256(key.encode()).hexdigest() + ".json")
             self.rows[key] = json.loads(path.read_text()) if path.exists() else {"quiet": [], "routes": {}}
+            # Reservations are process-local ownership, not evidence that the host
+            # accepted the context. A restart must not strand an unsent batch.
+            for item in self.rows[key]["quiet"]:
+                item.pop("turn", None)
         return self.rows[key]
 
     def save(self, key: str) -> None:
@@ -106,6 +133,15 @@ class ConversationState:
     def complete(self, key: str, message_id: str) -> None:
         row = self.row(key)
         row["quiet"] = [item for item in row["quiet"] if item.get("turn") != message_id]
+        self._complete_route(key, message_id)
+
+    def _complete_route(self, key: str, message_id: str) -> None:
+        row = self.row(key)
+        completed = row.setdefault("completed_routes", [])
+        if message_id in row["routes"] and message_id not in completed:
+            completed.append(message_id)
+        while len(completed) > COMPLETED_ROUTE_LIMIT:
+            row["routes"].pop(completed.pop(0), None)
         self.save(key)
 
     def release(self, key: str, message_id: str) -> None:
@@ -113,4 +149,4 @@ class ConversationState:
         for item in self.row(key)["quiet"]:
             if item.get("turn") == message_id:
                 item.pop("turn", None)
-        self.save(key)
+        self._complete_route(key, message_id)

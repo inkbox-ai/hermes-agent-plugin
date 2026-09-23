@@ -15,9 +15,9 @@ from uuid import UUID
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 
 try:
-    from .conversation import wakes, same_author, raw_text, control_text, mode
+    from .conversation import wakes, same_author, raw_text, control_text, mode, conversation_control
 except ImportError:
-    from conversation import wakes, same_author, raw_text, control_text, mode
+    from conversation import wakes, same_author, raw_text, control_text, mode, conversation_control
 
 logger = logging.getLogger(__name__)
 CHANNELS = {"message.received": "mail", "text.received": "phone", "imessage.received": "imessage"}
@@ -323,21 +323,23 @@ class CompanionReceiver:
         """Only the currently prompted sender can resolve an active host prompt."""
         active = self.active.get(f"companion:{row['key']}")
         turn = next((item for item in row["turns"] if item["source_id"] == source_id), None)
-        if not active or not turn or turn["state"] != "pending" or turn["phase"] != "live":
+        if not active or not turn or turn["state"] != "pending" or turn["phase"] not in {"live", "ordinary"}:
             return False
         receipt = turn["envelope"]
         item = message(receipt)
         if not wakes(self.adapter, row["meta"]["channel"], item):
             return False
-        is_sponsor_command = control_text(raw_text(item), self.adapter._identity_handle).startswith("/") and same_author(
+        current_text = control_text(raw_text(item), self.adapter._identity_handle)
+        is_sponsor_command = conversation_control(current_text) and same_author(
             row["meta"]["channel"], sender(receipt), row.get("sponsor", ""),
         )
         if not is_sponsor_command and not same_author(row["meta"]["channel"], sender(receipt), active["author"]):
             return False
         source = await self._authorized_source(row, {"author": sender(receipt), "id": turn["id"]})
-        if not is_sponsor_command and not self.adapter._pending_conversation_control(source):
+        answer = self.adapter._conversation_prompt_reply(source, current_text)
+        if not is_sponsor_command and (not self.adapter._pending_conversation_control(source) or answer is None):
             return False
-        event = MessageEvent(text=control_text(raw_text(item), self.adapter._identity_handle),
+        event = MessageEvent(text=current_text if is_sponsor_command else answer,
                              message_type=MessageType.TEXT, source=source, message_id=active["id"],
                              raw_message={"_inkbox_companion_turn": active["id"], "_inkbox_companion_key": row["key"],
                                           "_inkbox_companion_control": True})
@@ -361,7 +363,7 @@ class CompanionReceiver:
         def finished(_task: asyncio.Task) -> None:
             self.tasks.pop(key, None)
             if not _task.cancelled() and (
-                row["state"] in {"pending", "ready"} or any(turn["state"] == "pending" for turn in row["turns"])
+                row.get("retry_pending") or row["state"] in {"pending", "ready"} or any(turn["state"] == "pending" for turn in row["turns"])
             ):
                 self._kick(row)
 
@@ -395,6 +397,7 @@ class CompanionReceiver:
         return value
 
     async def _drain(self, row: dict) -> None:
+        row.pop("retry_pending", None)
         try:
             if row["state"] in {"pending", "ready"} and not any(turn["phase"] == "initialization" for turn in row["turns"]):
                 snapshot = await self._snapshot(row)
@@ -455,15 +458,32 @@ class CompanionReceiver:
                     raise
                 self.dispatches.add(task)
                 task.add_done_callback(self.dispatches.discard)
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), self.completion_timeout)
+                except Exception:
+                    if turn["state"] == "submitting" and not getattr(event, "_gateway_accepted", False):
+                        turn["state"] = "ready"
+                        self.active.pop(event.source.chat_id, None)
+                        self.completions.pop(turn["id"], None)
+                    raise
+                if turn["state"] == "submitting" and not getattr(event, "_gateway_accepted", False):
+                    turn["state"] = "ready"
+                    raise RuntimeError("Hermes did not accept the Companion input")
                 await asyncio.wait_for(asyncio.shield(future), self.completion_timeout)
                 if turn["state"] != "completed":
                     raise RuntimeError("Companion host processing did not complete successfully")
                 self.active.pop(event.source.chat_id, None)
                 self.completions.pop(turn["id"], None)
+                row.pop("retry_attempt", None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            uncertain = any(turn["state"] in {"submitting", "submitted", "uncertain"} for turn in row["turns"])
+            uncertain = any(
+                turn.get("delivery", {}).get("state") in {"sending", "uncertain"}
+                or (turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
+                    and not turn.get("result_ready"))
+                for turn in row["turns"]
+            )
             status = getattr(exc, "status_code", None)
             transient = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (
                 isinstance(status, int) and status >= 500
@@ -474,10 +494,13 @@ class CompanionReceiver:
             except ImportError:
                 pass
             if transient and not uncertain:
+                row["retry_pending"] = True
+                row["retry_attempt"] = min(int(row.get("retry_attempt", 0)) + 1, 10)
                 self._save(row)
-                await asyncio.sleep(self.retry_delay)
+                await asyncio.sleep(min(60, self.retry_delay * 2 ** (row["retry_attempt"] - 1)))
                 return
-            row["state"] = "paused" if uncertain else "failed"
+            has_saved_result = any(turn.get("result_ready") and turn["state"] != "completed" for turn in row["turns"])
+            row["state"] = "paused" if uncertain or has_saved_result else "failed"
             if status in {401, 403, 404, 409, 410}:
                 for turn in row["turns"]:
                     if turn["state"] in {"pending", "ready"}:
@@ -642,7 +665,7 @@ class CompanionReceiver:
         row["host_session_key"] = str(session.session_key)
         current_control = control_text(turn.get("raw_text", ""), adapter._identity_handle)
         is_control = turn["phase"] != "initialization" and same_author(meta["channel"], turn["author"], row.get("sponsor", ""))
-        if is_control and current_control.startswith("/"):
+        if is_control and conversation_control(current_control):
             text = current_control
         result = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=source, message_id=turn["id"],
@@ -652,7 +675,7 @@ class CompanionReceiver:
                                     "notices": copy.deepcopy(turn.get("notices", []))}},
             raw_message={"_inkbox_companion_turn": turn["id"], "_inkbox_companion_key": row["key"]},
         )
-        result.allow_gateway_control = is_control
+        result.allow_gateway_control = is_control and conversation_control(current_control)
         return result
 
     async def _authorize(self, check: Any, source: Any) -> bool:

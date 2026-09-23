@@ -149,7 +149,7 @@ def test_ordinary_controls_and_only_asked_sender_bypass_mentions(tmp_path):
     assert not adapter._prepare_conversation_event(other)
     asked = ordinary_event(2, "+15555550101", "allow")
     assert adapter._prepare_conversation_event(asked)
-    assert asked.text == "allow"
+    assert asked.text == "/approve"
     adapter._pending_conversation_control = lambda source: False
     stop = ordinary_event(3, "+15555550102", "/stop")
     assert adapter._prepare_conversation_event(stop)
@@ -205,12 +205,13 @@ def test_saved_model_result_is_sent_after_restart_without_rerunning(factory):
     ("other@example.com", "direct", "@agent allow", False),
     ("owner@example.com", None, "@agent /stop", False),
 ])
-def test_companion_approval_requires_current_gates_and_prompted_author(factory, author, access, text, accepted):
+@pytest.mark.parametrize("phase", ["live", "ordinary"])
+def test_companion_approval_requires_current_gates_and_prompted_author(factory, author, access, text, accepted, phase):
     async def run():
         instance = factory()
         instance.adapter.config.extra["group_reply_mode"] = "mention"
         instance.gate.clear()
-        start = event()
+        start = event(phase="ordinary" if phase == "ordinary" else "initialization")
         message(start)["body_text"] = "@agent start"
         await instance.receiver.accept(start)
         await harness.wait_inputs(instance, 1)
@@ -220,12 +221,12 @@ def test_companion_approval_requires_current_gates_and_prompted_author(factory, 
             received.append(incoming)
             return asyncio.create_task(asyncio.sleep(0))
         instance.adapter._enqueue = enqueue
-        answer = event(phase="live", number=4)
+        answer = event(phase=phase, number=4)
         message(answer).update(from_address=author, sender_access=access, body_text=text)
         await instance.receiver.accept(answer)
         assert len(received) == int(accepted)
         if accepted:
-            assert received[0].text == "allow"
+            assert received[0].text == "/approve"
             assert received[0].allow_gateway_control is True
             assert received[0].message_id == instance.inputs[0].message_id
         await instance.receiver.close()
@@ -300,4 +301,209 @@ def test_saved_result_is_not_confused_with_prior_control_ack(factory):
         assert not second.inputs
         second.identity.reply_all_email.assert_called_once_with(uid(3), body_text="The actual answer")
         await second.receiver.close()
+    asyncio.run(run())
+
+
+def test_mentioned_bystander_queues_without_answering_another_senders_prompt(tmp_path):
+    adapter = ordinary_adapter(tmp_path)
+    adapter._pending_conversation_control = lambda source: True
+    adapter._conversation_journal.row("sms:group-1")["active_author"] = "+15555550101"
+    other = ordinary_event(1, "+15555550102", "@agent a separate request")
+    assert adapter._prepare_conversation_event(other)
+    assert other.allow_gateway_control is False
+    assert adapter.busy_followup_policy(other) == {"mode": "queue", "merge_text": False}
+    command = ordinary_event(2, "+15555550102", "/stop")
+    assert adapter._prepare_conversation_event(command)
+    assert command.allow_gateway_control is True
+    assert command.text == "/stop"
+
+
+def test_reserved_quiet_context_survives_restart_before_host_submission(tmp_path):
+    first = ordinary_adapter(tmp_path)
+    assert not first._prepare_conversation_event(ordinary_event(1, "+15555550101", "A retained fact"))
+    assert first._prepare_conversation_event(ordinary_event(2, "+15555550102", "@agent explain"))
+    restarted = ordinary_adapter(tmp_path)
+    next_request = ordinary_event(3, "+15555550102", "@agent try now")
+    assert restarted._prepare_conversation_event(next_request)
+    assert "A retained fact" in next_request.text
+
+
+def test_saved_live_result_retries_identity_startup_without_rerunning_model(factory):
+    async def run():
+        first = factory()
+        await first.receiver.accept(event())
+        await idle(first)
+        await first.receiver.accept(event(phase="live", number=4))
+        await idle(first)
+        row = next(iter(first.receiver.rows.values()))
+        turn = row["turns"][1]
+        turn.update(state="submitted", result_ready=True, result="Saved live answer")
+        first.receiver._save(row)
+        await first.receiver.close()
+        second = factory(root=first.receiver.root)
+        second.receiver.retry_delay = 0.01
+        second.adapter._inkbox.get_identity.side_effect = [ConnectionError("Startup transport unavailable"), second.identity]
+        await second.receiver.start()
+        await idle(second)
+        assert not second.inputs
+        assert second.adapter._inkbox.get_identity.call_count == 2
+        second.identity.reply_all_email.assert_called_once_with(uid(3), body_text="Saved live answer")
+        assert next(iter(second.receiver.rows.values()))["turns"][1]["state"] == "completed"
+        await second.receiver.close()
+    asyncio.run(run())
+
+
+def test_ordinary_private_prompt_preserves_cross_channel_sender_behavior(tmp_path):
+    adapter = ordinary_adapter(tmp_path)
+    adapter._pending_conversation_control = lambda source: True
+    adapter._conversation_journal.row("sms:group-1")["active_author"] = "sender@example.com"
+    answer = ordinary_event(1, "+15555550101", "allow")
+    answer.source.chat_type = "dm"
+    assert adapter._prepare_conversation_event(answer)
+    assert answer.allow_gateway_control is True
+    assert answer.text == "allow"
+
+
+def test_async_host_startup_failure_retries_before_acceptance(factory):
+    async def run():
+        instance = factory()
+        instance.receiver.retry_delay = 0.01
+        original = instance.adapter.handle_message
+        calls = []
+        async def handle(incoming):
+            calls.append(incoming.source.chat_id)
+            if len(calls) == 1:
+                incoming._gateway_accepted = False
+                raise ConnectionError("Host startup failed before acceptance")
+            await original(incoming)
+        instance.adapter.handle_message = handle
+        await instance.receiver.accept(event())
+        await idle(instance)
+        assert len(instance.inputs) == 1
+        assert len(calls) == 2 and calls[0] == calls[1]
+        await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply_mode", ["auto", "mention"])
+@pytest.mark.parametrize("text", ["/approve", "/approve always", "/deny", "allow"])
+def test_unrelated_permission_answers_never_reach_host_dispatch(tmp_path, reply_mode, text):
+    from unittest.mock import AsyncMock
+    async def run():
+        adapter = ordinary_adapter(tmp_path)
+        adapter.config.extra["group_reply_mode"] = reply_mode
+        adapter._pending_conversation_control = lambda source: True
+        adapter._conversation_journal.row("sms:group-1")["active_author"] = "+15555550101"
+        adapter.handle_message = AsyncMock()
+        attempt = ordinary_event(1, "+15555550102", text)
+        await (await adapter._enqueue(attempt))
+        adapter.handle_message.assert_not_awaited()
+        assert adapter._conversation_journal.row("sms:group-1")["quiet"][0]["id"] == "1"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply_mode", ["auto", "mention"])
+def test_asked_senders_non_answer_keeps_normal_gate_and_framing(tmp_path, reply_mode):
+    adapter = ordinary_adapter(tmp_path)
+    adapter.config.extra["group_reply_mode"] = reply_mode
+    adapter._pending_conversation_control = lambda source: True
+    adapter._conversation_journal.row("sms:group-1")["active_author"] = "+15555550101"
+    unrelated = ordinary_event(1, "+15555550101", "Dinner at eight")
+    assert adapter._prepare_conversation_event(unrelated) is (reply_mode == "auto")
+    if reply_mode == "auto":
+        assert unrelated.text == "Group data: Dinner at eight"
+        assert unrelated.allow_gateway_control is False
+    mentioned = ordinary_event(2, "+15555550101", "@agent another request")
+    assert adapter._prepare_conversation_event(mentioned)
+    assert "Group data: @agent another request" in mentioned.text
+    assert mentioned.allow_gateway_control is False
+
+
+def test_sponsor_cannot_approve_other_waking_sender_but_can_stop(factory):
+    async def run():
+        instance = factory()
+        instance.adapter.config.extra.update(group_reply_mode="mention", companion_response_mode="relaxed")
+        initial = event()
+        message(initial)["body_text"] = "@agent hello"
+        await instance.receiver.accept(initial)
+        await idle(instance)
+        instance.gate.clear()
+        wake = event(phase="live", number=4)
+        message(wake).update(body_text="@agent start", sender_access="sponsored")
+        await instance.receiver.accept(wake)
+        await harness.wait_inputs(instance, 2)
+        instance.adapter._pending_conversation_control = lambda source: True
+        received = []
+        async def enqueue(incoming):
+            received.append(incoming)
+            return asyncio.create_task(asyncio.sleep(0))
+        instance.adapter._enqueue = enqueue
+        sponsor = event(phase="live", number=5)
+        message(sponsor).update(from_address="owner@example.com", body_text="@agent /approve")
+        await instance.receiver.accept(sponsor)
+        assert not received
+        answer = event(phase="live", number=6)
+        message(answer).update(from_address="FRED@EXAMPLE.COM", body_text="@agent /approve", sender_access="sponsored")
+        await instance.receiver.accept(answer)
+        assert [item.text for item in received] == ["/approve"]
+        stop = event(phase="live", number=7)
+        message(stop).update(from_address="owner@example.com", body_text="@agent /stop")
+        await instance.receiver.accept(stop)
+        assert [item.text for item in received] == ["/approve", "/stop"]
+        await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_completed_route_retention_never_prunes_active_or_queued_routes(tmp_path, monkeypatch):
+    from inkbox_plugin import conversation
+    monkeypatch.setattr(conversation, "COMPLETED_ROUTE_LIMIT", 2)
+    state = ConversationState(tmp_path)
+    for message_id in ("active", "queued", "one", "two", "three"):
+        state.remember("group", message_id, {"message_id": message_id})
+    for message_id in ("one", "two", "three"):
+        state.complete("group", message_id)
+    assert set(state.row("group")["routes"]) == {"active", "queued", "two", "three"}
+
+
+def test_batch_and_pending_keys_use_canonical_profile_namespace(tmp_path):
+    from unittest.mock import Mock
+    adapter = ordinary_adapter(tmp_path)
+    source = ordinary_event(1, "+15555550101", "Hello").source
+    adapter.gateway_runner = types.SimpleNamespace(
+        _session_key_for_source=Mock(return_value="profile-a:canonical-key"),
+        _pending_approvals={"profile-a:canonical-key": {"requested": True}},
+    )
+    del adapter._pending_conversation_control
+    assert adapter._sms_text_batch_key(types.SimpleNamespace(source=source)) == "profile-a:canonical-key"
+    assert adapter._pending_conversation_control(source)
+
+
+def test_private_sms_batch_consumes_quiet_context_under_flushed_receipt(tmp_path):
+    from unittest.mock import AsyncMock
+    async def run():
+        adapter = ordinary_adapter(tmp_path)
+        adapter._pending_sms_text_batches = {}
+        adapter._pending_sms_text_batch_tasks = {}
+        adapter._sms_text_batch_delay_seconds = 100
+        adapter._sms_text_batch_max_messages = 10
+        adapter._sms_text_batch_max_chars = 10000
+        adapter._sms_text_batch_key = lambda incoming: "batch"
+        adapter.handle_message = AsyncMock()
+        journal = adapter._conversation_journal
+        journal.quiet("sms:group-1", "old", "Retained earlier context")
+        for number in (1, 2):
+            incoming = ordinary_event(number, "+15555550101", f"Fragment {number}")
+            incoming.source.chat_type = "dm"
+            assert adapter._prepare_conversation_event(incoming)
+            assert "Retained earlier context" not in incoming.text
+            await adapter._enqueue_sms_text_event(incoming)
+        await adapter._flush_sms_text_batch_now("batch")
+        await asyncio.gather(*list(adapter._background_tasks))
+        delivered = adapter.handle_message.call_args.args[0]
+        assert delivered.message_id == "2"
+        assert delivered.text.count("Retained earlier context") == 1
+        assert "Fragment 1" in delivered.text and "Fragment 2" in delivered.text
+        assert journal.row("sms:group-1")["quiet"][0]["turn"] == "2"
+        journal.complete("sms:group-1", "2")
+        assert not journal.row("sms:group-1")["quiet"]
     asyncio.run(run())
