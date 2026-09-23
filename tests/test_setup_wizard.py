@@ -13,7 +13,7 @@ sys.modules.setdefault("inkbox_plugin", pkg)
 from inkbox_plugin import setup_wizard
 
 
-@pytest.mark.parametrize(("installed", "expected"), [("0.5.9", False), ("0.7.2", False), ("0.7.3", True), ("0.7.4", True)])
+@pytest.mark.parametrize(("installed", "expected"), [("0.5.9", False), ("0.7.2", False), ("0.7.3", False), ("0.7.4", False), ("0.7.6", True), ("0.7.7", True)])
 @pytest.mark.parametrize("with_packaging", [True, False])
 def test_installed_sdk_meets_companion_minimum(monkeypatch, installed, expected, with_packaging):
     monkeypatch.setattr(setup_wizard.importlib.metadata, "version", lambda _name: installed)
@@ -1333,6 +1333,7 @@ def _stub_setup_dependencies(monkeypatch, *, gateway_live):
         setup_wizard, "_self_signup_flow", lambda *_a, **_k: (identity, "ApiKey_stub", False)
     )
     monkeypatch.setattr(setup_wizard, "_configure_channel_display", lambda: None)
+    monkeypatch.setattr(setup_wizard, "_configure_response_modes", lambda: None)
     monkeypatch.setattr(setup_wizard, "_configure_avatar", lambda *_a, **_k: None)
     monkeypatch.setattr(setup_wizard, "_configure_imessage", lambda *_a, **_k: False)
     monkeypatch.setattr(setup_wizard, "_offer_dedicated_number", lambda *_a, **_k: (identity, False))
@@ -1421,3 +1422,18 @@ def test_windows_install_command_quotes_python_path(monkeypatch):
     monkeypatch.setattr(setup_wizard.shutil, "which", lambda _: None)
     monkeypatch.setattr(setup_wizard.sys, "executable", r"C:\Users\Example User\Hermes\python.exe")
     assert setup_wizard._install_command_text().startswith("& '" + sys.executable + "' '-m' 'pip' 'install'")
+
+
+@pytest.mark.parametrize("saved,expected", [(None, (0, 0)), (("mention", "relaxed"), (1, 1))])
+def test_response_modes_preserve_selections(monkeypatch, saved, expected):
+    values = dict(zip(("INKBOX_GROUP_REPLY_MODE", "INKBOX_COMPANION_RESPONSE_MODE"), saved or ("", "")))
+    monkeypatch.setattr(setup_wizard, "_env", lambda name: values.get(name, ""))
+    selected = []
+    def choice(prompt, labels, default):
+        selected.append(default)
+        return default
+    monkeypatch.setattr(setup_wizard, "prompt_choice", choice)
+    monkeypatch.setattr(setup_wizard, "_save", lambda name, value: values.__setitem__(name, value))
+    setup_wizard._configure_response_modes()
+    assert tuple(selected) == expected
+    assert tuple(values.values()) == (saved or ("auto", "safe"))

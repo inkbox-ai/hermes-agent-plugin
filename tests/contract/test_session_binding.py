@@ -51,3 +51,36 @@ def test_a2a_ingestion_with_real_host_session_wiring(tmp_path, monkeypatch):
     assert context["message_id"] == "message-1"
     assert asyncio.run(adapter._on_a2a_event(_event("retry"))).text == "duplicate"
     assert len(adapter._enqueued) == len(adapter._a2a_receipts) == 1
+
+
+def test_group_sources_share_real_host_session_without_merging_private_chat(tmp_path):
+    """Both contact-backed participants use one shared conversation session."""
+    from gateway.platforms.base import MessageType
+    from gateway.config import PlatformConfig
+    from inkbox_plugin.adapter import InkboxAdapter
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+
+    platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
+    adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
+    adapter._resolve_channel_overrides = Mock(return_value=(None, None))
+    adapter._contact_marker = Mock(return_value="contact")
+    config = GatewayConfig()
+    config.group_sessions_per_user = True
+    config.thread_sessions_per_user = False
+    store = SessionStore(tmp_path / "sessions", config)
+    sessions = []
+    for author in ("+15555550101", "+15555550102"):
+        event = adapter._build_sms_text_event(
+            envelope={}, text_id=author, remote=author, contact={"id": author},
+            chat_id="sms:group-1", contact_name="Participant", body="Hello",
+            timestamp=datetime.now(timezone.utc), message_type=MessageType.TEXT,
+            conversation_id="group-1", is_group=True,
+        )
+        assert event.source.chat_type == "group"
+        sessions.append(store.get_or_create_session(event.source).session_id)
+    assert sessions[0] == sessions[1]
+    private = adapter.build_source(chat_id="+15555550101", chat_type="dm", user_id="+15555550101")
+    other = adapter.build_source(chat_id="sms:group-2", chat_type="group", user_id="+15555550101", thread_id="sms:group-2")
+    assert len({sessions[0], store.get_or_create_session(private).session_id,
+                store.get_or_create_session(other).session_id}) == 3

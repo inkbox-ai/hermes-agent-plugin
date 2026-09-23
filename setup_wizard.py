@@ -2037,6 +2037,20 @@ def _configure_channel_display() -> None:
         save_config(config)
 
 
+def _configure_response_modes() -> None:
+    """Configure independent group addressing and Companion sender gates."""
+    for name, values, labels, prompt in (
+        ("INKBOX_GROUP_REPLY_MODE", ("auto", "mention"),
+         ("Automatic replies", "Require @agent or @handle"), "  Group replies:"),
+        ("INKBOX_COMPANION_RESPONSE_MODE", ("safe", "relaxed"),
+         ("Safe: directly admitted senders", "Relaxed: all delivered senders"), "  Companion replies:"),
+    ):
+        current = (_env(name) or values[0]).strip().lower()
+        default = values.index(current) if current in values else 0
+        selected = prompt_choice(prompt, list(labels), default)
+        _save(name, values[selected])
+
+
 def interactive_setup() -> None:
     print_header("Inkbox")
     print_info("API-first email + SMS + voice + identity for AI agents.")
@@ -2095,6 +2109,7 @@ def interactive_setup() -> None:
         _save("INKBOX_BASE_URL", base_url)
 
     _configure_channel_display()
+    _configure_response_modes()
     _configure_avatar(base_url, api_key, identity, is_signup=not has_key)
 
     _save("INKBOX_ALLOW_ALL_USERS", "true")

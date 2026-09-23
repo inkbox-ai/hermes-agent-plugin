@@ -271,8 +271,10 @@ def test_inbound_group_sms_injects_silence_policy(monkeypatch):
     assert "Group SMS response policy" in events[0].text
     assert "return exactly [SILENT]" in events[0].text
     assert events[0].source.thread_id == "sms:conv-123"
-    assert adapter._last_inbound_sms["contact-123"]["conversation_id"] == "conv-123"
-    assert adapter._last_inbound_sms["contact-123|sms:conv-123"]["conversation_kind"] == "group"
+    assert adapter._last_inbound_sms["sms:conv-123"]["conversation_id"] == "conv-123"
+    assert events[0].source.chat_id == "sms:conv-123"
+    assert events[0].source.chat_type == "group"
+    assert adapter._last_inbound_sms["sms:conv-123|sms:conv-123"]["conversation_kind"] == "group"
 
 
 def test_unknown_inbound_sms_uses_conversation_session_key(monkeypatch):

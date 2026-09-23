@@ -178,6 +178,9 @@ class FakeIdentity:
         self.sent_imessages.append(kwargs)
         return FakeText()
 
+    def reply_all_email(self, message_id, **kwargs):
+        return self.send_email(reply_to_message_id=message_id, **kwargs)
+
     def send_email(self, **kwargs):
         if self._email_exc is not None:
             raise self._email_exc
@@ -418,6 +421,7 @@ def test_email_send_failure_wakes_agent():
     adapter._last_inbound_email["contact-123"] = {
         "subject": "Project",
         "rfc_message_id": "<abc@mail>",
+        "stored_message_id": "stored-mail-1",
         "from_address": "kim@example.com",
     }
 
@@ -908,6 +912,7 @@ def test_email_send_to_webhook_correlation_flow():
         metadata={
             "mode": "email",
             "thread_id": "inkbox-thread-uuid-1",
+            "stored_message_id": "stored-mail-1",
         },
         reply_to="rfc-msg-id-1",
     ))

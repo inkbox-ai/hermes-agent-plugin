@@ -101,7 +101,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
 
         def delivery(number):
             item = {"id": pages[1]["items"][-1]["id"] if number == 3 else str(UUID(int=number)),
-                    "direction": "inbound", "created_at": "2026-09-01T10:03:00Z"}
+                    "direction": "inbound", "sender_access": "direct", "created_at": "2026-09-01T10:03:00Z"}
             author = sponsor if number == 3 else "fred@example.com" if channel == "mail" else "+15555550102"
             if channel == "mail":
                 item.update(from_address=author, thread_id=meta["conversation_id"], body="Live group message")
@@ -189,10 +189,12 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             await asyncio.sleep(0.01)
         if scenario == "sponsor_denied":
             assert len(submissions) == 1 and count.call_count == 1
-            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage):
-                method.assert_not_called()
+            # Already-completed output retains its original signed route;
+            # local permission changes apply before the next model input.
+            method = {"mail": identity.reply_all_email, "phone": identity.send_text, "imessage": identity.send_imessage}[channel]
+            method.assert_called_once()
             row = next(iter(receiver.rows.values()))
-            assert row["state"] == "paused" and row["turns"][1]["state"] == "pending"
+            assert row["state"] == "failed" and row["turns"][1]["state"] == "pending"
             await receiver.close()
             return
         assert len(submissions) == 2 and count.call_count == 2

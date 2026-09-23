@@ -6,6 +6,14 @@ description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for
 author: Inkbox
 requires_env: []
 optional_env:
+  - name: INKBOX_GROUP_REPLY_MODE
+    description: "Group replies: auto (default) or mention."
+    prompt: "Group reply mode"
+    secret: false
+  - name: INKBOX_COMPANION_RESPONSE_MODE
+    description: "Companion replies: safe (default) or relaxed."
+    prompt: "Companion response mode"
+    secret: false
   - name: INKBOX_API_KEY
     description: "Inkbox API key. Agent-scoped keys are recommended."
     prompt: "Inkbox API key"

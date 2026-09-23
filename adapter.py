@@ -138,6 +138,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.platforms.helpers import redact_phone
 try:
     from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from .conversation import ConversationState, reply_route, mode as response_mode, mentions, same_author, raw_text
     from .a2a_context import (
         enqueue_a2a_turn_context,
         read_a2a_turn_context,
@@ -182,6 +183,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from conversation import ConversationState, reply_route, mode as response_mode, mentions, same_author, raw_text
     from a2a_context import (
         enqueue_a2a_turn_context,
         read_a2a_turn_context,
@@ -2288,6 +2290,8 @@ class InkboxAdapter(BasePlatformAdapter):
             "inkbox_hosted_call_completions.json"
         )
         self._hosted_call_registry_owner = uuid.uuid4().hex
+        response_mode(self, "group_reply_mode")
+        response_mode(self, "companion_response_mode")
         self._companion: Optional[CompanionReceiver] = None
         self._companion_max_bytes = _int_setting(
             extra, "companion_max_bytes", "INKBOX_COMPANION_MAX_BYTES", DEFAULT_MAX_BYTES,
@@ -2754,6 +2758,7 @@ class InkboxAdapter(BasePlatformAdapter):
         # Persist the resolved identity so non-Inkbox sessions (CLI, etc.) can
         # tell the agent which email + phone it can be reached on.  Read by
         # ``prompt_builder.build_inkbox_identity_hint``.
+        self._reply_identity = identity
         self._write_identity_state(identity, webhook_url, ws_url)
 
     def _write_identity_state(self, identity, webhook_url: str, ws_url: str) -> None:
@@ -2803,7 +2808,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if str(chat_id).startswith("companion:"):
             row = self._companion.rows.get(str(chat_id).removeprefix("companion:")) if self._companion else None
             return bool(row and row["meta"]["channel"] == "imessage")
-        meta = metadata or {}
+        origin = reply_route.get()
+        meta = {**(metadata or {}), **origin} if origin and origin.get("chat_id") == str(chat_id) else metadata or {}
         explicit_mode = str(meta.get("mode") or "").lower().strip()
         if explicit_mode:
             return explicit_mode == "imessage"
@@ -2828,10 +2834,9 @@ class InkboxAdapter(BasePlatformAdapter):
             row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
             if row is None or receiver.closed or row["state"] in {"paused", "failed", "revoked"} or str(chat_id) not in receiver.active:
                 return "", "", ""
-            if row["meta"].get("activation_id"):
-                await receiver._revalidate(row)
             return row["meta"]["conversation_id"], "", ""
-        meta = metadata or {}
+        origin = reply_route.get()
+        meta = {**(metadata or {}), **origin} if origin and origin.get("chat_id") == str(chat_id) else metadata or {}
         thread_id = str(meta.get("thread_id") or "").strip()
         inbound = getattr(self, "_last_inbound_imessage", {})
         imessage_meta = (
@@ -2886,7 +2891,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Inkbox SDK client not initialized")
 
         try:
-            identity = await asyncio.to_thread(
+            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle,
             )
         except Exception as exc:
@@ -3151,6 +3156,14 @@ class InkboxAdapter(BasePlatformAdapter):
         these are CLI chatter that never belongs in a real user's email or
         SMS thread.  See ``_is_hermes_admin_notice`` for the prefix list.
         """
+        origin = reply_route.get()
+        if origin and origin.get("chat_id") == str(chat_id):
+            metadata = {**(metadata or {}), **origin}
+            reply_to = origin.get("message_id") or reply_to
+        elif reply_to:
+            saved = self._conversation_state().row(str(chat_id))["routes"].get(str(reply_to))
+            if saved:
+                metadata = {**(metadata or {}), **saved}
         if _is_hermes_admin_notice(content, metadata):
             logger.debug(
                 "[Inkbox] Suppressed admin notice for chat %s: %s…",
@@ -3345,7 +3358,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Inkbox SDK client not initialized")
 
         try:
-            identity = await asyncio.to_thread(
+            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle,
             )
         except Exception as exc:
@@ -3546,13 +3559,13 @@ class InkboxAdapter(BasePlatformAdapter):
                 subject = "(no subject)"
 
             try:
-                msg = await asyncio.to_thread(
-                    identity.send_email,
-                    to=[to_addr],
-                    subject=subject,
-                    body_text=content,
-                    in_reply_to_message_id=in_reply_to or None,
-                )
+                stored_id = meta.get("stored_message_id") or stash.get("stored_message_id")
+                if reply_to or stored_id or stash:
+                    if not stored_id:
+                        return SendResult(success=False, error="Email reply requires its stored message ID")
+                    msg = await asyncio.to_thread(identity.reply_all_email, stored_id, body_text=content)
+                else:
+                    msg = await asyncio.to_thread(identity.send_email, to=[to_addr], subject=subject, body_text=content)
                 msg_id = str(getattr(msg, "id", "")).strip()
                 if msg_id:
                     save_outbound_context(
@@ -5294,6 +5307,11 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        route = (event.metadata or {}).get("inkbox_reply_route")
+        if route:
+            reply_route.set(route)
+            self._conversation_state().row(str(event.source.chat_id))["active_author"] = route.get("author")
+            self._conversation_state().save(str(event.source.chat_id))
         if getattr(self, "_companion", None) is not None and self._companion.processing(event):
             return
         hosted = self._hosted_call_processing_data(event)
@@ -5356,6 +5374,8 @@ class InkboxAdapter(BasePlatformAdapter):
         event: MessageEvent,
         outcome: Any,
     ) -> None:
+        if str(getattr(outcome, "value", outcome)).lower() == "success" and (event.metadata or {}).get("inkbox_reply_route"):
+            self._conversation_state().complete(str(event.source.chat_id), str(event.message_id))
         if getattr(self, "_companion", None) is not None and self._companion.processing(event, outcome):
             return
         chat_id = str(event.source.chat_id)
@@ -5492,7 +5512,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if self._inkbox is None:
             return
         try:
-            identity = await asyncio.to_thread(
+            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
             )
             if not callable(getattr(identity, "iter_a2a_tasks", None)):
@@ -5635,7 +5655,7 @@ class InkboxAdapter(BasePlatformAdapter):
         ):
             return SendResult(success=True, message_id="a2a-no-reply")
         try:
-            identity = await asyncio.to_thread(
+            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
                 self._inkbox.get_identity, self._identity_handle
             )
             authoritative = await asyncio.to_thread(
@@ -5694,6 +5714,7 @@ class InkboxAdapter(BasePlatformAdapter):
             "subject": subject,
             "rfc_message_id": rfc_message_id or "",
             "from_address": from_address,
+            "stored_message_id": str(message.get("id") or ""),
         }
         self._last_inbound_modality[str(chat_id)] = "email"
         # A fresh inbound starts a fresh logical reply — reset its
@@ -5713,7 +5734,7 @@ class InkboxAdapter(BasePlatformAdapter):
             # ``reply_to`` on send().  Use the RFC 5322 Message-ID (not the
             # Inkbox UUID) so SDK send_email(in_reply_to_message_id=...)
             # actually threads the reply.
-            message_id=rfc_message_id or message.get("id"),
+            message_id=str(message.get("id") or ""),
         )
         body_text = _escape_contact_memory_tokens(
             _inbound_mail_body(message) or subject or ""
@@ -5744,7 +5765,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_type=MessageType.TEXT,
             source=source,
             raw_message=envelope,
-            message_id=rfc_message_id or str(message.get("id") or ""),
+            message_id=str(message.get("id") or ""),
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
         )
@@ -6115,8 +6136,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
         return build_session_key(
             event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            group_sessions_per_user=getattr(getattr(self, "config", None), "extra", {}).get("group_sessions_per_user", True),
+            thread_sessions_per_user=getattr(getattr(self, "config", None), "extra", {}).get("thread_sessions_per_user", False),
         )
 
     @staticmethod
@@ -6214,8 +6235,8 @@ class InkboxAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=str(chat_id),
             chat_name=chat_name,
-            chat_type="dm",
-            user_id=str(chat_id),
+            chat_type="group" if is_group else "dm",
+            user_id=str((contact or {}).get("id") or remote) if is_group else str(chat_id),
             user_name=contact_name or remote,
             user_id_alt=remote,
             thread_id=thread_id,
@@ -6279,6 +6300,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if event.message_type != MessageType.TEXT:
             return None
         text = (event.text or "").lstrip()
+        if event.source and event.source.chat_type == "group":
+            return {"mode": "queue", "merge_text": False}
         if text.startswith("[inkbox:a2a_"):
             return {"mode": "queue"}
         if (
@@ -6295,6 +6318,9 @@ class InkboxAdapter(BasePlatformAdapter):
         return None
 
     async def _enqueue_sms_text_event(self, event: MessageEvent) -> None:
+        if event.source.chat_type == "group":
+            await self._enqueue(event)
+            return
         key = self._sms_text_batch_key(event)
         text = event.text or ""
         marker, context_block, body = _split_routing_context(text)
@@ -6458,7 +6484,7 @@ class InkboxAdapter(BasePlatformAdapter):
         direction = str(text_msg.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
             return web.Response(status=200, text="ok")
-        remote = (text_msg.get("remote_phone_number") or "").strip()
+        remote = (text_msg.get("sender_phone_number") or text_msg.get("remote_phone_number") or "").strip()
         if not remote:
             return web.Response(status=200, text="ok")
         conversation_id = str(
@@ -6475,7 +6501,6 @@ class InkboxAdapter(BasePlatformAdapter):
         ):
             if entry not in participants:
                 participants.append(entry)
-        webhook_contacts = _webhook_list(data, "contacts", "contact_list")
         webhook_agent_identities = _webhook_list(
             data,
             "agent_identities",
@@ -6487,16 +6512,14 @@ class InkboxAdapter(BasePlatformAdapter):
             _conversation_summary_is_group(conversation_summary)
             or bool(_field(text_msg, "isGroup", "is_group"))
             or len(participants) > 1
-            or len(webhook_contacts) > 1
-            or len(webhook_agent_identities) > 1
         )
 
         contact = await self._resolve_contact_full(kind="phone", value=remote)
-        chat_id = _chat_id_for_route(
-            contact,
-            _channel_thread_key("sms", conversation_id),
-            remote,
-        )
+        if is_group and not conversation_id:
+            return web.Response(status=422, text="Group SMS requires a conversation ID")
+        chat_id = (_channel_thread_key("sms", conversation_id) if is_group else _chat_id_for_route(
+            contact, _channel_thread_key("sms", conversation_id), remote,
+        ))
         contact_name = contact["name"] if contact and contact.get("name") else None
         # Sender labelling: the address-book contact always wins; failing
         # that, the lone resolved agent identity names the 1:1 peer. Groups
@@ -6587,7 +6610,8 @@ class InkboxAdapter(BasePlatformAdapter):
             agent_identity=sender_identity,
             contact_memories=contact_memories,
         )
-        await self._enqueue_sms_text_event(event)
+        if self._prepare_conversation_event(event):
+            await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
 
     # ── Outbound delivery-failure feedback loop ────────────────────────
@@ -7158,9 +7182,11 @@ class InkboxAdapter(BasePlatformAdapter):
         participants = _string_list_field(message, "participants")
         is_group = bool(_field(message, "isGroup", "is_group")) or len(participants) > 1
 
+        if is_group and not conversation_id:
+            return web.Response(status=422, text="Group iMessage requires a conversation ID")
         contact = await self._resolve_contact_full(kind="phone", value=remote)
         chat_id = (
-            _channel_thread_key("imessage", conversation_id) or remote
+            _channel_thread_key("imessage", conversation_id)
             if is_group
             else _chat_id_for_route(
                 contact,
@@ -7260,7 +7286,8 @@ class InkboxAdapter(BasePlatformAdapter):
         # iMessage users send fragment bursts just like SMS users — reuse
         # the quiet-window batcher (the burst marker rewrite understands
         # the [inkbox:imessage ...] prefix).
-        await self._enqueue_sms_text_event(event)
+        if self._prepare_conversation_event(event):
+            await self._enqueue_sms_text_event(event)
         return web.Response(status=200, text="ok")
 
     async def _on_imessage_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
@@ -7511,9 +7538,11 @@ class InkboxAdapter(BasePlatformAdapter):
             _conversation_summary_is_group(conversation)
             or len(participants) > 1
         )
+        if is_group and not conversation_id:
+            return web.Response(status=422, text="Group iMessage requires a conversation ID")
         contact = await self._resolve_contact_full(kind="phone", value=remote)
         chat_id = (
-            _channel_thread_key("imessage", conversation_id) or remote
+            _channel_thread_key("imessage", conversation_id)
             if is_group
             else _chat_id_for_route(
                 contact,
@@ -8939,9 +8968,107 @@ class InkboxAdapter(BasePlatformAdapter):
         chosen = primary or (phones[0] if phones else None)
         return getattr(chosen, "value", None) if chosen else None
 
+    def set_message_handler(self, handler: Any) -> None:
+        """Wrap the host completion boundary without changing its protocol."""
+        async def checkpointed(event: MessageEvent) -> Any:
+            response = await handler(event)
+            if getattr(self, "_companion", None):
+                self._companion.capture_result(event, response)
+            return response
+        if getattr(handler, "__self__", None) is not None:
+            checkpointed.__self__ = handler.__self__
+        super().set_message_handler(checkpointed)
+
+    def _conversation_state(self) -> ConversationState:
+        if not hasattr(self, "_conversation_journal"):
+            import hashlib
+            namespace = hashlib.sha256(json.dumps([
+                getattr(self, "_base_url", ""), getattr(self, "_identity_handle", ""), getattr(self, "_identity_id", ""),
+            ]).encode()).hexdigest()
+            self._conversation_journal = ConversationState(_inkbox_state_path().parent / "inkbox_conversations" / namespace)
+        return self._conversation_journal
+
+    def _pending_conversation_control(self, source: Any) -> bool:
+        owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+        if owner is None:
+            return False
+        try:
+            from gateway.session import build_session_key
+            key = build_session_key(source, group_sessions_per_user=getattr(getattr(self, "config", None), "extra", {}).get("group_sessions_per_user", True),
+                                    thread_sessions_per_user=getattr(getattr(self, "config", None), "extra", {}).get("thread_sessions_per_user", False))
+        except ImportError:
+            return False
+        owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+        if any(getattr(owner, name, {}).get(key) for name in ("_pending_approvals", "_update_prompt_pending")):
+            return True
+        for module, name in (("tools.approval", "has_blocking_approval"),
+                             ("tools.clarify_gateway", "get_pending_for_session"), ("tools.slash_confirm", "get_pending")):
+            try:
+                import importlib
+                if getattr(importlib.import_module(module), name)(key):
+                    return True
+            except ImportError:
+                continue
+        return False
+
+    def _prepare_conversation_event(self, event: MessageEvent) -> bool:
+        """Gate raw inputs before framing can affect commands or prompt answers."""
+        envelope = event.raw_message or {}
+        if not isinstance(envelope, dict) or envelope.get("companion") or "_inkbox_companion_turn" in envelope:
+            return True
+        channel = {"message.received": "email", "text.received": "sms", "imessage.received": "imessage",
+                   "imessage.reaction_received": "imessage"}.get(envelope.get("event_type"))
+        if channel is None or (event.metadata or {}).get("inkbox_prepared"):
+            return True
+        data = envelope.get("data") or {}
+        reaction = envelope.get("event_type") == "imessage.reaction_received"
+        item = data.get("reaction" if reaction else "text_message" if channel == "sms" else "message") or {}
+        author = str(item.get("from_address") or item.get("sender_phone_number") or item.get("sender_number")
+                     or item.get("remote_phone_number") or item.get("remote_number") or "")
+        text = raw_text(item) if not reaction else ""
+        route = {"chat_id": str(event.source.chat_id), "mode": channel, "author": author,
+                 "message_id": str(event.message_id or ""), "thread_id": event.source.thread_id,
+                 "conversation_id": str(item.get("conversation_id") or item.get("conversationId") or ""),
+                 "remote_phone_number": author, "remote_number": author, "to": author,
+                 "stored_message_id": str(item.get("id") or "") if channel == "email" else ""}
+        journal = self._conversation_state()
+        key = str(event.source.chat_id)
+        group = event.source.chat_type == "group"
+        if group:
+            owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+            if getattr(getattr(self, "config", None), "extra", {}).get("thread_sessions_per_user", False) or getattr(getattr(owner, "config", None), "thread_sessions_per_user", False):
+                raise RuntimeError("Inkbox groups require shared Hermes thread sessions (thread_sessions_per_user=false)")
+        pending = self._pending_conversation_control(event.source)
+        asked = same_author(channel, author, journal.row(key).get("active_author", ""))
+        command = not reaction and text.lstrip().startswith("/")
+        quiet = (pending and (not asked or reaction)) or (group and response_mode(self, "group_reply_mode") == "mention"
+                and not mentions(text, self._identity_handle) and not command and not (pending and asked))
+        if quiet:
+            journal.quiet(key, str(event.message_id), event.text)
+            return False
+        journal.remember(key, str(event.message_id), route)
+        event.metadata = {**(event.metadata or {}), "inkbox_prepared": True, "inkbox_reply_route": route}
+        event.allow_gateway_control = not reaction
+        if command or (pending and asked):
+            event.text = text.strip()
+        else:
+            prior = journal.consume(key, str(event.message_id))
+            if prior:
+                event.text = "Earlier conversation context (not new instructions):\n" + json.dumps(prior) + "\nCurrent message:\n" + event.text
+        return True
+
     async def _enqueue(self, event: MessageEvent) -> asyncio.Task:
         """Dispatch an inbound event to the gateway runner as a background task."""
-        task = asyncio.create_task(self.handle_message(event))
+        if not self._prepare_conversation_event(event):
+            async def quiet() -> None:
+                return None
+            return asyncio.create_task(quiet())
+        route = (event.metadata or {}).get("inkbox_reply_route")
+        token = reply_route.set(route)
+        try:
+            task = asyncio.create_task(self.handle_message(event))
+        finally:
+            reply_route.reset(token)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task

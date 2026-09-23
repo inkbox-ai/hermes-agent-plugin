@@ -29,7 +29,7 @@ def event(channel="mail", phase="initialization", number=3, *, scope=10, activat
     author = "owner@example.com" if number == 3 else "fred@example.com"
     if channel != "mail":
         author = "+15555550101" if number == 3 else "+15555550102"
-    item = {"id": uid(number), "direction": "inbound", "created_at": "2026-01-01T00:00:00Z"}
+    item = {"id": uid(number), "direction": "inbound", "sender_access": "direct", "created_at": "2026-01-01T00:00:00Z"}
     if channel == "mail":
         item.update(from_address=author, thread_id=uid(conversation), body_text="/clear")
     elif channel == "phone":
@@ -225,7 +225,7 @@ def test_real_sdk_pagination_produces_one_host_input(factory):
         assert text.count(uid(1)) == 1 and text.count(uid(2)) == 1
         assert "/clear" in text and "YES" in text and "Hello group" in text
         assert any(call.get("cursor") == "page-2" for call in calls)
-        assert calls[-1]["limit"] == 1
+        assert len(calls) == 3 and all(call["limit"] == 100 for call in calls)  # SDK snapshot consistency check only.
     asyncio.run(run())
 
 
@@ -306,9 +306,9 @@ def test_live_first_hydrates_and_ordinary_is_separate(factory):
         instance.resource.load_initialization.assert_not_called()
         await instance.receiver.accept(event(phase="live", number=4))
         await idle(instance)
-        assert len(instance.inputs) == 3
+        assert len(instance.inputs) == 2
         assert instance.inputs[0].source.chat_id != instance.inputs[1].source.chat_id
-        assert instance.inputs[1].source.chat_id == instance.inputs[2].source.chat_id
+        assert "Hello group" in instance.inputs[1].text
     asyncio.run(run())
 
 
@@ -324,7 +324,7 @@ def test_failures_do_not_partially_initialize(factory, failure):
                 value["entries"].pop()
             instance.resource.load_initialization.side_effect = lambda *args, **kw: value
         elif failure == "revoked":
-            instance.resource.activation_messages.side_effect = PermissionError("Grant revoked")
+            instance.resource.load_initialization.side_effect = PermissionError("Grant revoked")
         elif failure == "sponsor":
             instance.host.allow_sponsor = False
         elif failure == "denied":
@@ -437,13 +437,13 @@ def test_revocation_discards_unsubmitted_snapshot(factory):
 
     async def run():
         instance = factory()
-        instance.resource.activation_messages.side_effect = InkboxAPIError(403, "Unavailable")
+        instance.resource.load_initialization.side_effect = InkboxAPIError(403, "Unavailable")
         await instance.receiver.accept(event())
         await idle(instance)
         assert not instance.inputs
         row = json.loads(next(instance.receiver.root.glob("*.json")).read_text())
         assert row["state"] == "revoked"
-        assert "entries" not in row["turns"][0] and "text" not in row["turns"][0]
+        assert not row["turns"]
         with pytest.raises(ValueError, match="revoked"):
             await instance.receiver.accept(event(phase="live", number=4))
     asyncio.run(run())
@@ -512,7 +512,7 @@ def test_sponsor_followup_obeys_initialization_barrier(factory):
         await instance.receiver.accept(event())
         await wait_inputs(instance, 1)
         followup = event(phase="live", number=4)
-        followup["data"]["message"]["from_address"] = "owner@example.com"
+        followup["data"]["message"].update(from_address="owner@example.com", body_text="A normal follow-up")
         await instance.receiver.accept(followup)
         assert len(instance.inputs) == 1
         instance.gate.set()
@@ -548,7 +548,7 @@ def test_live_email_uses_complete_body_and_original_parent(factory, truncated):
             assert "complete.txt" in instance.inputs[1].text
         result = await instance.adapter.send(instance.inputs[1].source.chat_id, "Reply", reply_to=instance.inputs[1].message_id)
         assert result.success
-        instance.identity.reply_all_email.assert_called_once_with(uid(4), body_text="Reply")
+        instance.identity.reply_all_email.assert_called_once_with(uid(3), body_text="Reply")
     asyncio.run(run())
 
 
@@ -622,7 +622,7 @@ def test_incompatible_sdk_reports_requirement_without_host_input(factory, monkey
         request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(event()).encode()), headers={}, url="https://example.com/webhook")
         response = await instance.adapter._handle_webhook(request)
         assert response.status == 503
-        assert "Incompatible Inkbox SDK" in response.text and ">=0.7.3" in response.text
+        assert "Incompatible Inkbox SDK" in response.text and ">=0.7.6" in response.text
         assert not instance.inputs and not instance.receiver.rows
         assert not instance.receiver.root.exists()
     asyncio.run(run())
@@ -639,7 +639,7 @@ def test_recovered_initialization_reports_missing_sdk_helper(factory):
         await idle(second)
         row = next(iter(second.receiver.rows.values()))
         assert row["state"] == "failed"
-        assert "Incompatible Inkbox SDK" in row["error"] and ">=0.7.3" in row["error"]
+        assert "Incompatible Inkbox SDK" in row["error"] and ">=0.7.6" in row["error"]
         assert not first.inputs and not second.inputs
         await second.receiver.close()
     asyncio.run(run())
@@ -647,7 +647,7 @@ def test_recovered_initialization_reports_missing_sdk_helper(factory):
 
 @pytest.mark.parametrize("denial", ["sponsor", "participant"])
 @pytest.mark.parametrize("channel", ["mail", "phone", "imessage"])
-def test_authority_is_rechecked_after_long_host_turn(factory, channel, denial):
+def test_reply_reuses_signed_route_without_authorization_reads(factory, channel, denial):
     async def run():
         instance = factory(channel)
         instance.gate.clear()
@@ -659,44 +659,25 @@ def test_authority_is_rechecked_after_long_host_turn(factory, channel, denial):
         else:
             instance.host.denied.add("nancy@example.com" if channel == "mail" else "+15555550103")
         result = await instance.adapter.send(incoming.source.chat_id, "Group reply", reply_to=incoming.message_id)
-        assert not result.success
-        if channel == "imessage":
-            instance.adapter._stop_imessage_typing = Mock()
-            result = await instance.adapter._send_imessage_media(
-                incoming.source.chat_id, caption="Group attachment", metadata={}, media_url="https://example.com/image.png",
-            )
-            assert not result.success
-        for name in ("reply_all_email", "send_email", "send_text", "send_imessage"):
-            getattr(instance.identity, name).assert_not_called()
+        assert result.success
+        instance.resource.activation_messages.assert_not_called()
+        method = {"mail": "reply_all_email", "phone": "send_text", "imessage": "send_imessage"}[channel]
+        getattr(instance.identity, method).assert_called_once()
         await instance.receiver.close()
     asyncio.run(run())
 
 
-def test_close_during_reply_validation_fences_dispatch(factory):
+def test_closed_receiver_fences_dispatch(factory):
     async def run():
         first = factory()
         await first.receiver.accept(event())
         await idle(first)
         incoming = first.inputs[0]
-        started, release = threading.Event(), threading.Event()
-
-        def validate(*args, **kwargs):
-            started.set()
-            release.wait(5)
-            return snapshot(event())
-
-        first.resource.activation_messages.side_effect = validate
-        sending = asyncio.create_task(first.receiver.send(incoming.source.chat_id, "Reply", incoming.message_id))
-        assert await asyncio.to_thread(started.wait, 2)
         await first.receiver.close()
-        second = factory(root=first.receiver.root)
-        await second.receiver.start()
-        checkpoint = next(second.receiver.root.glob("*.json")).read_bytes()
-        release.set()
-        assert not (await sending).success
-        assert next(second.receiver.root.glob("*.json")).read_bytes() == checkpoint
+        result = await first.receiver.send(incoming.source.chat_id, "Reply", incoming.message_id)
+        assert not result.success
         first.identity.reply_all_email.assert_not_called()
-        await second.receiver.close()
+        first.resource.activation_messages.assert_not_called()
     asyncio.run(run())
 
 

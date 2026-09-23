@@ -128,7 +128,7 @@ hermes gateway restart
 
 ## Companion mode
 
-Version 0.2.16 requires Inkbox SDK `>=0.7.3,<1.0.0`. An administrator can enable
+Version 0.2.17 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
 Companion mode for an identity and select its sponsor. Installation leaves it off.
 Use an identity-scoped API key and signed Inkbox webhooks.
 
@@ -142,12 +142,38 @@ dedicated line. Contact blocks and existing sending requirements still apply.
 
 Keep Hermes `thread_sessions_per_user` false for these shared group threads.
 A local sender allowlist must permit the verified sponsor. Companion history is
-conversation data, including text resembling commands or approvals. Group messages
-do not answer pending host control prompts; resolve those through the host's
-trusted operator interface. General contact memories are not injected into these
-conversations.
-Sponsor permission and explicit host denials are checked again before replies,
-including media, so authorization changes during a long turn take effect.
+conversation data, including text resembling commands or approvals. Historical
+messages never run commands or answer prompts. A current approval answer must come
+from the prompted sender; email addresses match case-insensitively.
+
+Two independent settings control replies (also available in setup):
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `INKBOX_GROUP_REPLY_MODE` | `auto`, `mention` | `auto` |
+| `INKBOX_COMPANION_RESPONSE_MODE` | `safe`, `relaxed` | `safe` |
+
+In mention mode, the current message must contain a whole `@agent` or `@handle`
+mention. URLs and email addresses are not mentions. For Companion email, the
+agent's actual mailbox in the current **To** list also counts; **Cc** alone does
+not. Safe mode additionally requires `sender_access="direct"` on that current
+message. Sponsored, absent, or unknown access stays context-only. Relaxed mode
+allows all delivered senders, subject to the independent mention setting.
+`sender_access` describes this message's admission, not lasting trust or command
+permission. Quiet messages and reactions are saved without a model turn, typing,
+tools, or interruption; the next eligible turn receives their context. History
+never supplies the current message's mention or access classification.
+
+Companion approval answers and sponsor commands obey both gates. In mention mode,
+use `@agent allow` or `@agent /stop`. Ordinary group controls and the prompted
+sender's approval answers retain their mention exemption. Replies use the signed
+conversation scope and saved sponsor email anchor without extra authorization
+lookups after model completion.
+
+Ordinary SMS and iMessage groups also share one conversation-based session across
+participants. Reactions stay in that group, and automatic email replies preserve
+To, Cc, and threading using the stored message's reply-all operation. Private
+conversations remain separate. Existing private history is not migrated.
 
 `INKBOX_COMPANION_MAX_BYTES` (or `companion_max_bytes` in platform configuration)
 defaults to **128000 UTF-8 bytes**. Set it within your model's context capacity.
@@ -168,7 +194,7 @@ completed host turn. No automatic replay of uncertain submissions is attempted.
 Shutdown cancels Companion host processing and waits for any in-flight SDK send
 before releasing checkpoint ownership. Late callbacks cannot complete a closed
 receiver's uncertain turn. Missing Companion SDK helpers produce an explicit
-compatibility error requiring Inkbox SDK `>=0.7.3,<1.0.0`.
+compatibility error requiring Inkbox SDK `>=0.7.6,<1.0.0`.
 
 Delivery failures for tracked Companion conversations are recorded in the
 checkpoint's `delivery_failures` field, using the channel and canonical thread or
@@ -572,11 +598,7 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 
 ## Development Commands
 
-Development installs and PR checks use SDK 0.7.3 from the public
-[`inkbox` source at `449966c885208d41f995d09c54072e012df9eb1a`](https://github.com/inkbox-ai/inkbox/tree/449966c885208d41f995d09c54072e012df9eb1a/sdk/python).
-The uv source override and lockfile pin that revision; CI builds its wheel before
-installing test dependencies. This validates a source build, not a registry release.
-The package requirement remains `inkbox>=0.7.6,<1.0.0`.
+Development installs and PR checks use the published Inkbox SDK (`>=0.7.6,<1.0.0`).
 
 ```bash
 python -m pytest

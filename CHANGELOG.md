@@ -1,16 +1,23 @@
 # Changelog
 
-## 0.2.16
+## 0.2.17
 
 ### Added
 
-- Companion mode initializes a separate group conversation with complete available history in one Hermes input, then processes live messages in order.
-- Durable receipt and submission checkpoints recover work after restarts and pause uncertain host outcomes.
-- Email replies retain their stored reply-all parent. The email tool accepts `reply_to_message_id` for reply-all without recipient overrides.
+- Companion initialization loads complete available history with durable receipt, turn, and reply checkpoints.
+- Independent Safe/Relaxed sender modes and Auto/Mention group modes, configurable in setup.
+- Context-only messages persist without waking or interrupting the agent; current email To addressing also satisfies Companion mention mode.
+
+### Fixed
+
+- SMS and iMessage group sessions are shared across participants and remain separate from private conversations.
+- Approval answers and commands use current raw text and the prompted sender rather than history or unrelated participants.
+- Automatic email replies preserve To, Cc, and threading using the stored reply-all parent.
+- Delayed replies keep their original destinations. Mixed-case email authors match across initialization, approvals, and controls.
+- Startup failures before submission can retry; completed model responses are saved before delivery, while uncertain submissions and sends remain paused.
 
 ### Changed
 
-- Requires Inkbox SDK `>=0.7.3,<1.0.0`.
+- Requires the published Inkbox SDK `>=0.7.6,<1.0.0`; no unreleased source pin.
 - Plugin version reporting follows the installed plugin manifest.
-- Companion replies recheck host permissions; shutdown preserves uncertain turns and waits for in-flight sends before releasing ownership.
-- Companion delivery failures remain in scoped checkpoints for operator review without automatic recovery turns.
+- Scoped Companion delivery failures remain available for inspection without automatic recovery turns.
