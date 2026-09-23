@@ -107,3 +107,10 @@ class ConversationState:
         row = self.row(key)
         row["quiet"] = [item for item in row["quiet"] if item.get("turn") != message_id]
         self.save(key)
+
+    def release(self, key: str, message_id: str) -> None:
+        """A failed turn must not strand buffered context behind its reservation."""
+        for item in self.row(key)["quiet"]:
+            if item.get("turn") == message_id:
+                item.pop("turn", None)
+        self.save(key)

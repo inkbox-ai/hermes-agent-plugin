@@ -5377,8 +5377,12 @@ class InkboxAdapter(BasePlatformAdapter):
         event: MessageEvent,
         outcome: Any,
     ) -> None:
-        if str(getattr(outcome, "value", outcome)).lower() == "success" and (event.metadata or {}).get("inkbox_reply_route"):
-            self._conversation_state().complete(str(event.source.chat_id), str(event.message_id))
+        if (event.metadata or {}).get("inkbox_reply_route"):
+            journal = self._conversation_state()
+            if str(getattr(outcome, "value", outcome)).lower() == "success":
+                journal.complete(str(event.source.chat_id), str(event.message_id))
+            else:
+                journal.release(str(event.source.chat_id), str(event.message_id))
         if getattr(self, "_companion", None) is not None and self._companion.processing(event, outcome):
             return
         chat_id = str(event.source.chat_id)
@@ -5709,10 +5713,8 @@ class InkboxAdapter(BasePlatformAdapter):
         rfc_message_id = message.get("message_id")  # RFC 5322 Message-ID for threading
         subject = message.get("subject") or ""
 
-        # Stash the subject + RFC 5322 Message-ID so send() can populate
-        # Re: <subject> and the In-Reply-To header on replies.  Keyed by
-        # chat_id so unsolicited cron sends to the same chat fall back to
-        # the most-recent inbound for threading context.
+        # Retain the stored message UUID for canonical reply-all. The original
+        # turn route overrides this latest-receipt fallback during generation.
         self._last_inbound_email[str(chat_id)] = {
             "subject": subject,
             "rfc_message_id": rfc_message_id or "",
@@ -5734,9 +5736,8 @@ class InkboxAdapter(BasePlatformAdapter):
             thread_id=f"email:{thread_id}" if thread_id else None,
             chat_topic=subject or None,
             # MessageEvent.message_id is what the gateway passes back as
-            # ``reply_to`` on send().  Use the RFC 5322 Message-ID (not the
-            # Inkbox UUID) so SDK send_email(in_reply_to_message_id=...)
-            # actually threads the reply.
+            # ``reply_to`` on send(). Canonical reply-all takes the stored
+            # Inkbox message UUID, not the RFC 5322 Message-ID header.
             message_id=str(message.get("id") or ""),
         )
         body_text = _escape_contact_memory_tokens(
@@ -9076,7 +9077,7 @@ class InkboxAdapter(BasePlatformAdapter):
         pending = self._pending_conversation_control(event.source)
         asked = same_author(channel, author, journal.row(key).get("active_author", ""))
         command = not reaction and text.lstrip().startswith("/")
-        quiet = (pending and (not asked or reaction)) or (group and response_mode(self, "group_reply_mode") == "mention"
+        quiet = (pending and (not asked or reaction)) or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
                 and not mentions(text, self._identity_handle) and not command and not (pending and asked))
         if quiet:
             journal.quiet(key, str(event.message_id), event.text)

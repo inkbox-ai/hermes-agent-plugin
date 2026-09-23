@@ -339,7 +339,8 @@ class CompanionReceiver:
             return False
         event = MessageEvent(text=control_text(raw_text(item), self.adapter._identity_handle),
                              message_type=MessageType.TEXT, source=source, message_id=active["id"],
-                             raw_message={"_inkbox_companion_turn": active["id"], "_inkbox_companion_key": row["key"]})
+                             raw_message={"_inkbox_companion_turn": active["id"], "_inkbox_companion_key": row["key"],
+                                          "_inkbox_companion_control": True})
         event.allow_gateway_control = True
         turn["state"] = "control_submitting"
         self._save(row)
@@ -719,7 +720,7 @@ class CompanionReceiver:
         chat_id = str(getattr(event.source, "chat_id", ""))
         if key is None or chat_id != f"companion:{key}" or raw.get("_inkbox_companion_turn") != event.message_id:
             return False
-        if self.closed or self._owner_file is None:
+        if self.closed or self._owner_file is None or raw.get("_inkbox_companion_control"):
             return True
         turn = self.active.get(chat_id)
         if turn is None or turn["id"] != event.message_id:
@@ -746,7 +747,7 @@ class CompanionReceiver:
     def capture_result(self, event: MessageEvent, response: Any) -> None:
         """Checkpoint a completed host response before delivery starts."""
         raw = event.raw_message or {}
-        if self.closed or not isinstance(raw, dict):
+        if self.closed or not isinstance(raw, dict) or raw.get("_inkbox_companion_control"):
             return
         row = self.rows.get(raw.get("_inkbox_companion_key"))
         if not row:
@@ -765,7 +766,8 @@ class CompanionReceiver:
         delivery = turn.get("delivery", {})
         if delivery.get("state") in {"sending", "uncertain"}:
             raise RuntimeError("Companion send outcome is uncertain")
-        if delivery.get("state") != "sent" and turn.get("result", "").strip().upper() not in {"", "[SILENT]"}:
+        result_sent = delivery.get("state") == "sent" and delivery.get("fingerprint") == digest(turn.get("result", ""))
+        if not result_sent and turn.get("result", "").strip().upper() not in {"", "[SILENT]"}:
             result = await self.send(f"companion:{row['key']}", turn["result"], turn["id"])
             if not result.success:
                 raise RuntimeError("Companion saved reply could not be delivered")

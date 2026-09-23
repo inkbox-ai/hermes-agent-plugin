@@ -230,3 +230,74 @@ def test_companion_approval_requires_current_gates_and_prompted_author(factory, 
             assert received[0].message_id == instance.inputs[0].message_id
         await instance.receiver.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("chat_type", ["dm", "group"])
+def test_ordinary_email_reply_all_is_not_mention_gated(tmp_path, chat_type):
+    adapter = ordinary_adapter(tmp_path)
+    incoming = ordinary_event(1, "sender@example.com", "An ordinary email without a mention")
+    incoming.source.chat_type = chat_type
+    incoming.raw_message = {"event_type": "message.received", "data": {"message": {
+        "id": "stored-message", "from_address": "sender@example.com", "body_text": "Hello",
+        "to_addresses": ["other@example.com"], "cc_addresses": ["agent@example.com"],
+    }}}
+    assert adapter._prepare_conversation_event(incoming)
+    assert incoming.metadata["inkbox_reply_route"]["stored_message_id"] == "stored-message"
+
+
+def test_failed_ordinary_wake_releases_buffered_context(tmp_path):
+    adapter = ordinary_adapter(tmp_path)
+    assert not adapter._prepare_conversation_event(ordinary_event(1, "+15555550101", "Useful earlier context"))
+    first = ordinary_event(2, "+15555550102", "@agent summarize")
+    assert adapter._prepare_conversation_event(first)
+    # This is the durable reservation released by a failed processing outcome.
+    adapter._conversation_journal.release(first.source.chat_id, first.message_id)
+    second = ordinary_event(3, "+15555550102", "@agent try again")
+    assert adapter._prepare_conversation_event(second)
+    assert "Useful earlier context" in second.text
+
+
+def test_control_ack_cannot_checkpoint_or_complete_running_model(factory):
+    async def run():
+        instance = factory()
+        instance.gate.clear()
+        await instance.receiver.accept(event())
+        await harness.wait_inputs(instance, 1)
+        model_event = instance.inputs[0]
+        row = next(iter(instance.receiver.rows.values()))
+        turn = row["turns"][0]
+        control = MessageEvent(text="allow", message_type=MessageType.TEXT, source=model_event.source,
+                               message_id=model_event.message_id, raw_message={
+                                   **model_event.raw_message, "_inkbox_companion_control": True,
+                               })
+        instance.receiver.capture_result(control, "Approval recorded")
+        assert instance.receiver.processing(control, "success")
+        assert not turn.get("result_ready")
+        assert turn["state"] == "submitted"
+        assert not instance.receiver.completions[turn["id"]].done()
+        instance.gate.set()
+        await idle(instance)
+        await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_saved_result_is_not_confused_with_prior_control_ack(factory):
+    async def run():
+        from inkbox_plugin.companion import digest
+        first = factory()
+        await first.receiver.accept(event())
+        await idle(first)
+        row = next(iter(first.receiver.rows.values()))
+        turn = row["turns"][0]
+        turn.update(state="submitted", result_ready=True, result="The actual answer",
+                    delivery={"state": "sent", "fingerprint": digest("Approval recorded"), "message_id": "prior-ack"})
+        row["state"] = "ready"
+        first.receiver._save(row)
+        await first.receiver.close()
+        second = factory(root=first.receiver.root)
+        await second.receiver.start()
+        await idle(second)
+        assert not second.inputs
+        second.identity.reply_all_email.assert_called_once_with(uid(3), body_text="The actual answer")
+        await second.receiver.close()
+    asyncio.run(run())

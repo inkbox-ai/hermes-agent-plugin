@@ -167,10 +167,10 @@ never supplies the current message's mention or access classification.
 Companion approval answers and sponsor commands obey both gates. In mention mode,
 use `@agent allow` or `@agent /stop`. Ordinary group controls and the prompted
 sender's approval answers retain their mention exemption. Replies use the signed
-conversation scope and saved sponsor email anchor without extra authorization
-lookups after model completion.
+conversation scope and saved sponsor email anchor without network authorization
+lookups after model completion. Local authorization policy still applies.
 
-Ordinary SMS and iMessage groups also share one conversation-based session across
+Ordinary SMS and iMessage groups use one session per conversation across
 participants. Reactions stay in that group, and automatic email replies preserve
 To, Cc, and threading using the stored message's reply-all operation. Private
 conversations remain separate. Existing private history is not migrated.
