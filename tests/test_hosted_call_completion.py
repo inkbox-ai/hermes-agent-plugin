@@ -1045,6 +1045,9 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
 
     instance._mark_connected = _mark_connected
 
+    async def _start_companion():
+        order.append("companion")
+
     async def _catch_up_hosted():
         assert (await instance._handle_health(None)).status == 503
         order.append("hosted")
@@ -1053,6 +1056,7 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
         assert (await instance._handle_health(None)).status == 503
         order.append("a2a")
 
+    instance._start_companion = _start_companion
     instance._catch_up_hosted_call_completions = _catch_up_hosted
     instance._catch_up_a2a_tasks = _catch_up_a2a
 
@@ -1080,7 +1084,7 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     )
 
     assert asyncio.run(instance.connect()) is True
-    assert order == ["hosted", "a2a", "connected"]
+    assert order == ["companion", "hosted", "a2a", "connected"]
     assert asyncio.run(instance._handle_health(None)).status == 200
 
 

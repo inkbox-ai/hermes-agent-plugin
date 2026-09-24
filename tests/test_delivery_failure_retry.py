@@ -12,10 +12,12 @@ TTL, replay-deduped webhooks.
 """
 
 import asyncio
+import json
 import sys
 import time
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -175,6 +177,9 @@ class FakeIdentity:
             raise self._imessage_exc
         self.sent_imessages.append(kwargs)
         return FakeText()
+
+    def reply_all_email(self, message_id, **kwargs):
+        return self.send_email(reply_to_message_id=message_id, **kwargs)
 
     def send_email(self, **kwargs):
         if self._email_exc is not None:
@@ -416,6 +421,7 @@ def test_email_send_failure_wakes_agent():
     adapter._last_inbound_email["contact-123"] = {
         "subject": "Project",
         "rfc_message_id": "<abc@mail>",
+        "stored_message_id": "stored-mail-1",
         "from_address": "kim@example.com",
     }
 
@@ -640,6 +646,29 @@ def test_mail_failure_events_are_subscribed():
     assert "message.bounced" in adapter_mod._DESIRED_MAIL_EVENTS
     assert "message.failed" in adapter_mod._DESIRED_MAIL_EVENTS
     assert "message.received" in adapter_mod._DESIRED_MAIL_EVENTS
+
+
+@pytest.mark.parametrize("event_type", ["message.bounced", "message.failed", "text.delivery_failed", "imessage.delivery_failed"])
+def test_gateway_mode_off_preserves_delivery_failure_recovery(monkeypatch, event_type):
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
+    adapter._companion = None
+    adapter._require_signature = True
+    adapter._signing_key = "synthetic-signing-key"
+    provider = types.SimpleNamespace(name="inkbox", verify=Mock(return_value=True))
+    monkeypatch.setattr(adapter_mod, "match_provider", lambda _headers: provider)
+    failed = {
+        "id": "failed-message", "direction": "outbound", "status": "delivery_failed",
+        "thread_id": "mail-thread", "conversation_id": "phone-conversation",
+        "to_addresses": ["kim@example.com"], "remote_phone_number": "+15555550101", "remote_number": "+15555550101",
+        "snippet": "Ordinary reply", "text": "Ordinary reply", "content": "Ordinary reply",
+    }
+    envelope = {"event_type": event_type, "data": {"text_message" if event_type.startswith("text.") else "message": failed}}
+    request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(envelope).encode()),
+                                    headers={}, url="https://example.com/webhook")
+    assert asyncio.run(adapter._handle_webhook(request)).status == 200
+    assert len(adapter._enqueued) == 1
+    assert adapter._enqueued[0].source.chat_id == "contact-123"
+    assert "Ordinary reply" in adapter._enqueued[0].text
 
 
 # ── Budget mechanics across surfaces ────────────────────────────────────
@@ -883,6 +912,7 @@ def test_email_send_to_webhook_correlation_flow():
         metadata={
             "mode": "email",
             "thread_id": "inkbox-thread-uuid-1",
+            "stored_message_id": "stored-mail-1",
         },
         reply_to="rfc-msg-id-1",
     ))

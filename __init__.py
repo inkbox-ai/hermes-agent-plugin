@@ -167,6 +167,7 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "requireSignature": "require_signature",
         "contact_memories_enabled": "contact_memories_enabled",
         "contactMemoriesEnabled": "contact_memories_enabled",
+        "companion_max_bytes": "companion_max_bytes",
         "voice_stack": "voice_stack",
         "voiceStack": "voice_stack",
         "voice_ai_authority_mode": "voice_ai_authority_mode",

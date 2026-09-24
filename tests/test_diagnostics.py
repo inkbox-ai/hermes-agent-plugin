@@ -3,18 +3,20 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 pkg = types.ModuleType("inkbox_plugin")
 pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault("inkbox_plugin", pkg)
 
-from inkbox_plugin import doctor
+from inkbox_plugin import config, doctor
 from inkbox_plugin.config import set_runtime_config_extra
 from inkbox_plugin.diagnostics import inkbox_api_error_message, is_inkbox_auth_error, missing_config_message
 
 
 def _clear_inkbox_env(monkeypatch):
+    monkeypatch.setattr(config, "_RUNTIME_EXTRA", {})
     for name in (
         "INKBOX_API_KEY",
         "INKBOX_IDENTITY",
@@ -52,7 +54,9 @@ def test_identity_error_message_points_to_identity_key_pairing():
     assert "hermes inkbox setup" in message
 
 
-def test_doctor_missing_config_findings_include_setup_hint(monkeypatch):
+@pytest.mark.parametrize("runtime_extra", [{}, {"identity": "fixture-agent"}])
+def test_doctor_missing_config_findings_include_setup_hint(monkeypatch, runtime_extra):
+    monkeypatch.setattr(config, "_RUNTIME_EXTRA", runtime_extra)
     _clear_inkbox_env(monkeypatch)
 
     summary = doctor.run_doctor()

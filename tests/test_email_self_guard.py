@@ -188,8 +188,8 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
         def __init__(self):
             self.sent = []
 
-        def send_email(self, **kwargs):
-            self.sent.append(kwargs)
+        def reply_all_email(self, message_id, **kwargs):
+            self.sent.append({"reply_to_message_id": message_id, **kwargs})
             return types.SimpleNamespace(id="msg-out")
 
     class FakeInkbox:
@@ -212,6 +212,7 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
         "email:thread-1": {
             "subject": "Loop test",
             "rfc_message_id": "<mail-in-1@example.com>",
+            "stored_message_id": "stored-mail-1",
             "from_address": "person@example.com",
         },
     }
@@ -220,8 +221,6 @@ def test_email_thread_session_reply_uses_stashed_sender(monkeypatch):
 
     assert result.success is True
     assert identity.sent == [{
-        "to": ["person@example.com"],
-        "subject": "Re: Loop test",
+        "reply_to_message_id": "stored-mail-1",
         "body_text": "Reply body",
-        "in_reply_to_message_id": "<mail-in-1@example.com>",
     }]

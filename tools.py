@@ -798,6 +798,16 @@ def inkbox_send_email(args: dict, **kwargs) -> str:
     del kwargs
     try:
         _cfg, _client, identity = _client_and_identity()
+        reply_parent = args.get("reply_to_message_id")
+        if reply_parent:
+            if any(args.get(key) for key in ("to", "cc", "bcc", "in_reply_to_message_id", "inReplyToMessageId")):
+                return _json({"error": "Reply-all accepts a stored message ID without recipient or threading overrides"})
+            msg = identity.reply_all_email(
+                str(reply_parent), subject=args.get("subject") or None,
+                body_text=args.get("body_text") or args.get("bodyText") or None,
+                body_html=args.get("body_html") or args.get("bodyHtml") or None,
+            )
+            return _json({"ok": True, "message_id": str(getattr(msg, "id", ""))})
         to = args.get("to") or []
         if isinstance(to, str):
             to = [to]
@@ -1405,7 +1415,7 @@ def inkbox_place_call(
             if not hasattr(identity, "place_call"):
                 raise RuntimeError(
                     "Inkbox SDK identity has no place_call method "
-                    "(upgrade inkbox to >=0.5.9)"
+                    "(upgrade inkbox to >=0.7.3)"
                 )
             if hosted:
                 return identity.place_call(
@@ -1586,11 +1596,12 @@ DELETE_CONTACT_SCHEMA = {
 
 SEND_EMAIL_SCHEMA = {
     "name": "inkbox_send_email",
-    "description": "Send an email from the configured Inkbox identity.",
+    "description": "Send an email or reply to everyone on a stored message using reply_to_message_id.",
     "parameters": {
         "type": "object",
         "properties": {
             "to": {"type": "array", "items": {"type": "string"}, "description": "Recipient email addresses."},
+            "reply_to_message_id": {"type": "string", "description": "Stored message UUID for reply-all. Omit to, cc, bcc, and in_reply_to_message_id."},
             "subject": {"type": "string", "description": "Email subject."},
             "body_text": {"type": "string", "description": "Plain text body."},
             "body_html": {"type": "string", "description": "Optional HTML body."},
@@ -1598,7 +1609,7 @@ SEND_EMAIL_SCHEMA = {
             "bcc": {"type": "array", "items": {"type": "string"}},
             "in_reply_to_message_id": {"type": "string", "description": "RFC 5322 Message-ID for threading replies."},
         },
-        "required": ["to", "subject"],
+        "required": [],
     },
 }
 

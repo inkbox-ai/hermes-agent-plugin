@@ -31,11 +31,12 @@ jobs:
 
       - name: Install test deps + real Hermes host (main)
         run: |
-          uv sync --extra test --python 3.12
+          uv venv --python 3.12
+          uv pip install --no-sources -r pyproject.toml --extra test
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
       - name: Complete offline suite vs real Hermes main
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
 
       - name: Verify Hermes plugin security scan
         working-directory: ${{ runner.temp }}
