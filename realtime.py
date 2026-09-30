@@ -51,9 +51,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 try:
-    from .audio import CallAudio
+    from .audio import CallAudio, check_audio_support
 except ImportError:  # Standalone plugin loading.
-    from audio import CallAudio
+    from audio import CallAudio, check_audio_support
 
 try:
     import aiohttp
@@ -878,6 +878,11 @@ async def open_inkbox_realtime_bridge(
         raise RealtimeBridgeConnectError("aiohttp not available")
     if not config.has_credential:
         raise RealtimeBridgeConnectError("no OpenAI API key configured")
+
+    try:
+        check_audio_support()
+    except Exception as exc:
+        raise RealtimeBridgeConnectError(exc) from exc
 
     session = aiohttp.ClientSession()
     openai_ws = None

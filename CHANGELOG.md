@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.18
+
+### Fixed
+
+- Realtime calls validate local audio conversion before accepting raw-media mode, allowing the configured STT/TTS fallback when audio dependencies are missing or unusable.
+
 ## 0.2.17
 
 ### Added

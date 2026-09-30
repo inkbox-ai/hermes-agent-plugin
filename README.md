@@ -128,7 +128,7 @@ hermes gateway restart
 
 ## Companion mode
 
-Version 0.2.17 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
+Version 0.2.18 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
 Companion mode for an identity and select its sponsor. Installation leaves it off.
 Use an identity-scoped API key and signed Inkbox webhooks.
 
@@ -349,6 +349,8 @@ Realtime calls receive the agent's Inkbox handle, mailbox, phone number, caller 
 When Realtime is enabled, the plugin preflights the OpenAI Realtime websocket before accepting the Inkbox call in raw-media mode. If that preflight fails, calls fall back to Inkbox STT/TTS by default. Set `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false` to fail the call instead.
 
 Realtime calls negotiate HD mono PCM16 audio at 16 kHz. The bridge resamples to and from the realtime session’s 24 kHz PCM format, with legacy 8 kHz call compatibility.
+
+Preflight also checks local audio conversion in both directions. Missing or unusable audio dependencies trigger the configured fallback before raw-media mode is accepted. Python 3.13+ requires `audioop-lts`, included in the plugin's dependencies.
 
 ### Two calling lines
 
