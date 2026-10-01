@@ -128,7 +128,7 @@ hermes gateway restart
 
 ## Companion mode
 
-Version 0.2.17 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
+Version 0.2.18 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
 Companion mode for an identity and select its sponsor. Installation leaves it off.
 Use an identity-scoped API key and signed Inkbox webhooks.
 

@@ -220,3 +220,13 @@ def test_live_readiness_follows_native_runtime_lifecycle(tmp_path, monkeypatch):
     path.write_text(json.dumps(ready))
     status.write_runtime_status(platform="inkbox", platform_state="disconnected")
     assert not gateway_ready(pid)
+
+
+def test_host_exposes_session_work_signals():
+    async_delegation = importlib.import_module("tools.async_delegation")
+    params = inspect.signature(async_delegation.has_live_for_session).parameters
+    assert {"session_key", "parent_session_id"} <= set(params)
+    assert async_delegation.has_live_for_session(session_key="missing", parent_session_id="missing") is False
+
+    base = importlib.import_module("gateway.platforms.base")
+    assert "self._active_sessions" in inspect.getsource(base.BasePlatformAdapter.__init__)
