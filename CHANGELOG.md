@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.18
+
+### Fixed
+
+- A2A progress updates continue after a turn hands work to background subagents, and stop once that work and any follow-up turn finish or the task settles. Callers no longer see a long silence on tasks that are still running.
+
 ## 0.2.17
 
 ### Added

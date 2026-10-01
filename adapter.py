@@ -2279,6 +2279,9 @@ class InkboxAdapter(BasePlatformAdapter):
         self._a2a_suppress_next_reply_by_chat: set[str] = set()
         self._a2a_progress_tasks: Dict[str, asyncio.Task] = {}
         self._a2a_progress_stop_events: Dict[str, asyncio.Event] = {}
+        # task_id -> chat_id for progress that outlives its turn while
+        # delegated work keeps running.
+        self._a2a_progress_detached: Dict[str, str] = {}
         self._a2a_admission_tasks: set[asyncio.Task[Any]] = set()
         self._a2a_canceled_messages: Dict[str, Tuple[str, set[str]]] = {}
         self._a2a_closing = False
@@ -4738,7 +4741,26 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         return ""
 
+    def _a2a_session_has_background_work(self, chat_id: str) -> bool:
+        """Whether the chat's session still owns live delegated work."""
+        try:
+            from tools.async_delegation import has_live_for_session
+        except ImportError:
+            return False
+        return has_live_for_session(
+            session_key=self._a2a_session_key_by_chat.get(chat_id, ""),
+            parent_session_id=self._a2a_session_by_chat.get(chat_id, ""),
+        )
+
+    def _a2a_session_is_working(self, chat_id: str) -> bool:
+        """Whether a turn or delegated work is still running for the chat."""
+        session_key = self._a2a_session_key_by_chat.get(chat_id, "")
+        if session_key and session_key in getattr(self, "_active_sessions", {}):
+            return True
+        return self._a2a_session_has_background_work(chat_id)
+
     async def _stop_a2a_progress_updates(self, task_id: str) -> None:
+        self._a2a_progress_detached.pop(task_id, None)
         task = self._a2a_progress_tasks.get(task_id)
         stop_event = self._a2a_progress_stop_events.get(task_id)
         if stop_event is not None:
@@ -4822,6 +4844,11 @@ class InkboxAdapter(BasePlatformAdapter):
                         )
                 if stop_event.is_set():
                     return
+                detached_chat = self._a2a_progress_detached.get(task_id)
+                if detached_chat is not None and not self._a2a_session_is_working(
+                    detached_chat
+                ):
+                    break
                 try:
                     keep_running = await self._emit_a2a_progress_update(
                         task_id=task_id,
@@ -4853,6 +4880,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 self._a2a_progress_tasks.pop(task_id, None)
             if self._a2a_progress_stop_events.get(task_id) is stop_event:
                 self._a2a_progress_stop_events.pop(task_id, None)
+                self._a2a_progress_detached.pop(task_id, None)
             stop_a2a_progress(task_id)
 
     async def _emit_a2a_progress_update(
@@ -5491,11 +5519,20 @@ class InkboxAdapter(BasePlatformAdapter):
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         task_id = str(data.get("task_id") or "")
-        if task_id:
-            await self._stop_a2a_progress_updates(task_id)
         outcome_value = str(
             getattr(outcome, "value", outcome)
         ).strip().lower()
+        if task_id:
+            if (
+                outcome_value == "success"
+                and task_id in self._a2a_progress_tasks
+                and self._a2a_session_has_background_work(chat_id)
+            ):
+                # The turn handed work to background subagents; keep the
+                # caller informed until that work finishes or the task settles.
+                self._a2a_progress_detached[task_id] = chat_id
+            else:
+                await self._stop_a2a_progress_updates(task_id)
         self._a2a_default_reply_allowed[chat_id] = outcome_value == "success"
         if outcome_value != "success":
             message_id = str(data.get("message_id") or event.message_id or "")

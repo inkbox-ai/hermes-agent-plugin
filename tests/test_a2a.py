@@ -53,6 +53,7 @@ def _adapter(tmp_path):
     adapter._a2a_suppress_next_reply_by_chat = set()
     adapter._a2a_progress_tasks = {}
     adapter._a2a_progress_stop_events = {}
+    adapter._a2a_progress_detached = {}
     adapter._a2a_admission_tasks = set()
     adapter._a2a_canceled_messages = {}
     adapter._a2a_closing = False
@@ -1302,6 +1303,95 @@ def test_a2a_processing_completion_stops_progress_timer(tmp_path):
         assert adapter._a2a_progress_tasks == {}
 
     asyncio.run(scenario())
+
+
+def test_a2a_progress_continues_while_background_work_runs(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._a2a_session_has_background_work = lambda _chat_id: True
+
+    async def scenario():
+        await adapter._on_a2a_event(_event())
+        event = adapter._enqueued[0]
+        await adapter.on_processing_start(event)
+        await adapter.on_processing_complete(
+            event,
+            types.SimpleNamespace(value="success"),
+        )
+        assert "task-1" in adapter._a2a_progress_tasks
+        assert adapter._a2a_progress_detached == {"task-1": str(event.source.chat_id)}
+        await adapter._stop_a2a_progress_updates("task-1")
+        assert adapter._a2a_progress_tasks == {}
+        assert adapter._a2a_progress_detached == {}
+
+    asyncio.run(scenario())
+
+
+def test_a2a_failed_turn_stops_progress_despite_background_work(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._a2a_session_has_background_work = lambda _chat_id: True
+
+    async def scenario():
+        await adapter._on_a2a_event(_event())
+        event = adapter._enqueued[0]
+        await adapter.on_processing_start(event)
+        await adapter.on_processing_complete(
+            event,
+            types.SimpleNamespace(value="failure"),
+        )
+        assert adapter._a2a_progress_tasks == {}
+        assert adapter._a2a_progress_detached == {}
+
+    asyncio.run(scenario())
+
+
+def test_a2a_detached_progress_stops_when_session_goes_idle(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._a2a_progress_interval_seconds = 60
+    adapter._write_a2a_registry(
+        "task-1:message-1",
+        _event()["data"],
+        "running",
+        progress_started=True,
+    )
+    adapter._a2a_progress_detached["task-1"] = "a2a:identity-1:context-1"
+    working = iter([True, False])
+    adapter._a2a_session_is_working = lambda _chat_id: next(working)
+    emissions = []
+
+    async def fake_sleep(_delay):
+        return None
+
+    async def emit(**kwargs):
+        emissions.append(kwargs)
+        return True
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", fake_sleep)
+    adapter._emit_a2a_progress_update = emit
+
+    asyncio.run(adapter._run_a2a_progress_updates(
+        task_id="task-1",
+        message_id="message-1",
+    ))
+
+    assert emissions == [{"task_id": "task-1", "message_id": "message-1"}]
+
+
+def test_a2a_session_is_working_reads_active_turn_and_delegations(tmp_path):
+    adapter = _adapter(tmp_path)
+    chat_id = "a2a:identity-1:context-1"
+    adapter._a2a_session_key_by_chat[chat_id] = "session-key"
+    adapter._active_sessions = {}
+    adapter._a2a_session_has_background_work = lambda _chat_id: False
+    assert not adapter._a2a_session_is_working(chat_id)
+
+    adapter._active_sessions = {"session-key": asyncio.Event()}
+    assert adapter._a2a_session_is_working(chat_id)
+
+    adapter._active_sessions = {}
+    adapter._a2a_session_has_background_work = lambda _chat_id: True
+    assert adapter._a2a_session_is_working(chat_id)
 
 
 def test_a2a_cancel_waits_for_inflight_reply_thread(tmp_path):
