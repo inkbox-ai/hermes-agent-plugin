@@ -65,7 +65,11 @@ class NativeTurns(CompanionReceiver):
             for turn in row["turns"]:
                 # A new process holds the exclusive owner lock. Do not replay
                 # an ambiguous model/tool/send attempt, but retain its evidence.
-                if turn["state"] in {"running", "sending", "control_submitting"}:
+                uncertain_effect = (turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                    or any(item.get("state") in {"sending", "uncertain"}
+                           for item in turn.get("media_deliveries", {}).values()))
+                if (turn["state"] in {"running", "sending", "control_submitting"}
+                        or (turn["state"] in {"pending", "answer_ready"} and uncertain_effect)):
                     turn["state"] = "uncertain"
                 turn.pop("session_id", None)
                 if turn["state"] == "cancelled":

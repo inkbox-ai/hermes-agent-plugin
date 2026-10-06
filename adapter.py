@@ -1546,6 +1546,11 @@ def _is_hermes_admin_notice(
             tag = str(metadata.get(key) or "").lower().strip()
             if tag and tag in _ADMIN_NOTICE_METADATA_TYPES:
                 return True
+        # Native human-decision prompts use the same warning glyph as status
+        # chatter. Their trusted boolean marker must preserve the prompt; this
+        # does not bypass any routing, sender authorization or approval gate.
+        if metadata.get("is_approval_prompt") is True:
+            return False
     head = (content or "").lstrip().lstrip(chr(0xFEFF))
     if head.startswith(_ADMIN_NOTICE_PREFIXES):
         return True
