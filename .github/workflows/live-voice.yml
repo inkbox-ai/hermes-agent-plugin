@@ -78,7 +78,7 @@ jobs:
 
       - name: Install Hermes (non-interactive)
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser --no-skills
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin into the gateway

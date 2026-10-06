@@ -73,7 +73,7 @@ jobs:
           printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
           chmod +x "$RUNNER_TEMP/hermes-ci-bin/rg" "$RUNNER_TEMP/hermes-ci-bin/ffmpeg"
           export PATH="$RUNNER_TEMP/hermes-ci-bin:$PATH"
-          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser --no-skills
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin and protocol driver
