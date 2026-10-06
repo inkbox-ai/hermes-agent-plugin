@@ -140,13 +140,14 @@ def dispatch(name, args, *, session_id="", **_kwargs):
 
 
 def register(ctx, configured):
-    cfg = read_runtime_config()
-    specs = list(VAULT_TOOLS)
-    if cfg.imessage_threaded_replies:
-        specs += THREAD_TOOLS
-    if cfg.slack_enabled:
-        specs += [{"name": item["name"], "description": item["description"], "parameters": item["inputSchema"]} for item in SLACK_TOOLS]
+    specs = [*VAULT_TOOLS, *THREAD_TOOLS,
+             *[{"name": item["name"], "description": item["description"], "parameters": item["inputSchema"]} for item in SLACK_TOOLS]]
+    thread_names = {tool["name"] for tool in THREAD_TOOLS}
     for spec in specs:
         def handler(args, _name=spec["name"], **kwargs):
             return dispatch(_name, args, **kwargs)
-        ctx.register_tool(spec["name"], "inkbox", spec, handler, check_fn=configured)
+        def available(_name=spec["name"]):
+            cfg = read_runtime_config()
+            return bool(configured() and (not _name.startswith("inkbox_slack_") or cfg.slack_enabled)
+                        and (_name not in thread_names or cfg.imessage_threaded_replies))
+        ctx.register_tool(spec["name"], "inkbox", spec, handler, check_fn=available)

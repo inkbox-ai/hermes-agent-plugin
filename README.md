@@ -608,7 +608,7 @@ These features use the existing Hermes platform, session store, authorization, a
 
 | Setting | Default | Behavior |
 |---|---|---|
-| `INKBOX_SLACK_ENABLED` / platform `slack_enabled` | `false` | Register Slack tools and accept signed Slack events. Explicit platform config takes precedence over the environment. |
+| `INKBOX_SLACK_ENABLED` / platform `slack_enabled` | `false` | Expose Slack tools and accept signed Slack events. Explicit platform config takes precedence over the environment, including YAML loaded after tool registration. |
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
@@ -620,7 +620,9 @@ Run `hermes inkbox setup` and choose Slack. The wizard can reuse saved workspace
 
 Slack tools: `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Explicit sends require an idempotency key and accept at most **12,000 characters**. Preserve opaque cursors and timestamps. For an unknown send result, inspect its action instead of sending again.
 
-Slack ordinary DMs reply inline; channel mentions normally reply in their native thread. Companion keeps channel-wide authorized history within its connection/channel/activation, but every reply retains the source's exact destination: top-level stays top-level, native subthread stays in that subthread. Safe mode and mention mode remain independent gates. Unmentioned context does not start work or activity indicators. Approval answers and Stop must match the original actor and exact thread.
+Slack ordinary DMs reply inline; channel mentions normally reply in their native thread. Unaddressed messages cannot open an unwatched channel thread. Follow-ups in an already watched thread follow the configured auto/mention policy; quiet context in mention mode starts no work or activity indicators. Companion keeps channel-wide authorized history within its connection/channel/activation, but every reply retains the source's exact destination: top-level stays top-level, native subthread stays in that subthread. Safe mode and mention mode remain independent gates. Approval answers and Stop must match the original actor and exact thread.
+
+An optional local Slack allowlist can name a verified actor as `U…`/`W…` or `T…:U…`/`T…:W…`. Ordinary routes retain the installation-qualified author; Companion can also match the verified home-workspace author from its authorized source. An unrelated workspace prefix is not an alias. Native authorization is rechecked before replies, without replacing the original conversation author or route.
 
 Inline replies show source 👀 while working, remove it on completion/cancel, and show ❌ on failure. Native-thread replies use working/awaiting-input/ready status only, with **no eyes or reaction fallback**. Indicators are aggregated and restart-cleaned. An API success is not proof that a particular Slack client renders the indicator.
 
@@ -630,7 +632,9 @@ With the opt-in enabled, an automatic reply targets its original source message 
 
 Before a targeted upload/send, the plugin re-reads the admitted source and a one-message native thread page under the configured identity, verifying the original conversation and backend support. A failed preflight never sends an untargeted fallback or records an unknown send. Transient read failures retain the completed answer for safe delivery recovery. `hermes inkbox doctor` reports SDK support separately from read-only backend verification (no visible source means unverified), plus content-free native/Companion queue counts; diagnosis never sends a probe message or unlocks the Vault.
 
-One conversation still owns one Hermes session and serial queue. Compatible short text bursts coalesce with the **first source target**, bounded to eight sources and 4,000 characters within two seconds; actor, ancestry, media, and reaction boundaries split work. Follow-ups persist before acknowledgment and do not interrupt active work. Prompts, automatic attachments, and explicit same-conversation tool sends retain the originating route. Outside an inbound native turn, a deliberate proactive send remains plain and uses its explicit recipient. During an inbound native turn, changing the destination or supplying reply/fallback overrides is rejected before upload/send.
+One conversation still owns one Hermes session and serial queue. Compatible short text bursts coalesce with the **first source target**, bounded to eight sources and 4,000 characters within two seconds; actor, ancestry, media, and reaction boundaries split work. Follow-ups persist before acknowledgment and do not interrupt active work. Prompts, automatic attachments, and explicit same-conversation tool sends retain the originating route. A deliberate send to another conversation or explicit recipient remains independent and plain, including during an inbound turn; it neither inherits the current reply target nor suppresses the current automatic answer. Model-supplied reply/fallback overrides and stale-worker sends remain rejected before upload/send.
+
+Native delivery-failure callbacks are durable status, not new instructions. Callback-first and proactive failures survive restart; the next real input in that exact conversation can receive at most eight previously unseen failure notices. Callbacks never wake the model, replay a send, or change the original route, and nullable outbound ancestry stays unknown. Successful delivery callbacks still clear the baseline failure bookkeeping.
 
 ### Vault and TOTP
 

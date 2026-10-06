@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
 
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
+
+logger = logging.getLogger(__name__)
 
 try:
     from .companion import CompanionReceiver, digest
@@ -31,17 +34,26 @@ class NativeTurns(CompanionReceiver):
     max_burst_seconds = 2.0
     max_burst_sources = 8
     max_burst_characters = 4000
+    max_delivery_notices = 8
 
     def __init__(self, adapter, root):
         super().__init__(adapter, root)
         self.changed: dict[str, asyncio.Event] = {}
         self.events: dict[str, MessageEvent] = {}
         self.monitors: dict[str, asyncio.Task] = {}
+        self.delivery_status: dict[str, dict] = {}
+        self.unconfirmed_controls: dict[str, tuple[str, str]] = {}
 
     async def start(self):
         from .host_fencing import observe_native_workers
         observe_native_workers(self._host_owner())
         self._acquire()
+        status_path = self.root / "delivery-status"
+        if status_path.exists():
+            saved = json.loads(status_path.read_text())
+            if saved.get("version") != 1 or not isinstance(saved.get("messages"), dict):
+                raise ValueError("Invalid native delivery status checkpoint")
+            self.delivery_status = saved["messages"]
         for path in self.root.glob("*.json"):
             row = json.loads(path.read_text())
             if row.get("key") != path.stem:
@@ -56,6 +68,8 @@ class NativeTurns(CompanionReceiver):
                 if turn["state"] in {"running", "sending", "control_submitting"}:
                     turn["state"] = "uncertain"
                 turn.pop("session_id", None)
+                if turn["state"] == "cancelled":
+                    self._release_context(row, turn)
                 if self._settled_proof(turn):
                     turn["fenced"] = True
                 if turn["state"] == "uncertain" and not turn.get("fenced"):
@@ -64,11 +78,12 @@ class NativeTurns(CompanionReceiver):
             if row.get("blocked") and not any(turn["state"] in {"running", "sending", "uncertain"} and not turn.get("fenced") for turn in row["turns"]):
                 row.pop("blocked", None)
             self._save(row)
+            self._restore_delivery_records(row)
             self._kick(row)
 
     def _event_from_turn(self, row, turn):
         value = turn["event"]
-        source = self.adapter.build_source(**value["source"])
+        source = self.adapter.build_source(**{**value["source"], "message_id": turn["id"]})
         event = MessageEvent(text=value["text"], message_type=MessageType.TEXT, source=source,
                              message_id=turn["id"], metadata=copy.deepcopy(value["metadata"]),
                              raw_message={"_inkbox_native_turn": turn["id"], "_inkbox_native_key": row["key"]},
@@ -81,7 +96,7 @@ class NativeTurns(CompanionReceiver):
         source = event.source
         return {"text": event.text, "metadata": copy.deepcopy(event.metadata or {}),
                 "source": {key: getattr(source, key) for key in (
-                    "chat_id", "chat_name", "chat_type", "thread_id", "user_id", "user_id_alt", "user_name",
+                    "chat_id", "chat_name", "chat_type", "thread_id", "user_id", "user_id_alt", "user_name", "message_id",
                 ) if hasattr(source, key)},
                 "channel_prompt": getattr(event, "channel_prompt", None), "auto_skill": getattr(event, "auto_skill", None),
                 "media_urls": getattr(event, "media_urls", None), "media_types": getattr(event, "media_types", None)}
@@ -99,29 +114,48 @@ class NativeTurns(CompanionReceiver):
         key = digest(json.dumps([str(event.source.chat_id), route["mode"], route.get("conversation_id")]))
         row = self.rows.setdefault(key, {"version": 1, "key": key, "state": "ordinary", "turns": [], "chat_id": str(event.source.chat_id)})
         source_id = str(event.message_id)
-        if source_id in row.get("controls", {}) or any(source_id in turn.get("source_ids", [turn["id"]]) for turn in row["turns"]):
+        if self.acknowledge_control(source_id):
             return
+        if self.acknowledge_source(source_id):
+            return
+        control_fingerprint = digest(json.dumps({"source": self._serialize(event)["source"], "route": route}, sort_keys=True))
+        control_owner = (self.active.get(row["chat_id"]) or {}).get("id", source_id)
+        if source_id in self.unconfirmed_controls and self.unconfirmed_controls[source_id] != (control_fingerprint, control_owner):
+            raise RuntimeError("Unconfirmed control receipt changed; no native control attempted")
         text = route.get("raw_text", event.text).strip()
         command = conversation_control(text) or text.split(maxsplit=1)[:1] in [["/approve"], ["/deny"]]
-        if command:
-            row.setdefault("controls", {})[source_id] = "submitting"
-            self._save(row)
         if await self.control(event, row):
             row.setdefault("controls", {})[source_id] = "consumed"
             self._save(row)
             return
+        if source_id in self.unconfirmed_controls and not command:
+            # A retried prompt answer cannot become ordinary work if the
+            # original native prompt has meanwhile been withdrawn.
+            row.setdefault("controls", {})[source_id] = "not_owner"
+            self.unconfirmed_controls.pop(source_id, None)
+            self._save(row)
+            return
         if command:
             if self.active.get(row["chat_id"]):
-                row["controls"][source_id] = "not_owner"
+                row.setdefault("controls", {})[source_id] = "not_owner"
+                self.unconfirmed_controls.pop(source_id, None)
             else:
+                control_turn = next((turn for turn in row["turns"] if turn["id"] == source_id), None)
+                if control_turn is None:
+                    control_turn = {"id": source_id, "state": "control_submitting", "event": self._serialize(event),
+                                    "source_ids": [source_id], "route": copy.deepcopy(route)}
+                    row["turns"].append(control_turn)
+                self._checkpoint_control(event, row, source_id, control_turn, source_id)
                 if text.casefold() in {"/stop", "/cancel", "/clear", "/new"}:
                     for pending in row["turns"]:
                         if pending["state"] == "pending":
                             pending["state"] = "cancelled"
-                control_turn = {"id": source_id, "state": "control_submitting", "event": self._serialize(event),
-                                "source_ids": [source_id], "route": copy.deepcopy(route)}
-                row["turns"].append(control_turn)
-                self._save(row)
+                    self._checkpoint_control(event, row, source_id, control_turn, source_id)
+                    for pending in row["turns"]:
+                        if pending["state"] == "cancelled":
+                            self._release_context(row, pending)
+                # The next operation crosses the actual native effect boundary.
+                self.unconfirmed_controls.pop(source_id, None)
                 await self._forward_control(event, text, control_turn)
                 control_turn["state"] = "done"
                 row["controls"][source_id] = "consumed"
@@ -130,11 +164,65 @@ class NativeTurns(CompanionReceiver):
         turn = {"id": source_id, "state": "pending", "event": self._serialize(event), "source_ids": [source_id],
                 "first_at": time.time(), "last_at": time.time(), "route": copy.deepcopy(route)}
         row["turns"].append(turn)
-        self._save(row)
+        try:
+            self._save(row)
+        except BaseException:
+            # A failure before publication can be retried as a fresh receipt.
+            # After atomic replacement, retain the row and its context owner;
+            # a duplicate must retry the durable checkpoint before ACK/kick.
+            try:
+                saved = json.loads((self.root / (key + ".json")).read_text())
+                published = any(item == turn for item in saved.get("turns", []))
+            except FileNotFoundError:
+                published = False
+            except (OSError, ValueError):
+                published = True  # Unreadable storage is not proof of absence.
+            if not published:
+                row["turns"].remove(turn)
+                self._discard_empty_row(row)
+            raise
         self.changed.setdefault(key, asyncio.Event()).set()
         if row.get("blocked") and row["chat_id"] not in self.active:
             await self._recover_fenced_native(row)
         self._kick(row)
+        return True
+
+    def _discard_empty_row(self, row):
+        if not row["turns"] and not row.get("controls") and self.rows.get(row["key"]) is row:
+            self.rows.pop(row["key"])
+
+    def _checkpoint_control(self, event, row, source_id, control_turn=None, native_owner=None):
+        """Retain retry authority only until this process attempts a native effect."""
+        fingerprint = digest(json.dumps({"source": self._serialize(event)["source"],
+            "route": event.metadata["inkbox_reply_route"]}, sort_keys=True))
+        proof = (fingerprint, native_owner or source_id)
+        previous = self.unconfirmed_controls.get(source_id)
+        if previous is not None and previous != proof:
+            raise RuntimeError("Unconfirmed control receipt changed; no native control attempted")
+        self.unconfirmed_controls[source_id] = proof
+        row.setdefault("controls", {})[source_id] = "submitting"
+        try:
+            self._save(row)
+        except BaseException:
+            try:
+                saved = json.loads((self.root / (row["key"] + ".json")).read_text())
+                published = saved.get("controls", {}).get(source_id) == "submitting"
+                if control_turn is not None:
+                    published = published and any(item == control_turn for item in saved.get("turns", []))
+            except FileNotFoundError:
+                published = False
+            except (OSError, ValueError):
+                published = True  # Unreadable storage is not proof of absence.
+            if not published:
+                row["controls"].pop(source_id, None)
+                if control_turn is not None:
+                    row["turns"].remove(control_turn)
+                self.unconfirmed_controls.pop(source_id, None)
+                self._discard_empty_row(row)
+            raise
+
+    def _release_context(self, row, turn):
+        self.adapter._conversation_state().release(row["chat_id"], turn["id"])
 
     def _kick(self, row):
         key = row["key"]
@@ -216,6 +304,7 @@ class NativeTurns(CompanionReceiver):
                     return
                 continue
             await self._batch(row, turn)
+            self._prepare_delivery_context(row, turn)
             event = self._event_from_turn(row, turn)
             await self._wait_for_idle(event)
             self._require_owner()
@@ -264,6 +353,8 @@ class NativeTurns(CompanionReceiver):
                     row["blocked"] = True
                 if self._settled_proof(turn):
                     turn["fenced"] = True
+                if turn["state"] not in {"done", "pending"}:
+                    self._release_context(row, turn)
                 if turn["state"] == "uncertain" and not turn.get("fenced"):
                     row["blocked"] = True
                     row.setdefault("error", "Original native outcome is uncertain; verify worker ownership before continuing")
@@ -316,8 +407,10 @@ class NativeTurns(CompanionReceiver):
                 turn["session_id"] = str(session.session_id)
                 if turn["route"]["mode"] == "imessage":
                     def record(content, message):
-                        turn.setdefault("explicit_sends", []).append({"content": content, "message_id": str(message.id)})
+                        turn.setdefault("explicit_sends", []).append({"content": content, "message_id": str(message.id),
+                            "ancestry": self._outbound_ancestry(message)})
                         self._save(row)
+                        self._record_outbound(row, turn, message)
                     def tool_state(state):
                         turn["explicit_delivery_state"] = state
                         self._save(row)
@@ -355,6 +448,7 @@ class NativeTurns(CompanionReceiver):
                 turn["answer"] = response
                 turn["state"] = "answer_ready"
                 self._save(row)
+                self._complete_delivery_context(turn)
 
     def capture_rendered(self, event, extracted):
         owned = self._owned(event)
@@ -477,8 +571,9 @@ class NativeTurns(CompanionReceiver):
         task.add_done_callback(self.outbound.discard)
         try:
             result = await asyncio.shield(task)
-            delivery.update(state="sent", message_id=str(result.id))
+            delivery.update(state="sent", message_id=str(result.id), ancestry=self._outbound_ancestry(result))
             self._save(row)
+            self._record_outbound(row, turn, result)
             return SendResult(success=True, message_id=str(result.id))
         except ReplyPreflightError as exc:
             turn["media_deliveries"].pop(fingerprint, None)
@@ -552,11 +647,16 @@ class NativeTurns(CompanionReceiver):
             task.add_done_callback(self.outbound.discard)
             result = await asyncio.shield(task)
             message_id = str(result.id)
-            turn.setdefault("deliveries", []).append({"content": content, "message_id": message_id, "final": final})
+            accepted = {"content": content, "message_id": message_id, "final": final}
+            if route["mode"] == "imessage":
+                accepted["ancestry"] = self._outbound_ancestry(result)
+            turn.setdefault("deliveries", []).append(accepted)
             if final:
-                turn["sent"] = {"content": content, "message_id": message_id}
+                turn["sent"] = {key: value for key, value in accepted.items() if key != "final"}
             turn["state"] = "done" if final else previous_state
             self._save(row)
+            if route["mode"] == "imessage":
+                self._record_outbound(row, turn, result)
             return SendResult(success=True, message_id=message_id)
         except ReplyPreflightError as exc:
             if turn["state"] == "sending":
@@ -600,10 +700,11 @@ class NativeTurns(CompanionReceiver):
         control_id = str(incoming.get("message_id") or event.message_id)
         if row.get("controls", {}).get(control_id) in {"consumed", "uncertain"}:
             return True
-        row.setdefault("controls", {})[control_id] = "submitting"
-        self._save(row)
+        self._checkpoint_control(event, row, control_id, native_owner=active["id"])
         stopping = text.casefold() in {"/stop", "/cancel", "/clear", "/new"}
         fenced = False
+        # No await occurs between durable admission and this effect boundary.
+        self.unconfirmed_controls.pop(control_id, None)
         if stopping:
             from .host_fencing import fence_turn
             fenced = await fence_turn(self.adapter, event.source, active["id"])
@@ -624,6 +725,7 @@ class NativeTurns(CompanionReceiver):
             for turn in row["turns"]:
                 if turn["state"] == "pending":
                     turn["state"] = "cancelled"
+                    self._release_context(row, turn)
             self._save(row)
         return True
 
@@ -638,17 +740,158 @@ class NativeTurns(CompanionReceiver):
         await task
 
     def record_delivery_failure(self, envelope, rows=None):
+        """Retain outbound status without admitting a model turn or a resend."""
         self._require_owner()
-        item = (envelope.get("data") or {}).get("message") or {}
-        message_id = str(item.get("id") or "")
-        conversation = str(item.get("conversation_id") or "")
-        if not message_id or not conversation:
+        data = envelope.get("data") or {}
+        item = data.get("message") or {}
+        kind = envelope.get("event_type")
+        identity = data.get("identity_id") or item.get("agent_identity_id") or item.get("identity_id")
+        message_id = self._delivery_identifier(item.get("id"))
+        conversation = self._delivery_identifier(item.get("conversation_id") or item.get("conversationId"))
+        if (kind not in {"imessage.delivery_failed", "imessage.delivered"} or not message_id
+                or str(item.get("direction") or "").lower() == "inbound"
+                or identity is not None and str(identity) != str(self.adapter._identity_id)):
+            return False
+        with self._checkpoint_lock:
+            prior = self.delivery_status.get(message_id, {})
+            if conversation and prior.get("conversation_id") not in (None, conversation):
+                return False
+            if kind == "imessage.delivered":
+                return True  # Baseline success bookkeeping still owns these callbacks.
+            if prior.get("failed") and (not conversation or prior.get("conversation_id")):
+                return True
+            self.delivery_status[message_id] = {**prior, "failed": True,
+                "conversation_id": prior.get("conversation_id") or conversation}
+            try:
+                self._save_delivery_status()
+            except BaseException:
+                # A retried webhook must not mistake an in-memory mutation
+                # for a durable receipt after the first write failed.
+                if prior:
+                    self.delivery_status[message_id] = prior
+                else:
+                    self.delivery_status.pop(message_id, None)
+                raise
+        return True
+
+    @staticmethod
+    def _delivery_identifier(value):
+        return value if isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(char) < 32 for char in value) else None
+
+    def _save_delivery_status(self):
+        self._save_checkpoint(self.root / "delivery-status", {"version": 1, "messages": self.delivery_status})
+
+    def _record_outbound(self, row, turn, message):
+        message_id = self._delivery_identifier(str(getattr(message, "id", "") or ""))
+        if not message_id:
             return
-        for row in self.rows.values():
-            if any(turn["route"]["mode"] == "imessage" and turn["route"].get("conversation_id") == conversation for turn in row["turns"]):
-                row.setdefault("delivery_status", {})[message_id] = {"event_type": envelope.get("event_type"), "status": str(item.get("status") or ""), "conversation_id": conversation}
-                self._save(row)
+        with self._checkpoint_lock:
+            prior = self.delivery_status.get(message_id, {})
+            route = turn["route"]
+            if prior.get("conversation_id") not in (None, route["conversation_id"]):
+                prior = {}  # A callback for another conversation is not this send's outcome.
+            self.delivery_status[message_id] = {**prior, "conversation_id": route["conversation_id"],
+                "chat_id": row["chat_id"], "source_id": turn["id"],
+                "reply_target": route.get("imessage_reply_target"),
+                "ancestry": self._outbound_ancestry(message)}
+            self._save_auxiliary_delivery_status()
+
+    @staticmethod
+    def _outbound_ancestry(message):
+        from .imessage_state import source_metadata
+        return source_metadata(message)["imessage_sources"][0]
+
+    def _save_auxiliary_delivery_status(self):
+        # Accepted sends and completed answers are already in the authoritative
+        # turn checkpoint. A notice-journal failure cannot turn them into an
+        # unknown send/model outcome; startup reconstructs from that proof.
+        try:
+            self._save_delivery_status()
+        except Exception as exc:
+            logger.warning("Native delivery notice checkpoint deferred (%s)", type(exc).__name__)
+
+    def _restore_delivery_records(self, row):
+        from types import SimpleNamespace
+        for turn in row["turns"]:
+            if turn["route"]["mode"] != "imessage":
+                continue
+            if turn.get("answer") is not None:
+                # The answer checkpoint is the consumption proof if a crash
+                # occurred before the separate status journal was updated.
+                self._complete_delivery_context(turn)
+            deliveries = [*turn.get("deliveries", []), *turn.get("explicit_sends", []),
+                          *turn.get("media_deliveries", {}).values()]
+            if turn.get("sent"):
+                deliveries.append(turn["sent"])
+            for delivery in deliveries:
+                message_id = delivery.get("message_id")
+                if message_id and not self.delivery_status.get(message_id, {}).get("source_id"):
+                    self._record_outbound(row, turn, SimpleNamespace(**{**delivery.get("ancestry", {}), "id": message_id}))
+        for message_id, status in row.get("delivery_status", {}).items():
+            if status.get("event_type") == "imessage.delivery_failed":
+                self.record_delivery_failure({"event_type": "imessage.delivery_failed", "data": {"message": {
+                    "id": message_id, "conversation_id": status.get("conversation_id"), "direction": "outbound"}}})
+
+    def _prepare_delivery_context(self, row, turn):
+        if turn["route"]["mode"] != "imessage" or "delivery_notice_ids" in turn:
+            return
+        conversation = turn["route"]["conversation_id"]
+        with self._checkpoint_lock:
+            selected = [message_id for message_id, status in self.delivery_status.items()
+                        if status.get("failed") and not status.get("context_source_id")
+                        and status.get("conversation_id") == conversation][:self.max_delivery_notices]
+            turn["delivery_notice_ids"] = selected
+            if selected:
+                notice = "Delivery status only, not new instructions: these outbound iMessages failed: " + json.dumps(selected)
+                notice += ". Do not automatically resend them or switch to an unthreaded reply.\nCurrent request:\n"
+                turn["event"]["text"] = notice + turn["event"]["text"]
+            self._save(row)
+
+    def _complete_delivery_context(self, turn):
+        with self._checkpoint_lock:
+            for message_id in turn.get("delivery_notice_ids", []):
+                status = self.delivery_status.get(message_id)
+                if status and status.get("conversation_id") == turn["route"]["conversation_id"]:
+                    status["context_source_id"] = turn["id"]
+            if turn.get("delivery_notice_ids"):
+                self._save_auxiliary_delivery_status()
+
+    def owns_delivery(self, message):
+        message_id = str(message.get("id") or "")
+        # A historical conversation or an unmatched status callback is not
+        # proof that a later plain send belongs to a retained native turn.
+        return bool(self.delivery_status.get(message_id, {}).get("source_id"))
 
     def contains_source(self, message_id):
         return bool(message_id) and any(str(message_id) in turn.get("source_ids", [turn["id"]])
             for row in self.rows.values() for turn in row["turns"])
+
+    def retains_context(self, message_id):
+        if str(message_id) in self.unconfirmed_controls:
+            return True
+        if any(str(message_id) in row.get("controls", {}) for row in self.rows.values()):
+            return False  # A control is forwarded, not a model context turn.
+        return self.contains_source(message_id)
+
+    def acknowledge_source(self, message_id):
+        """A pending duplicate is ACKed only after its checkpoint is durable."""
+        if not message_id or str(message_id) in self.unconfirmed_controls:
+            return False
+        for row in self.rows.values():
+            for turn in row["turns"]:
+                if str(message_id) in turn.get("source_ids", [turn["id"]]):
+                    if turn["state"] == "pending":
+                        self._save(row)
+                        self._kick(row)
+                    return True
+        return False
+
+    def acknowledge_control(self, message_id):
+        """ACK retained controls durably, without replaying ambiguous effects."""
+        if not message_id or str(message_id) in self.unconfirmed_controls:
+            return False
+        for row in self.rows.values():
+            if str(message_id) in row.get("controls", {}):
+                self._save(row)
+                return True
+        return False

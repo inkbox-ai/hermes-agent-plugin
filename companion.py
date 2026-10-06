@@ -179,14 +179,16 @@ class CompanionReceiver:
         self._owner_file = handle
 
     def _save(self, row: dict) -> None:
+        self._save_checkpoint(self.root / f"{row['key']}.json", row)
+
+    def _save_checkpoint(self, path: Path, value: dict) -> None:
         with self._checkpoint_lock:
             self._require_owner()
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            path = self.root / f"{row['key']}.json"
             tmp = path.with_suffix(".tmp")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as stream:
-                json.dump(row, stream, ensure_ascii=False)
+                json.dump(value, stream, ensure_ascii=False)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(tmp, path)
@@ -786,22 +788,8 @@ class CompanionReceiver:
         if "@" in source.user_id:
             source.user_id = source.user_id.strip().casefold()
         if re.fullmatch(r"T[A-Z0-9]{1,63}:[UW][A-Z0-9]{1,63}", source.user_id):
-            candidates = list(dict.fromkeys([*aliases, source.user_id.rsplit(":", 1)[-1]]))
-            # Check every validated alias for native explicit denies before
-            # choosing one allowlist spelling. A bare alias cannot hide a deny.
-            for alias in candidates:
-                candidate = copy.copy(source)
-                candidate.user_id_alt = alias
-                candidate.role_authorized = True
-                if not check(candidate):
-                    return False
-            for alias in [source.user_id, *candidates]:
-                candidate = copy.copy(source)
-                candidate.user_id_alt = alias
-                if check(candidate):
-                    source.user_id_alt = alias
-                    return True
-            return False
+            from .slack import authorize_sender
+            return authorize_sender(check, source, [*aliases, source.user_id.rsplit(":", 1)[-1]])
         if check(source):
             return True
         contact = await self.adapter._resolve_contact_full(

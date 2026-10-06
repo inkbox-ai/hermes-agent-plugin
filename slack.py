@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import copy
 from typing import Any
 
 
@@ -21,6 +22,24 @@ SLACK_ATTENTION_EVENTS = tuple(
 SLACK_STOP_EVENT = "slack.session_stopped"
 SLACK_SUBSCRIPTION_EVENTS = (*SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT)
 SLACK_MAX_TEXT_LENGTH = 12000
+
+
+def authorize_sender(check: Any, source: Any, aliases=()) -> bool:
+    """Resolve validated spellings through native policy, preserving its denies."""
+    candidates = list(dict.fromkeys([source.user_id, *aliases]))
+    for alias in candidates:
+        candidate = copy(source)
+        candidate.user_id = candidate.user_id_alt = alias
+        candidate.role_authorized = True
+        if not check(candidate):
+            return False
+    for alias in candidates:
+        candidate = copy(source)
+        candidate.user_id = candidate.user_id_alt = alias
+        if check(candidate):
+            source.user_id = source.user_id_alt = alias
+            return True
+    return False
 
 
 def slack_resource(client: Any) -> Any:

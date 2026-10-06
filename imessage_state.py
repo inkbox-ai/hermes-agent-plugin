@@ -135,18 +135,21 @@ def validate_target(context: dict | None, conversation_id: str | None, to: Any) 
 
 
 @contextmanager
-def explicit_send(session_id: str, conversation_id: str | None, to: Any):
+def explicit_send(session_id: str, conversation_id: str | None, to: Any, *, allow_other_destination=False):
     with _LOCK:
-        context = active_context(session_id)
+        owner = active_context(session_id)
+        context = owner
+        if allow_other_destination and owner and (to is not None or str(conversation_id or "") != owner.get("conversation_id")):
+            context = None
         validate_target(context, conversation_id, to)
-        if context:
-            context["leases"] += 1
+        if owner:
+            owner["leases"] += 1
     try:
         yield context
     finally:
-        if context:
+        if owner:
             with _LOCK:
-                context["leases"] -= 1
+                owner["leases"] -= 1
 
 
 def record_explicit(context: dict | None, content: str, message: Any) -> None:

@@ -1030,13 +1030,12 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
     try:
         if any(key in args for key in ("reply_to_message_id", "replyToMessageId", "plain_reply_fallback", "plainReplyFallback", "thread_id", "threadId")):
             raise ValueError("Reply routing is selected by the gateway; do not supply reply-target arguments")
-        from .imessage_state import active_context, validate_target
+        from .imessage_state import active_context
         threaded_replies = read_runtime_config().imessage_threaded_replies
         original_context = active_context(session_id)
+        source_bound = original_context and args.get("to") is None and str(args.get("conversationId") or args.get("conversation_id") or "").strip() == original_context.get("conversation_id")
         if original_context and not threaded_replies:
             raise RuntimeError("Native iMessage replies are disabled; original turn cannot send plainly")
-        if threaded_replies:
-            validate_target(original_context, args.get("conversationId") or args.get("conversation_id"), args.get("to"))
         _cfg, _client, identity = _client_and_identity()
         text = str(args.get("text") or "")
         media_urls = list(_normalize_recipients(args.get("mediaUrls") or args.get("media_urls")) or [])
@@ -1099,14 +1098,15 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             payload["send_style"] = send_style
             camel_payload["sendStyle"] = send_style
 
-        if threaded_replies:
+        if threaded_replies or original_context:
             from .imessage_state import active_context, explicit_send, record_explicit, require_threading, validate_reply_target
-            require_threading(identity)
-            with explicit_send(session_id, conversation_id, to_list) as context:
+            if source_bound:
+                require_threading(identity)
+            with explicit_send(session_id, conversation_id, to_list, allow_other_destination=True) as context:
                 def guard():
-                    if active_context(session_id) is not context:
+                    if active_context(session_id) is not original_context:
                         raise RuntimeError("Original iMessage tool ownership changed")
-                    if context and not read_runtime_config().imessage_threaded_replies:
+                    if original_context and not read_runtime_config().imessage_threaded_replies:
                         raise RuntimeError("Native iMessage replies are disabled")
                 guard()
                 if context:

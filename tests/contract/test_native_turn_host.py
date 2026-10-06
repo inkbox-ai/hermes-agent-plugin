@@ -171,3 +171,92 @@ def test_real_native_host_queue_checkpoint_and_original_reply(tmp_path, monkeypa
                 await queue.close()
         await adapter._slack_activity.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_reconstructed_source_binds_real_native_worker_and_rejects_stale_tool(tmp_path, monkeypatch, legacy):
+    from gateway.session_context import get_session_env
+    from inkbox_plugin.imessage_state import active_context, bind_context, clear_context
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter,
+            check_fn=lambda: True, allowed_users_env="INKBOX_ALLOWED_USERS", allow_all_env="INKBOX_ALLOW_ALL_USERS"))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
+        queue = NativeTurns(adapter, tmp_path / "queue")
+        source = adapter.build_source(chat_id="native-context", user_id="+15555550101", message_id=uid(1))
+        original = MessageEvent(text="Question", source=source, message_id=uid(1), metadata={"inkbox_reply_route": {"mode": "imessage"}})
+        saved = queue._serialize(original)
+        if legacy:
+            saved["source"].pop("message_id", None)
+        row = {"key": "synthetic"}
+        old = queue._event_from_turn(row, {"id": uid(1), "event": saved})
+        current = queue._event_from_turn(row, {"id": uid(2), "event": saved})
+        class Runner:
+            _run_in_executor_with_context = GatewayRunner._run_in_executor_with_context
+            adapters = {}
+            def _get_executor(self):
+                return None
+        runner = Runner()
+        session_id = "native-context-" + tmp_path.name
+        bind_context(session_id, {"turn_id": uid(2), "conversation_id": uid(30)})
+        def tool(expected, stale):
+            assert get_session_env("HERMES_SESSION_MESSAGE_ID") == expected
+            if stale:
+                with pytest.raises(RuntimeError, match="different native"):
+                    active_context(session_id)
+            else:
+                assert active_context(session_id)["turn_id"] == expected
+        try:
+            for event, stale in ((old, True), (current, False)):
+                tokens = GatewayRunner._set_session_env(runner, NS(source=event.source, session_key="native-context"))
+                try:
+                    await runner._run_in_executor_with_context(tool, event.message_id, stale)
+                finally:
+                    GatewayRunner._clear_session_env(runner, tokens)
+        finally:
+            clear_context(session_id, uid(2))
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("principal", ["THOME:UALICE", "TINSTALL:UALICE", "UALICE", "TFOREIGN:UALICE"])
+def test_real_native_allowlist_resolves_validated_slack_alias_and_rechecks_revocation(tmp_path, monkeypatch, principal):
+    from inkbox_plugin.companion import CompanionReceiver
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("INKBOX_ALLOWED_USERS", principal)
+        monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "false")
+        monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "false")
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter,
+            check_fn=lambda: True, allowed_users_env="INKBOX_ALLOWED_USERS", allow_all_env="INKBOX_ALLOW_ALL_USERS"))
+        adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
+        class Runner(GatewayAuthorizationMixin):
+            config = GatewayConfig()
+            adapters = {adapter.platform: adapter}
+            def _pairing_store_for(self, source):
+                return None
+        runner = adapter.gateway_runner = Runner()
+        runner.config.thread_sessions_per_user = False
+        receiver = CompanionReceiver(adapter, tmp_path / "companion")
+        canonical = "THOME:UALICE"
+        # This is the normalized source recorded by verified Slack ingress;
+        # an arbitrary third workspace is deliberately absent from its aliases.
+        envelope = {"_hermes_slack_source": {"author": canonical},
+                    "data": {"workspace_id": "TINSTALL", "actor_id": "UALICE"}}
+        turn = {"id": uid(1), "author": canonical, "envelope": envelope, "entries": []}
+        row = {"key": "slack-scope", "meta": {"channel": "slack", "conversation_id": uid(30), "scope_id": uid(10)},
+               "turns": [turn], "sponsor": canonical, "trigger_envelope": envelope}
+        if principal.startswith("TFOREIGN:"):
+            with pytest.raises(PermissionError, match="sponsor"):
+                await receiver._authorized_source(row, turn)
+            assert "source_user_id" not in turn
+            return
+        source = await receiver._authorized_source(row, turn)
+        assert source.user_id == turn["source_user_id"] == turn["sponsor_user_id"] == principal
+        assert turn["author"] == row["sponsor"] == canonical
+        assert runner._is_user_authorized(source)
+        receiver._check_local_reply_authority(row, turn)
+        monkeypatch.setenv("INKBOX_ALLOWED_USERS", "UBOB")
+        with pytest.raises(PermissionError):
+            receiver._check_local_reply_authority(row, turn)
+    asyncio.run(run())

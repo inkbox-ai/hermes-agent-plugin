@@ -16,15 +16,20 @@ def test_catalog_opt_ins_and_runtime_config(monkeypatch):
     monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "true")
     assert read_config({"slack_enabled": False}).slack_enabled is False
     set_runtime_config_extra({})
-    names = []
-    register(SimpleNamespace(register_tool=lambda name, *args, **kwargs: names.append(name)), lambda: True)
+    gates = {}
+    register(SimpleNamespace(register_tool=lambda name, *args, **kwargs: gates.update({name: kwargs["check_fn"]})), lambda: True)
+    names = {name for name, check in gates.items() if check()}
     assert {tool["name"] for tool in VAULT_TOOLS + THREAD_TOOLS} <= set(names)
     assert len([name for name in names if name.startswith("inkbox_slack_")]) == 6
     monkeypatch.setenv("INKBOX_SLACK_ENABLED", "false")
     monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
-    names.clear()
-    register(SimpleNamespace(register_tool=lambda name, *args, **kwargs: names.append(name)), lambda: True)
+    # Native registration precedes YAML loading. The already registered
+    # definitions must follow runtime visibility without re-registering.
+    names = {name for name, check in gates.items() if check()}
     assert set(names) == {tool["name"] for tool in VAULT_TOOLS}
+    set_runtime_config_extra({"slack_enabled": True})
+    assert len([name for name, check in gates.items() if name.startswith("inkbox_slack_") and check()]) == 6
+    set_runtime_config_extra({})
 
 
 def test_real_installed_sdk_capability_boundaries():

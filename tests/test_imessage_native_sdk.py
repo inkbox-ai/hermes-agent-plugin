@@ -144,12 +144,85 @@ def test_proactive_send_has_no_ancestry_or_stale_context(sdk):
     assert "reply_to_message_id" not in body
 
 
-def test_wrong_conversation_is_rejected_before_reads_or_media_upload(sdk):
+@pytest.mark.parametrize("destination", [{"conversationId": ROOT_ID}, {"to": "+15555550103"}])
+def test_deliberate_send_elsewhere_is_plain_and_does_not_consume_current_answer(sdk, destination):
+    from inkbox_plugin.imessage_state import active_context
     bind()
-    result = json.loads(inkbox_send_imessage({"conversationId": ROOT_ID, "text": "Answer", "mediaPaths": ["/tmp/private.png"]}, session_id="native-session"))
-    assert "original conversation" in result["error"]
+    result = json.loads(inkbox_send_imessage({**destination, "text": "Separate instruction"}, session_id="native-session"))
+    assert result["ok"]
+    assert len(sends(sdk)) == 1
+    body = json.loads(sends(sdk)[0].content)
+    assert body.get("conversation_id") == destination.get("conversationId")
+    if "to" in destination:
+        assert body["to"] == destination["to"]
+    assert "reply_to_message_id" not in body and "plain_reply_fallback" not in body
+    assert not active_context("native-session")["explicit_sends"]
+    assert not any(request.url.path.endswith("/thread") for request in sdk.requests)
+    clear_context("native-session", SOURCE_ID)
+
+
+@pytest.mark.parametrize("during_upload", [False, True])
+def test_independent_destination_still_requires_owned_feature_during_upload(sdk, monkeypatch, during_upload):
+    from inkbox_plugin import tools
+    bind()
+    def upload(identity, path):
+        monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
+        return "https://example.com/photo.png"
+    monkeypatch.setattr(tools, "_upload_imessage_media_path", upload)
+    if not during_upload:
+        monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
+    result = json.loads(inkbox_send_imessage({"conversationId": ROOT_ID, "text": "Separate instruction", "mediaPaths": ["photo.png"]}, session_id="native-session"))
+    assert "disabled" in result["error"]
+    assert not sends(sdk)
+    if not during_upload:
+        assert not sdk.requests
+    clear_context("native-session", SOURCE_ID)
+
+
+def test_other_destination_tool_send_does_not_suppress_automatic_original_answer(sdk, factory, tmp_path):
+    from tests.test_native_turns import harness, receipt, settle, started
+    async def run():
+        gate = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=gate)
+        sdk.source["conversation_id"] = companion_harness.uid(30)
+        sdk.page["conversation_id"] = companion_harness.uid(30)
+        value.adapter._reply_identity = sdk.client.get_identity("agent")
+        await value.queue.accept(receipt(3))
+        await started(value)
+        turn = next(iter(value.queue.rows.values()))["turns"][0]
+        result = json.loads(inkbox_send_imessage({"conversationId": ROOT_ID, "text": "answer " + SOURCE_ID}, session_id=turn["session_id"]))
+        assert result["ok"] and not turn.get("explicit_sends")
+        gate.set()
+        await settle(value.queue)
+        bodies = [json.loads(request.content) for request in sends(sdk)]
+        assert len(value.inputs) == 1 and len(bodies) == 2
+        assert bodies[0]["conversation_id"] == ROOT_ID and "reply_to_message_id" not in bodies[0]
+        assert bodies[1]["conversation_id"] == companion_harness.uid(30) and bodies[1]["reply_to_message_id"] == SOURCE_ID
+        assert turn["state"] == "done" and turn["sent"]["content"] == bodies[0]["text"]
+        await value.queue.close()
+    asyncio.run(run())
+
+
+def test_other_destination_cannot_spoof_source_target_before_reads_or_media_upload(sdk):
+    bind()
+    result = json.loads(inkbox_send_imessage({"conversationId": ROOT_ID, "reply_to_message_id": SOURCE_ID, "text": "Answer", "mediaPaths": ["/tmp/private.png"]}, session_id="native-session"))
+    assert "gateway" in result["error"]
     assert not sdk.requests
     clear_context("native-session", SOURCE_ID)
+
+
+def test_unrelated_send_still_rechecks_native_owner_after_client_lookup(sdk, monkeypatch):
+    from inkbox_plugin import tools
+    bind()
+    original = tools._client_and_identity
+    def lookup():
+        result = original()
+        clear_context("native-session", SOURCE_ID)
+        return result
+    monkeypatch.setattr(tools, "_client_and_identity", lookup)
+    result = json.loads(inkbox_send_imessage({"conversationId": ROOT_ID, "text": "Separate instruction"}, session_id="native-session"))
+    assert "error" in result
+    assert not sends(sdk)
 
 
 def test_send_rejection_does_not_retry_plainly(sdk):
