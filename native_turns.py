@@ -274,8 +274,8 @@ class NativeTurns(CompanionReceiver):
 
     async def _recover_fenced_native(self, row):
         from .host_fencing import fence_turn
-        unresolved = [turn for turn in row["turns"] if turn["state"] in {"running", "uncertain", "sending"}
-                      or turn["state"] == "cancelled" and not turn.get("fenced")]
+        unresolved = [turn for turn in row["turns"] if not turn.get("fenced")
+                      and turn["state"] in {"running", "uncertain", "sending", "cancelled"}]
         if not unresolved:
             return False
         for turn in unresolved:

@@ -1137,9 +1137,9 @@ class CompanionReceiver:
     async def _recover_fenced(self, row):
         """Quarantine ambiguous work only after native execution is conclusively fenced."""
         from .host_fencing import fence_turn
-        unresolved = [turn for turn in row["turns"] if (
-            turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
-            and not turn.get("result_ready")) or turn.get("delivery", {}).get("state") in {"sending", "uncertain"}]
+        unresolved = [turn for turn in row["turns"] if not turn.get("fenced") and (
+            (turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
+             and not turn.get("result_ready")) or turn.get("delivery", {}).get("state") in {"sending", "uncertain"})]
         if not unresolved:
             return False
         for turn in unresolved:

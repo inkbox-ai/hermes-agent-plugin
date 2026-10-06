@@ -352,3 +352,40 @@ def test_slack_connection_revoked_while_working_blocks_reply(factory, tmp_path):
         value.adapter._inkbox.slack.send_message.assert_not_called()
         await value.queue.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("companion", [False, True])
+def test_previous_positive_fence_does_not_block_fencing_later_turn(factory, tmp_path, monkeypatch, companion):
+    async def run():
+        from unittest.mock import AsyncMock
+        value = await harness(factory, tmp_path)
+        with monkeypatch.context() as patch:
+            patch.setattr(value.queue, "_kick", lambda row: None)
+            await value.queue.accept(receipt(1))
+            await value.queue.accept(receipt(2))
+        row = next(iter(value.queue.rows.values()))
+        first, second = row["turns"]
+        first.update(state="uncertain", fenced=True, delivery={"state": "uncertain"})
+        second.update(state="uncertain", author="+15555550101")
+        row["blocked"] = True
+        fence = AsyncMock(return_value=True)
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+        if companion:
+            receiver = value.base.receiver
+            receiver._acquire()
+            row["meta"] = {}
+            receiver._authorized_source = AsyncMock(return_value=receipt(2).source)
+            assert await receiver._recover_fenced(row)
+            receiver._authorized_source.assert_awaited_once_with(row, second)
+            await receiver.close()
+        else:
+            assert await value.queue._recover_fenced_native(row)
+            assert not row.get("blocked")
+        # Re-fencing the old native source is impossible once its slot cleared;
+        # its retained positive proof must not impede the later exact owner.
+        fence.assert_awaited_once()
+        assert fence.call_args.args[2] == uid(2)
+        assert first["state"] == "uncertain"
+        assert second["state"] == "quarantined" and second["fenced"]
+        await value.queue.close()
+    asyncio.run(run())

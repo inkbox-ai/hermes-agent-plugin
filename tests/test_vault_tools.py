@@ -125,3 +125,27 @@ def test_admin_key_cannot_read_another_identity_secret_or_stale_grant(vault, mon
     listed = call("inkbox_list_vault_secrets")
     assert [secret["id"] for secret in listed["result"]] == [TOKEN_ID]
     assert "synthetic-password" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("tool", ["inkbox_get_vault_secret", "inkbox_get_totp_code"])
+@pytest.mark.parametrize("key", [None, "Wrong-example-key-42!"])
+def test_removed_or_changed_plugin_key_cannot_reuse_previous_unlock(vault, monkeypatch, tool, key):
+    monkeypatch.setenv("INKBOX_HERMES_VAULT_KEY", VAULT_KEY)
+    assert call(tool, secret_id=LOGIN_ID)["ok"]
+    # Even a valid SDK-global auto-unlock must not substitute for the plugin key.
+    monkeypatch.setenv("INKBOX_VAULT_KEY", VAULT_KEY)
+    if key is None:
+        monkeypatch.delenv("INKBOX_HERMES_VAULT_KEY")
+    else:
+        monkeypatch.setenv("INKBOX_HERMES_VAULT_KEY", key)
+    vault.requests.clear()
+    result = call(tool, secret_id=LOGIN_ID)
+    assert "error" in result
+    assert not result.get("ok")
+    assert "synthetic-password" not in json.dumps(result)
+    assert TOTP_SEED not in json.dumps(result)
+    assert VAULT_KEY not in json.dumps(result)
+    if key is None:
+        assert not vault.requests
+    else:
+        assert sum(request.url.path.endswith("/unlock") for request in vault.requests) == 2
