@@ -174,3 +174,24 @@ def test_companion_cannot_expand_native_thread_history(sdk):
     assert "supplied Companion history" in result["error"]
     assert not any(request.url.path.endswith("/thread") for request in sdk.requests)
     clear_context("companion-session", SOURCE_ID)
+
+
+def test_positive_new_native_turn_reuses_session_plainly_but_old_tool_stays_fenced(sdk, monkeypatch):
+    import sys
+    import types
+    from inkbox_plugin.imessage_state import observe_host_turn
+    bind()
+    clear_context("native-session", SOURCE_ID)
+    current = {"source": SOURCE_ID}
+    session_context = types.ModuleType("gateway.session_context")
+    session_context.get_session_env = lambda *args: current["source"]
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
+    observe_host_turn("native-session", "proactive-source")
+    old = json.loads(inkbox_send_imessage({"conversation_id": CONVERSATION_ID, "text": "Stale"}, session_id="native-session"))
+    assert "error" in old and not sends(sdk)
+    current["source"] = "proactive-source"
+    result = json.loads(inkbox_send_imessage({"conversation_id": CONVERSATION_ID, "text": "Fresh proactive"}, session_id="native-session"))
+    assert "error" not in result
+    payload = json.loads(sends(sdk)[0].content)
+    assert "reply_to_message_id" not in payload
+    assert "plain_reply_fallback" not in payload

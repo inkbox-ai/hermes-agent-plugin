@@ -2345,7 +2345,7 @@ class InkboxAdapter(BasePlatformAdapter):
             self._companion_max_bytes,
         )
         if self._slack_enabled:
-            self._slack_activity = SlackActivity(self._inkbox.slack, _inkbox_state_path().parent / "inkbox_slack_activity" / (identity_key + ".json"))
+            self._slack_activity = SlackActivity(self._inkbox.slack, _inkbox_state_path().parent / "inkbox_slack_activity" / (identity_key + ".json"), identity_id=self._identity_id)
             await self._slack_activity.recover()
         if self._imessage_threaded_replies:
             identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(self._inkbox.get_identity, self._identity_handle)

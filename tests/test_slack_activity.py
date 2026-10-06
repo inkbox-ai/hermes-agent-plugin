@@ -344,3 +344,18 @@ def test_dm_reactions_through_actual_sdk_http_transport(tmp_path, monkeypatch):
             assert all(key.startswith("hermes:activity:") and len(key) <= 128 for key in keys)
             assert json.loads(tracker.state_path.read_text()) == {}
     asyncio.run(scenario())
+
+
+def test_activity_revalidates_current_identity_connection(tmp_path):
+    async def run():
+        resource = Mock()
+        resource.list_connections.return_value = NS(connections=[])
+        tracker = SlackActivity(resource, tmp_path / "activity.json", identity_id="identity")
+        await tracker.notify("chat", "slack", {"connection_id": "connection", "conversation_id": "CEXAMPLE",
+            "workspace_id": "TEXAMPLE", "thread_ts": "1234567890.000001", "source_event_id": "source"}, "accepted")
+        await tracker.flush()
+        resource.list_connections.assert_called_once_with("identity")
+        resource.set_processing_status.assert_not_called()
+        resource.add_reaction.assert_not_called()
+        await tracker.close()
+    asyncio.run(run())

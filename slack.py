@@ -241,3 +241,13 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
         if len(args["text"]) > SLACK_MAX_TEXT_LENGTH:
             raise ValueError("Slack text must not exceed 12000 characters")
     return getattr(resource, name.removeprefix("inkbox_slack_"))(**args)
+
+
+def validate_connection(resource: Any, identity_id: str, meta: dict) -> None:
+    """Recheck current installation authority immediately before an effect."""
+    connections = resource.list_connections(identity_id).connections
+    matches = [connection for connection in connections if str(connection.id) == meta["connection_id"]]
+    if (len(matches) != 1 or str(matches[0].identity_id) != str(identity_id)
+            or matches[0].status != "connected"
+            or meta.get("workspace_id") and matches[0].workspace_id != meta["workspace_id"]):
+        raise PermissionError("Slack connection is no longer active for the original identity/workspace")

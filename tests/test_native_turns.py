@@ -43,6 +43,7 @@ async def harness(factory, tmp_path, *, gate=None, failure=None, mode="imessage"
     adapter._slack_enabled = True
     adapter._imessage_threaded_replies = True
     adapter._inkbox.slack = Mock()
+    adapter._inkbox.slack.list_connections.return_value = NS(connections=[NS(id=uid(40), identity_id=uid(100), workspace_id="T123", status="connected")])
     adapter._inkbox.slack.send_message.return_value = NS(id=uid(70), status="sent")
     queue.quiet_seconds = .015
     queue.max_burst_seconds = .04
@@ -306,4 +307,48 @@ def test_repeated_restart_never_releases_successor_of_uncertain_turn(factory, tm
             assert [turn["state"] for turn in row["turns"]] == ["uncertain", "pending"]
             assert len(value.inputs) == 1
             await recovered.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["sources", "characters"])
+def test_text_burst_has_source_and_character_caps(factory, tmp_path, kind, monkeypatch):
+    async def run():
+        value = await harness(factory, tmp_path)
+        count = 9 if kind == "sources" else 2
+        # Exercise a queued burst independently of disk/fsync speed. The quiet
+        # window is covered separately; all these receipts precede dispatch.
+        with monkeypatch.context() as patch:
+            patch.setattr(value.queue, "_kick", lambda row: None)
+            for number in range(1, count + 1):
+                event = receipt(number)
+                if kind == "characters":
+                    event.text = "x" * 2500
+                await value.queue.accept(event)
+        row = next(iter(value.queue.rows.values()))
+        first_at = row["turns"][0]["first_at"]
+        for turn in row["turns"]:
+            turn["first_at"] = turn["last_at"] = first_at
+        value.queue._save(row)
+        value.queue._kick(row)
+        await settle(value.queue)
+        turns = next(iter(value.queue.rows.values()))["turns"]
+        assert len(turns) == 2
+        assert len(turns[0]["source_ids"]) == (8 if kind == "sources" else 1)
+        assert turns[0]["route"]["imessage_reply_target"] == uid(1)
+        assert turns[1]["route"]["imessage_reply_target"] == uid(count)
+        await value.queue.close()
+    asyncio.run(run())
+
+
+def test_slack_connection_revoked_while_working_blocks_reply(factory, tmp_path):
+    async def run():
+        gate = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=gate, mode="slack")
+        await value.queue.accept(receipt(1, mode="slack"))
+        await started(value)
+        value.adapter._inkbox.slack.list_connections.return_value = NS(connections=[])
+        gate.set()
+        await settle(value.queue)
+        value.adapter._inkbox.slack.send_message.assert_not_called()
+        await value.queue.close()
     asyncio.run(run())

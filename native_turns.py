@@ -29,6 +29,8 @@ class NativeTurns(CompanionReceiver):
 
     quiet_seconds = .75
     max_burst_seconds = 2.0
+    max_burst_sources = 8
+    max_burst_characters = 4000
 
     def __init__(self, adapter, root):
         super().__init__(adapter, root)
@@ -37,6 +39,8 @@ class NativeTurns(CompanionReceiver):
         self.monitors: dict[str, asyncio.Task] = {}
 
     async def start(self):
+        from .host_fencing import observe_native_workers
+        observe_native_workers(self._host_owner())
         self._acquire()
         for path in self.root.glob("*.json"):
             row = json.loads(path.read_text())
@@ -52,9 +56,13 @@ class NativeTurns(CompanionReceiver):
                 if turn["state"] in {"running", "sending", "control_submitting"}:
                     turn["state"] = "uncertain"
                 turn.pop("session_id", None)
+                if self._settled_proof(turn):
+                    turn["fenced"] = True
                 if turn["state"] == "uncertain" and not turn.get("fenced"):
                     row["blocked"] = True
                     row["error"] = "Original worker or delivery ownership is uncertain; no automatic replay"
+            if row.get("blocked") and not any(turn["state"] in {"running", "sending", "uncertain"} and not turn.get("fenced") for turn in row["turns"]):
+                row.pop("blocked", None)
             self._save(row)
             self._kick(row)
 
@@ -161,7 +169,9 @@ class NativeTurns(CompanionReceiver):
                               and all(route.get(key) == next_route.get(key) for key in (
                                   "author", "conversation_id", "reply_to_message_id", "thread_id", "thread_root_message_id",
                               )))
-                if not compatible or candidate["first_at"] - turn["first_at"] >= self.max_burst_seconds:
+                if (not compatible or candidate["first_at"] - turn["first_at"] >= self.max_burst_seconds
+                        or len(turn["source_ids"]) + len(candidate["source_ids"]) > self.max_burst_sources
+                        or len(turn["event"]["text"]) + len(candidate["event"]["text"]) + 1 > self.max_burst_characters):
                     return
                 turn["event"]["text"] += "\n" + candidate["event"]["text"]
                 turn["source_ids"].extend(candidate["source_ids"])
@@ -250,6 +260,8 @@ class NativeTurns(CompanionReceiver):
                 self.completions.pop(turn["id"], None)
                 if turn.get("session_id") and not clear_context(turn["session_id"], turn["id"]):
                     row["blocked"] = True
+                if self._settled_proof(turn):
+                    turn["fenced"] = True
                 if turn["state"] == "uncertain" and not turn.get("fenced"):
                     row["blocked"] = True
                     row.setdefault("error", "Original native outcome is uncertain; verify worker ownership before continuing")
@@ -318,10 +330,20 @@ class NativeTurns(CompanionReceiver):
         self._save(row)
         return True
 
+    @staticmethod
+    def _settled_proof(turn):
+        proof = turn.get("worker_completion") or {}
+        return (proof.get("kind") == "native_worker_finalizer" and proof.get("source_id") == turn["id"]
+                and isinstance(proof.get("generation"), int) and bool(proof.get("session_key")))
+
     def capture_result(self, event, response):
         owned = self._owned(event)
         if owned and isinstance(response, str):
             row, turn = owned
+            from .host_fencing import completed_worker_proof
+            proof = completed_worker_proof(self._host_owner(), event)
+            if proof is not None:
+                turn["worker_completion"] = proof
             if turn["state"] == "running":
                 turn["answer"] = response
                 turn["state"] = "answer_ready"
@@ -446,6 +468,12 @@ class NativeTurns(CompanionReceiver):
             return SendResult(success=False, error="Original sender is no longer authorized")
         if route["mode"] == "slack" and not self.adapter._slack_enabled:
             return SendResult(success=False, error="Slack is disabled")
+        if route["mode"] == "slack":
+            from .slack import validate_connection
+            try:
+                await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack, str(self.adapter._identity_id), route)
+            except Exception as exc:
+                return SendResult(success=False, error=f"Original Slack connection is unavailable ({type(exc).__name__})", raw_response={"inkbox_no_retry": True})
         # Store prompts as deliveries, but only the checkpointed final answer
         # settles model work; the host may ask and resume within the same turn.
         final = turn.get("rendered", {}).get("text_content", turn.get("answer")) == content

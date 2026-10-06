@@ -33,8 +33,8 @@ def test_metadata_without_unlock_or_payload(vault, monkeypatch, key):
     result = call("inkbox_list_vault_secrets", secret_type="login")
     assert result["ok"]
     assert [item["id"] for item in result["result"]] == [LOGIN_ID]
-    assert len(vault.requests) == 1
-    assert vault.requests[0].url.params["secret_type"] == "login"
+    assert [request.url.path for request in vault.requests] == ["/api/v1/identities/example-agent", "/api/v1/vault/secrets"]
+    assert vault.requests[-1].url.params["secret_type"] == "login"
     assert "payload" not in json.dumps(result)
     assert TOTP_SEED not in json.dumps(result)
 
@@ -111,3 +111,17 @@ def test_plugin_key_does_not_reuse_sdk_global_unlock(vault, monkeypatch):
     assert "error" in result
     assert "synthetic-password" not in json.dumps(result)
     assert sum(request.url.path.endswith("/unlock") for request in vault.requests) == 2
+
+
+@pytest.mark.parametrize("tool", ["inkbox_get_vault_secret", "inkbox_get_totp_code"])
+def test_admin_key_cannot_read_another_identity_secret_or_stale_grant(vault, monkeypatch, tool):
+    monkeypatch.setenv("INKBOX_HERMES_VAULT_KEY", VAULT_KEY)
+    assert call(tool, secret_id=LOGIN_ID)["ok"]
+    vault.granted.remove(LOGIN_ID)
+    vault.requests.clear()
+    result = call(tool, secret_id=LOGIN_ID)
+    assert "error" in result
+    assert [request.url.path for request in vault.requests] == ["/api/v1/identities/example-agent", f"/api/v1/vault/secrets/{LOGIN_ID}/access"]
+    listed = call("inkbox_list_vault_secrets")
+    assert [secret["id"] for secret in listed["result"]] == [TOKEN_ID]
+    assert "synthetic-password" not in json.dumps(result)

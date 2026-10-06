@@ -76,3 +76,41 @@ async def fence_turn(adapter, source, message_id, *, timeout=5.0):
         raise
     except TimeoutError:
         return False
+
+
+def observe_native_workers(owner):
+    """Attach completion evidence at the real worker creation boundary once.
+
+    Hermes clears its turn slot before adapter delivery. Retaining this exact
+    worker handle avoids mistaking a missing slot for proof after that cleanup.
+    """
+    start = getattr(owner, "_run_agent_start_turn_worker", None)
+    if not callable(start) or getattr(start, "_inkbox_observer", False):
+        return
+    from functools import wraps
+    @wraps(start)
+    def observed(context, run_sync):
+        state = owner._peek_session_state(context.session_key)
+        event = getattr(getattr(state, "turn", None), "event", None)
+        worker = start(context, run_sync)
+        if event is not None and str(event.message_id or "") == str(context.inbound_message_id or ""):
+            from .imessage_state import observe_host_turn
+            observe_host_turn(str(context.session_id), str(event.message_id or ""))
+            event._inkbox_native_worker = (worker, context.session_key, context.run_generation, str(event.message_id))
+        return worker
+    observed._inkbox_observer = True
+    owner._run_agent_start_turn_worker = observed
+
+
+def completed_worker_proof(owner, event):
+    receipt = getattr(event, "_inkbox_native_worker", None)
+    if receipt is None:
+        return None
+    worker, key, generation, source_id = receipt
+    future = getattr(worker, "executor_task", None)
+    done = getattr(worker, "worker_done", None)
+    current = getattr(owner, "_is_session_run_current", None)
+    if (str(event.message_id) != source_id or future is None or not future.done() or future.cancelled()
+            or done is None or not done.is_set() or not callable(current) or not current(key, generation)):
+        return None
+    return {"kind": "native_worker_finalizer", "source_id": source_id, "session_key": key, "generation": generation}

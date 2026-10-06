@@ -53,6 +53,7 @@ def slack_host(factory, monkeypatch, tmp_path):
     value.resource.load_initialization.side_effect = lambda *_args, **_kwargs: deepcopy(value.snapshot)
     value.resource.activation_messages.side_effect = lambda *_args, **_kwargs: deepcopy(value.snapshot)
     value.adapter._inkbox.slack = Mock()
+    value.adapter._inkbox.slack.list_connections.return_value = NS(connections=[NS(id=uid(40), identity_id=uid(100), workspace_id="TINSTALL", status="connected")])
     value.adapter._inkbox.slack.send_message.return_value = NS(id=uid(70), status="sent")
     for name in ("set_processing_status", "add_reaction", "remove_reaction"):
         getattr(value.adapter._inkbox.slack, name).return_value = NS(status="succeeded")
@@ -174,6 +175,22 @@ def test_consumed_native_stop_cannot_cancel_later_same_thread_turn(slack_host, m
         value.adapter._enqueue.assert_awaited_once()
         value.gate.set()
         await idle(value)
+        await value.receiver.close()
+        await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+def test_connection_workspace_change_before_send_is_rejected(slack_host):
+    async def run():
+        value = slack_host
+        await value.receiver.accept(incoming())
+        await idle(value)
+        connection = value.adapter._inkbox.slack.list_connections.return_value.connections[0]
+        connection.workspace_id = "TOTHER"
+        first = value.inputs[0]
+        result = await value.adapter.send(first.source.chat_id, "Must not send", reply_to=first.message_id)
+        assert not result.success
+        value.adapter._inkbox.slack.send_message.assert_not_called()
         await value.receiver.close()
         await value.adapter._slack_activity.close()
     asyncio.run(run())

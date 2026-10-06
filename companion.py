@@ -153,6 +153,11 @@ class CompanionReceiver:
         self._checkpoint_lock = threading.RLock()
 
     def _acquire(self) -> None:
+        try:
+            from .host_fencing import observe_native_workers
+        except ImportError:
+            from host_fencing import observe_native_workers
+        observe_native_workers(self._host_owner())
         if self._owner_file is not None:
             return
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -775,7 +780,7 @@ class CompanionReceiver:
     async def _authorize(self, check: Any, source: Any, aliases=()) -> bool:
         if "@" in source.user_id:
             source.user_id = source.user_id.strip().casefold()
-        if re.fullmatch(r"T[A-Z0-9]+:[UW][A-Z0-9]+", source.user_id):
+        if re.fullmatch(r"T[A-Z0-9]{1,63}:[UW][A-Z0-9]{1,63}", source.user_id):
             candidates = list(dict.fromkeys([*aliases, source.user_id.rsplit(":", 1)[-1]]))
             # Check every validated alias for native explicit denies before
             # choosing one allowlist spelling. A bare alias cannot hide a deny.
@@ -905,6 +910,10 @@ class CompanionReceiver:
             return
         turn = self.active.get(event.source.chat_id)
         if turn and turn["id"] == event.message_id and isinstance(response, str):
+            from .host_fencing import completed_worker_proof
+            proof = completed_worker_proof(self._host_owner(), event)
+            if proof is not None:
+                turn["worker_completion"] = proof
             turn["result_ready"] = True
             turn["result"] = response
             self._save(row)
@@ -1033,6 +1042,8 @@ class CompanionReceiver:
         if not envelope:
             raise ValueError("Companion Slack turn has no original source")
         self._validate_slack_route(envelope, turn["reply_context"], exact=True)
+        from .slack import validate_connection
+        await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack, str(self.adapter._identity_id), envelope["data"])
         if row["meta"].get("activation_id"):
             page = plain(await asyncio.to_thread(self._sdk_companion().activation_messages,
                 self.adapter._identity_handle, row["meta"]["activation_id"], limit=1))
@@ -1126,20 +1137,26 @@ class CompanionReceiver:
     async def _recover_fenced(self, row):
         """Quarantine ambiguous work only after native execution is conclusively fenced."""
         from .host_fencing import fence_turn
-        unresolved = [turn for turn in row["turns"] if turn["state"] in {
-            "submitting", "submitted", "uncertain", "control_submitting",
-        } and not turn.get("result_ready")]
+        unresolved = [turn for turn in row["turns"] if (
+            turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
+            and not turn.get("result_ready")) or turn.get("delivery", {}).get("state") in {"sending", "uncertain"}]
         if not unresolved:
             return False
         for turn in unresolved:
             if not turn.get("author"):
                 return False
             source = await self._authorized_source(row, turn)
-            if not await fence_turn(self.adapter, source, turn["id"]):
+            proof = turn.get("worker_completion") or {}
+            completed = (proof.get("kind") == "native_worker_finalizer" and proof.get("source_id") == turn["id"]
+                         and isinstance(proof.get("generation"), int) and bool(proof.get("session_key")))
+            if not completed and not await fence_turn(self.adapter, source, turn["id"]):
                 return False
             # In-flight SDK calls retain ownership until their actual thread
             # exits, even if native cancellation has already returned.
             await asyncio.gather(*(asyncio.shield(task) for task in self.outbound), return_exceptions=True)
+            from .imessage_state import clear_context
+            if row.get("host_session_id") and not clear_context(row["host_session_id"], turn["id"]):
+                return False
             turn["fenced"] = True
             turn["state"] = "quarantined"
             self.active.pop(source.chat_id, None)

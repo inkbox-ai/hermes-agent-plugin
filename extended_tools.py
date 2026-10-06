@@ -31,6 +31,10 @@ THREAD_TOOLS = [
 ]
 
 
+def _vault_access(rules, identity_id, secret_id):
+    return any(str(rule.identity_id) == str(identity_id) and str(rule.vault_secret_id) == str(secret_id) for rule in rules)
+
+
 def dispatch(name, args, *, session_id="", **_kwargs):
     # Lazy import avoids a circular dependency with the native registration entrypoint.
     from .tools import _client_and_identity, _json_safe
@@ -54,11 +58,14 @@ def dispatch(name, args, *, session_id="", **_kwargs):
                 raise ValueError("secret_id must be a UUID from inkbox_list_vault_secrets") from None
         if name in {tool["name"] for tool in VAULT_TOOLS}:
             from inkbox import Inkbox
-            if not cfg.api_key:
-                raise ValueError("Invalid configuration: INKBOX_API_KEY is required")
+            if not cfg.api_key or not cfg.identity:
+                raise ValueError("Invalid configuration: INKBOX_API_KEY and INKBOX_IDENTITY are required")
+            if name == "inkbox_list_vault_secrets" and args.get("secret_type") not in {None, "login", "api_key", "key_pair", "ssh_key", "other"}:
+                raise ValueError("Invalid secret_type")
             if name != "inkbox_list_vault_secrets" and not os.getenv("INKBOX_HERMES_VAULT_KEY"):
                 raise ValueError("Vault is locked. Set INKBOX_HERMES_VAULT_KEY locally and restart; never send the key in chat.")
             client = Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url))
+            identity = client.get_identity(cfg.identity)
         else:
             _cfg, client, identity = _client_and_identity()
         if name.startswith("inkbox_slack_"):
@@ -66,8 +73,16 @@ def dispatch(name, args, *, session_id="", **_kwargs):
         elif name == "inkbox_list_vault_secrets":
             if args.get("secret_type") not in {None, "login", "api_key", "key_pair", "ssh_key", "other"}:
                 raise ValueError("Invalid secret_type")
-            result = client.vault.list_secrets(secret_type=args.get("secret_type"))
+            result = []
+            for secret in client.vault.list_secrets(secret_type=args.get("secret_type")):
+                access = getattr(secret, "access", None)
+                if access is None:
+                    access = client.vault.list_access_rules(secret.id)
+                if _vault_access(access, identity.id, secret.id):
+                    result.append(secret)
         elif name in {"inkbox_get_vault_secret", "inkbox_get_totp_code"}:
+            if not _vault_access(client.vault.list_access_rules(secret_id), identity.id, secret_id):
+                raise PermissionError("Configured identity does not have access to this credential")
             key = os.getenv("INKBOX_HERMES_VAULT_KEY")
             # Always honor this plugin's selected key, even if SDK-global config
             # unlocked the client during construction. Never reuse its cache.

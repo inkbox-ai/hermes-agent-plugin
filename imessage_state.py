@@ -7,6 +7,7 @@ import threading
 from typing import Any
 
 _CONTEXTS: dict[str, dict] = {}
+_HOST_TURNS: dict[str, str] = {}
 _LOCK = threading.RLock()
 
 
@@ -53,10 +54,16 @@ def active_context(session_id: str) -> dict | None:
             native_source = get_session_env("HERMES_SESSION_MESSAGE_ID")
         except ImportError:
             native_source = ""
+        if context and not context.get("active"):
+            # A positively observed NEW native worker may reuse the session for
+            # proactive/other-channel work. Its own ContextVar must match; the
+            # old worker still carries its old source and remains fenced.
+            current = _HOST_TURNS.get(str(session_id))
+            if current is not None and current != context.get("turn_id") and native_source == current and not context.get("leases"):
+                return None
+            raise RuntimeError("The original iMessage turn is no longer active")
         if context and native_source and native_source != context.get("turn_id"):
             raise RuntimeError("The tool belongs to a different native iMessage turn")
-        if context and not context.get("active"):
-            raise RuntimeError("The original iMessage turn is no longer active")
         return context
 
 
@@ -107,3 +114,9 @@ def record_explicit(context: dict | None, content: str, message: Any) -> None:
 def lease_count(session_id: str) -> int:
     with _LOCK:
         return int((_CONTEXTS.get(str(session_id)) or {}).get("leases", 0))
+
+
+def observe_host_turn(session_id: str, source_id: str) -> None:
+    """Called only at the native worker boundary, never from model arguments."""
+    with _LOCK:
+        _HOST_TURNS[str(session_id)] = str(source_id or "")

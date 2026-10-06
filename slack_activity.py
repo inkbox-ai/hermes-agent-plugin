@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 class SlackActivity:
-    def __init__(self, resource, state_path: Path):
+    def __init__(self, resource, state_path: Path, *, identity_id=None):
         self.resource = resource
+        self.identity_id = str(identity_id) if identity_id is not None else None
         self.state_path = state_path
         self._active: dict[str, dict[str, str]] = {}
         self._records: dict[str, dict] = {}
@@ -114,6 +115,8 @@ class SlackActivity:
             return
         record = dict(zip(("connection_id", "conversation_id", timestamp_field), fields),
                       state=desired, token=uuid4().hex)
+        if meta.get("workspace_id"):
+            record["workspace_id"] = meta["workspace_id"]
         if not native:
             record["indicator"] = "reaction"
         self._schedule(key, record)
@@ -148,6 +151,13 @@ class SlackActivity:
                 changes = [("remove_reaction", timestamp, "eyes")]
         else:
             changes = [("remove_reaction", record["message_ts"], name) for name in ("eyes", "x")]
+        if self.identity_id is not None:
+            try:
+                from .slack import validate_connection
+                await asyncio.to_thread(validate_connection, self.resource, self.identity_id, record)
+            except Exception:
+                logger.warning("Slack activity skipped because its original connection is unavailable")
+                return
         succeeded = True
         for method, timestamp, value in changes:
             operation_key = hashlib.sha256(
