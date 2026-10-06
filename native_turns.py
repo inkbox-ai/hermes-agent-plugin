@@ -11,12 +11,12 @@ from gateway.platforms.base import MessageEvent, MessageType, SendResult
 try:
     from .companion import CompanionReceiver, digest
     from .conversation import approval_reply, conversation_control, reply_route
-    from .imessage_state import auto_reply_kwargs, bind_context, clear_context
+    from .imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
     from .slack import send_reply
 except ImportError:  # pragma: no cover - direct local import
     from companion import CompanionReceiver, digest
     from conversation import approval_reply, conversation_control, reply_route
-    from imessage_state import auto_reply_kwargs, bind_context, clear_context
+    from imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
     from slack import send_reply
 
 
@@ -212,6 +212,8 @@ class NativeTurns(CompanionReceiver):
                 await self._notify(row, turn, "accepted")
                 await self._recover_answer(row, turn)
                 await self._notify(row, turn, "completed" if turn["state"] == "done" else "failed")
+                if turn["state"] != "done":
+                    return
                 continue
             await self._batch(row, turn)
             event = self._event_from_turn(row, turn)
@@ -322,7 +324,12 @@ class NativeTurns(CompanionReceiver):
                     bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state})
         else:
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
-            if turn["state"] not in {"done", "cancelled", "uncertain"}:
+            if (turn.get("preflight_failure") and turn.get("answer") is not None
+                    and turn["state"] not in {"cancelled", "quarantined", "uncertain", "sending"}):
+                # The model finished, but a read-only preflight did not admit a
+                # send. Preserve that answer; never turn it into unknown delivery.
+                turn["state"] = "answer_ready"
+            elif turn["state"] not in {"done", "cancelled", "uncertain"}:
                 turn["state"] = "done" if success else "uncertain"
             future = self.completions.get(turn["id"])
             if future and not future.done():
@@ -376,13 +383,20 @@ class NativeTurns(CompanionReceiver):
             if text:
                 result = await self._send(row, turn, text)
                 if not result.success:
+                    if turn.get("preflight_failure", {}).get("retryable"):
+                        await asyncio.sleep(self.retry_delay)
                     return
             if rendered:
                 results = []
                 await self.adapter._deliver_attachments(self._event_from_turn(row, turn), SimpleNamespace(**rendered), {},
                     anything_sent=bool(text), record_delivery=results.append)
                 if any(not result.success for result in results):
-                    turn["state"] = "uncertain"
+                    if turn.get("preflight_failure"):
+                        turn["state"] = "answer_ready"
+                        if turn["preflight_failure"].get("retryable"):
+                            await asyncio.sleep(self.retry_delay)
+                    else:
+                        turn["state"] = "uncertain"
                     self._save(row)
                     return
             turn["state"] = "done"
@@ -402,12 +416,44 @@ class NativeTurns(CompanionReceiver):
                         return row, turn
         return None
 
-    def check_media_authority(self, row, turn):
+    def check_media_authority(self, row, turn, *, admitted_send=False):
         self._require_owner()
-        if turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
+        if not getattr(self.adapter, "_imessage_threaded_replies", False):
+            raise RuntimeError("Native iMessage replies are disabled")
+        if (turn["state"] in {"uncertain", "cancelled", "quarantined"}
+                or (turn["state"] == "sending" and not admitted_send)
+                or turn.get("explicit_delivery_state") in {"sending", "uncertain"}):
             raise RuntimeError("Original native turn cannot send media")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original native sender is no longer allowed")
+
+    def checked_imessage_send(self, row, turn, identity, payload):
+        # The executor may start after a Stop/revocation queued on the loop.
+        # Recheck inside that worker immediately before the actual SDK effect.
+        try:
+            self.check_media_authority(row, turn, admitted_send=True)
+        except Exception:
+            raise ReplyPreflightError("Original native iMessage ownership changed; no send attempted") from None
+        return identity.send_imessage(**payload)
+
+    async def preflight_reply(self, row, turn, identity):
+        def guard():
+            self.check_media_authority(row, turn)
+        guard()
+        options = await asyncio.to_thread(validate_reply_target, identity, turn["route"], guard)
+        guard()
+        turn.pop("preflight_failure", None)
+        return options
+
+    def preflight_failed(self, row, turn, exc):
+        transient = isinstance(exc, ReplyPreflightError) and exc.retryable
+        turn["preflight_failure"] = {"retryable": transient, "error": str(exc)}
+        if not transient:
+            row["blocked"] = True
+            row["error"] = str(exc)
+        self._save(row)
+        return SendResult(success=False, error=str(exc), retryable=transient,
+                          raw_response={"inkbox_no_retry": True, "inkbox_preflight_failure": True})
 
     async def send_media(self, row, turn, identity, payload, source):
         self.check_media_authority(row, turn)
@@ -417,12 +463,16 @@ class NativeTurns(CompanionReceiver):
             if prior["state"] == "sent":
                 return SendResult(success=True, message_id=prior["message_id"])
             return SendResult(success=False, error="Original media outcome is uncertain", raw_response={"inkbox_no_retry": True})
-        payload = {**payload, "conversation_id": turn["route"]["conversation_id"], **auto_reply_kwargs(turn["route"]),
+        try:
+            options = await self.preflight_reply(row, turn, identity)
+        except Exception as exc:
+            return self.preflight_failed(row, turn, exc)
+        payload = {**payload, "conversation_id": turn["route"]["conversation_id"], **options,
                    "idempotency_key": "hermes:media:" + digest(turn["id"] + fingerprint)}
         payload.pop("to", None)
         delivery = turn["media_deliveries"][fingerprint] = {"state": "sending"}
         self._save(row)
-        task = asyncio.create_task(asyncio.to_thread(identity.send_imessage, **payload))
+        task = asyncio.create_task(asyncio.to_thread(self.checked_imessage_send, row, turn, identity, payload))
         self.outbound.add(task)
         task.add_done_callback(self.outbound.discard)
         try:
@@ -430,6 +480,9 @@ class NativeTurns(CompanionReceiver):
             delivery.update(state="sent", message_id=str(result.id))
             self._save(row)
             return SendResult(success=True, message_id=str(result.id))
+        except ReplyPreflightError as exc:
+            turn["media_deliveries"].pop(fingerprint, None)
+            return self.preflight_failed(row, turn, exc)
         except Exception as exc:
             delivery["state"] = "uncertain"
             turn["state"] = "uncertain"
@@ -474,6 +527,11 @@ class NativeTurns(CompanionReceiver):
                 await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack, str(self.adapter._identity_id), route)
             except Exception as exc:
                 return SendResult(success=False, error=f"Original Slack connection is unavailable ({type(exc).__name__})", raw_response={"inkbox_no_retry": True})
+        else:
+            try:
+                reply_options = await self.preflight_reply(row, turn, self.adapter._reply_identity)
+            except Exception as exc:
+                return self.preflight_failed(row, turn, exc)
         # Store prompts as deliveries, but only the checkpointed final answer
         # settles model work; the host may ask and resume within the same turn.
         final = turn.get("rendered", {}).get("text_content", turn.get("answer")) == content
@@ -484,10 +542,11 @@ class NativeTurns(CompanionReceiver):
             if route["mode"] == "slack":
                 method, args, kwargs = send_reply, (self.adapter._inkbox, route, content), {}
             else:
-                method, args, kwargs = self.adapter._reply_identity.send_imessage, (), {
-                    "conversation_id": route["conversation_id"], "text": content, **auto_reply_kwargs(route),
+                payload = {
+                    "conversation_id": route["conversation_id"], "text": content, **reply_options,
                     "idempotency_key": "hermes:" + digest(json.dumps([turn["id"], route["conversation_id"], route.get("imessage_reply_target"), content])) ,
                 }
+                method, args, kwargs = self.checked_imessage_send, (row, turn, self.adapter._reply_identity, payload), {}
             task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
             self.outbound.add(task)
             task.add_done_callback(self.outbound.discard)
@@ -499,6 +558,10 @@ class NativeTurns(CompanionReceiver):
             turn["state"] = "done" if final else previous_state
             self._save(row)
             return SendResult(success=True, message_id=message_id)
+        except ReplyPreflightError as exc:
+            if turn["state"] == "sending":
+                turn["state"] = previous_state
+            return self.preflight_failed(row, turn, exc)
         except Exception as exc:
             turn["state"] = "uncertain"
             self._save(row)

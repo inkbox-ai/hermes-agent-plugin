@@ -1030,9 +1030,13 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
     try:
         if any(key in args for key in ("reply_to_message_id", "replyToMessageId", "plain_reply_fallback", "plainReplyFallback", "thread_id", "threadId")):
             raise ValueError("Reply routing is selected by the gateway; do not supply reply-target arguments")
-        if read_runtime_config().imessage_threaded_replies:
-            from .imessage_state import active_context, validate_target
-            validate_target(active_context(session_id), args.get("conversationId") or args.get("conversation_id"), args.get("to"))
+        from .imessage_state import active_context, validate_target
+        threaded_replies = read_runtime_config().imessage_threaded_replies
+        original_context = active_context(session_id)
+        if original_context and not threaded_replies:
+            raise RuntimeError("Native iMessage replies are disabled; original turn cannot send plainly")
+        if threaded_replies:
+            validate_target(original_context, args.get("conversationId") or args.get("conversation_id"), args.get("to"))
         _cfg, _client, identity = _client_and_identity()
         text = str(args.get("text") or "")
         media_urls = list(_normalize_recipients(args.get("mediaUrls") or args.get("media_urls")) or [])
@@ -1085,22 +1089,33 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
         else:
             payload["to"] = to_list[0] if to_list and len(to_list) == 1 else to_list
             camel_payload["to"] = payload["to"]
-        if media_paths:
-            media_urls = [_upload_imessage_media_path(identity, media_paths[0])]
-        if media_urls:
-            payload["media_urls"] = media_urls
-            camel_payload["mediaUrls"] = media_urls
+        def prepare_media():
+            urls = [_upload_imessage_media_path(identity, media_paths[0])] if media_paths else media_urls
+            if urls:
+                payload["media_urls"] = urls
+                camel_payload["mediaUrls"] = urls
         send_style = str(args.get("sendStyle") or args.get("send_style") or "").strip()
         if send_style:
             payload["send_style"] = send_style
             camel_payload["sendStyle"] = send_style
 
-        if read_runtime_config().imessage_threaded_replies:
-            from .imessage_state import auto_reply_kwargs, explicit_send, record_explicit, require_threading
+        if threaded_replies:
+            from .imessage_state import active_context, explicit_send, record_explicit, require_threading, validate_reply_target
             require_threading(identity)
             with explicit_send(session_id, conversation_id, to_list) as context:
+                def guard():
+                    if active_context(session_id) is not context:
+                        raise RuntimeError("Original iMessage tool ownership changed")
+                    if context and not read_runtime_config().imessage_threaded_replies:
+                        raise RuntimeError("Native iMessage replies are disabled")
+                guard()
                 if context:
-                    payload.update(auto_reply_kwargs(context))
+                    payload.update(validate_reply_target(identity, context, guard))
+                guard()
+                prepare_media()
+                guard()
+                if context and media_paths:
+                    payload.update(validate_reply_target(identity, context, guard))
                 # This versioned path never retries a TypeError as an untargeted send.
                 state_callback = context.get("explicit_delivery_state") if context else None
                 if context:
@@ -1120,6 +1135,7 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
                 if state_callback:
                     state_callback("sent")
         else:
+            prepare_media()
             msg = _call_with_kwargs_or_payload(
                 _identity_method(identity, "send_imessage", "sendImessage"), payload, camel_payload,
             )

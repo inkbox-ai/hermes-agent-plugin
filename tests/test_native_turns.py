@@ -89,6 +89,112 @@ async def started(value, count=1):
     raise AssertionError("native host input missing")
 
 
+def test_preflight_read_retry_delivers_saved_answer_without_second_model(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        identity = value.adapter._reply_identity
+        identity.get_imessage_thread.side_effect = [TimeoutError("read unavailable"), NS(conversation_id=uid(30))]
+        await value.queue.accept(receipt(1))
+        await settle(value.queue)
+        assert len(value.inputs) == 1
+        assert identity.get_imessage_thread.call_count == 2
+        identity.send_imessage.assert_called_once()
+        row = next(iter(value.queue.rows.values()))
+        assert row["turns"][0]["state"] == "done"
+        assert not row.get("blocked")
+        await value.queue.close()
+    asyncio.run(run())
+
+
+def test_permanent_preflight_blocks_without_unknown_send_and_restart_recovers_answer(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        identity = value.adapter._reply_identity
+        identity.get_imessage_thread.return_value = NS(conversation_id=uid(999))
+        await value.queue.accept(receipt(1))
+        await settle(value.queue)
+        row = next(iter(value.queue.rows.values()))
+        assert row["blocked"] and row["turns"][0]["state"] == "answer_ready"
+        identity.send_imessage.assert_not_called()
+        await value.queue.close()
+        identity.get_imessage_thread.return_value = NS(conversation_id=uid(30))
+        recovered = NativeTurns(value.adapter, tmp_path / "native")
+        await recovered.start()
+        await settle(recovered)
+        assert len(value.inputs) == 1
+        identity.send_imessage.assert_called_once()
+        assert next(iter(recovered.rows.values()))["turns"][0]["state"] == "done"
+        await recovered.close()
+    asyncio.run(run())
+
+
+def test_media_preflight_rejects_before_upload(factory, tmp_path):
+    async def run():
+        from inkbox_plugin.conversation import reply_route
+        gate = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=gate)
+        identity = value.adapter._reply_identity
+        identity.upload_imessage_media = Mock()
+        await value.queue.accept(receipt(1))
+        await started(value)
+        row = next(iter(value.queue.rows.values()))
+        turn = row["turns"][0]
+        identity.get_imessage_thread.return_value = NS(conversation_id=uid(999))
+        token = reply_route.set(turn["route"])
+        try:
+            result = await value.adapter._send_imessage_media(row["chat_id"], caption="Photo", metadata=None, local_path=str(tmp_path / "photo.png"))
+            assert not result.success and result.raw_response["inkbox_preflight_failure"] is True
+            identity.upload_imessage_media.assert_not_called()
+            identity.send_imessage.assert_not_called()
+        finally:
+            reply_route.reset(token)
+            gate.set()
+            await settle(value.queue)
+            await value.queue.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("companion", [False, True])
+def test_late_stop_before_executor_send_is_not_an_unknown_delivery(factory, tmp_path, monkeypatch, companion):
+    async def run():
+        original_to_thread = asyncio.to_thread
+        stopped = []
+        async def stop_before_dispatch(function, *args, **kwargs):
+            if getattr(function, "__name__", "") == ("send_checked" if companion else "checked_imessage_send"):
+                turn["state"] = "cancelled"
+                stopped.append(True)
+            return await original_to_thread(function, *args, **kwargs)
+        if companion:
+            value = factory("imessage")
+            value.adapter._imessage_threaded_replies = True
+            await value.receiver.accept(base_harness.event("imessage"))
+            await base_harness.idle(value)
+            event = value.inputs[0]
+            row = next(iter(value.receiver.rows.values()))
+            turn = row["turns"][0]
+            monkeypatch.setattr(asyncio, "to_thread", stop_before_dispatch)
+            result = await value.adapter.send(event.source.chat_id, "Answer", reply_to=event.message_id)
+            assert not result.success and turn["delivery"]["state"] == "pending"
+            value.identity.send_imessage.assert_not_called()
+            await value.receiver.close()
+        else:
+            gate = asyncio.Event()
+            value = await harness(factory, tmp_path, gate=gate)
+            await value.queue.accept(receipt(1))
+            await started(value)
+            row = next(iter(value.queue.rows.values()))
+            turn = row["turns"][0]
+            monkeypatch.setattr(asyncio, "to_thread", stop_before_dispatch)
+            gate.set()
+            await settle(value.queue)
+            value.adapter._reply_identity.send_imessage.assert_not_called()
+            await value.queue.close()
+        assert stopped == [True]
+        assert turn["state"] == "cancelled"
+        assert turn["preflight_failure"]["retryable"] is False
+    asyncio.run(run())
+
+
 def test_batch_first_source_and_followups_do_not_interrupt(factory, tmp_path):
     async def run():
         gate = asyncio.Event()

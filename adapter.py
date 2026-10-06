@@ -2957,9 +2957,14 @@ class InkboxAdapter(BasePlatformAdapter):
         native_owned = native.media_owner(str(chat_id), metadata) if native else None
         if native_owned:
             try:
-                native.check_media_authority(*native_owned)
+                await native.preflight_reply(*native_owned, identity)
             except Exception as exc:
-                return SendResult(success=False, error=f"Original native media route is unavailable ({type(exc).__name__})", raw_response={"inkbox_no_retry": True})
+                return native.preflight_failed(*native_owned, exc)
+        elif receiver is not None and turn.get("imessage_threaded_replies"):
+            try:
+                await receiver.preflight_reply(row, turn, identity)
+            except Exception as exc:
+                return SendResult(success=False, error=str(exc), raw_response={"inkbox_no_retry": True, "inkbox_preflight_failure": True})
         hosted_url = str(media_url or "")
         if local_path:
             validator = getattr(self, "validate_media_delivery_path", None)

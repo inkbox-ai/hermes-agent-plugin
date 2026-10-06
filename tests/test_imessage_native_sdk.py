@@ -1,5 +1,6 @@
 """Exercise native iMessage tools and gateway through the real SDK HTTP stack."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from uuid import UUID
@@ -15,6 +16,9 @@ from inkbox_plugin.imessage_state import bind_context, clear_context, source_met
 from inkbox_plugin.tools import inkbox_send_imessage
 from inkbox_plugin.extended_tools import dispatch
 from inkbox_plugin.config import set_runtime_config_extra
+from tests import test_companion as companion_harness
+
+factory = companion_harness.factory
 
 
 pytestmark = pytest.mark.skipif(
@@ -79,6 +83,8 @@ def sdk(monkeypatch, tmp_path):
             f"/api/v1/imessage/messages/{SOURCE_ID}/thread",
             f"/api/v1/imessage/conversations/{CONVERSATION_ID}/threads/{THREAD_ID}",
         }:
+            if getattr(state, "on_thread_read", None):
+                state.on_thread_read()
             if state.thread_status != 200:
                 return httpx.Response(state.thread_status, json={"detail": "Thread endpoint unavailable"})
             return httpx.Response(200, json=state.page)
@@ -115,6 +121,12 @@ def test_sdk_source_target_fallback_identity_and_idempotency_on_wire(sdk):
     assert body["plain_reply_fallback"] is True
     assert request.url.params["agent_identity_id"] == IDENTITY_ID
     assert request.headers["Idempotency-Key"].startswith("hermes:tool:")
+    reads = [request for request in sdk.requests if request.url.path.endswith((f"/messages/{SOURCE_ID}", "/thread"))]
+    assert [request.url.path for request in reads] == [
+        f"/api/v1/imessage/messages/{SOURCE_ID}", f"/api/v1/imessage/messages/{SOURCE_ID}/thread",
+    ]
+    assert reads[-1].url.params["limit"] == "1"
+    assert all(request.url.params["agent_identity_id"] == IDENTITY_ID for request in reads)
     clear_context("native-session", SOURCE_ID)
 
 
@@ -195,3 +207,105 @@ def test_positive_new_native_turn_reuses_session_plainly_but_old_tool_stays_fenc
     payload = json.loads(sends(sdk)[0].content)
     assert "reply_to_message_id" not in payload
     assert "plain_reply_fallback" not in payload
+
+
+@pytest.mark.parametrize("failure", ["source-conversation", "source-id", "thread-conversation", "backend-404"])
+@pytest.mark.parametrize("media", [False, True])
+def test_backend_reply_preflight_fails_before_upload_or_send(sdk, tmp_path, failure, media):
+    bind()
+    if failure == "source-conversation":
+        sdk.source["conversation_id"] = ROOT_ID
+    elif failure == "source-id":
+        sdk.source["id"] = ROOT_ID
+    elif failure == "thread-conversation":
+        sdk.page["conversation_id"] = ROOT_ID
+    else:
+        sdk.thread_status = 404
+    args = {"conversation_id": CONVERSATION_ID, "text": "Answer"}
+    if media:
+        attachment = tmp_path / "photo.png"
+        attachment.write_bytes(b"synthetic attachment")
+        args["mediaPaths"] = [str(attachment)]
+    result = json.loads(inkbox_send_imessage(args, session_id="native-session"))
+    assert "no send attempted" in result["error"]
+    assert not any(request.method != "GET" for request in sdk.requests)
+    clear_context("native-session", SOURCE_ID)
+
+
+def test_native_owner_cancellation_during_backend_preflight_prevents_send(sdk):
+    bind()
+    sdk.on_thread_read = lambda: clear_context("native-session", SOURCE_ID)
+    result = json.loads(inkbox_send_imessage({"conversation_id": CONVERSATION_ID, "text": "Answer"}, session_id="native-session"))
+    assert "error" in result
+    assert not sends(sdk)
+
+
+@pytest.mark.parametrize("during_lookup", [False, True])
+def test_disabling_native_replies_cannot_turn_an_owned_reply_into_plain_send(sdk, monkeypatch, during_lookup):
+    from inkbox_plugin import tools
+    bind()
+    if during_lookup:
+        original = tools._client_and_identity
+        def lookup():
+            result = original()
+            monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
+            return result
+        monkeypatch.setattr(tools, "_client_and_identity", lookup)
+    else:
+        monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
+    result = json.loads(inkbox_send_imessage({"conversation_id": CONVERSATION_ID, "text": "Answer"}, session_id="native-session"))
+    assert "disabled" in result["error"]
+    assert not sends(sdk)
+    clear_context("native-session", SOURCE_ID)
+
+
+def test_unadmitted_reply_target_is_rejected_before_backend_reads(sdk):
+    from inkbox_plugin.imessage_state import validate_reply_target
+    identity = sdk.client.get_identity("agent")
+    sdk.requests.clear()
+    meta = {"conversation_id": CONVERSATION_ID, **source_metadata(message())}
+    meta["imessage_reply_target"] = ROOT_ID
+    with pytest.raises(RuntimeError, match="not an admitted source"):
+        validate_reply_target(identity, meta)
+    assert not sdk.requests
+
+
+@pytest.mark.parametrize("companion", [False, True])
+@pytest.mark.parametrize("available", [False, True])
+def test_automatic_native_and_companion_reply_preflight_uses_real_sdk(sdk, factory, tmp_path, companion, available):
+    from tests.test_native_turns import harness, receipt, settle
+    async def run():
+        sdk.source["conversation_id"] = companion_harness.uid(30)
+        sdk.page["conversation_id"] = companion_harness.uid(30)
+        sdk.thread_status = 200 if available else 404
+        identity = sdk.client.get_identity("agent")
+        if companion:
+            value = factory("imessage")
+            value.adapter._imessage_threaded_replies = True
+            value.adapter._reply_identity = identity
+            value.adapter._inkbox.get_identity.return_value = identity
+            await value.receiver.accept(companion_harness.event("imessage"))
+            await companion_harness.idle(value)
+            event = value.inputs[0]
+            result = await value.adapter.send(event.source.chat_id, "Answer", reply_to=event.message_id)
+            assert result.success is available
+            turn = next(iter(value.receiver.rows.values()))["turns"][0]
+            assert turn["delivery"]["state"] == ("sent" if available else "pending")
+            await value.receiver.close()
+        else:
+            value = await harness(factory, tmp_path)
+            value.adapter._reply_identity = identity
+            await value.queue.accept(receipt(3))
+            await settle(value.queue)
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            assert turn["state"] == ("done" if available else "answer_ready")
+            await value.queue.close()
+        assert len(sends(sdk)) == int(available)
+        source_reads = [request for request in sdk.requests if request.url.path.endswith(f"/messages/{SOURCE_ID}")]
+        thread_reads = [request for request in sdk.requests if request.url.path.endswith("/thread")]
+        assert source_reads and thread_reads
+        assert all(request.url.params["limit"] == "1" for request in thread_reads)
+        assert all(request.url.params["agent_identity_id"] == IDENTITY_ID for request in source_reads + thread_reads)
+        if available:
+            assert json.loads(sends(sdk)[0].content)["reply_to_message_id"] == SOURCE_ID
+    asyncio.run(run())

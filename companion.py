@@ -550,6 +550,10 @@ class CompanionReceiver:
                     raise RuntimeError("Hermes did not accept the Companion input")
                 await asyncio.wait_for(asyncio.shield(future), self.completion_timeout)
                 if turn["state"] not in {"completed", "quarantined"}:
+                    if turn.get("preflight_failure") and turn.get("result_ready"):
+                        from .imessage_state import ReplyPreflightError
+                        failure = turn["preflight_failure"]
+                        raise ReplyPreflightError(failure["error"], retryable=failure["retryable"], status_code=failure.get("status_code"))
                     raise RuntimeError("Companion host processing did not complete successfully")
                 self.active.pop(event.source.chat_id, None)
                 self.completions.pop(turn["id"], None)
@@ -568,7 +572,8 @@ class CompanionReceiver:
                 for turn in row["turns"]
             )
             status = getattr(exc, "status_code", None)
-            transient = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (
+            from .imessage_state import ReplyPreflightError
+            transient = (isinstance(exc, ReplyPreflightError) and exc.retryable) or isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (
                 isinstance(status, int) and status >= 500
             )
             try:
@@ -886,7 +891,9 @@ class CompanionReceiver:
                 from .imessage_state import clear_context
                 clear_context(row["host_session_id"], turn["id"])
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
-            turn["state"] = "completed" if success else "uncertain"
+            turn["state"] = ("submitted" if turn.get("preflight_failure") and turn.get("result_ready")
+                             and turn["state"] not in {"cancelled", "quarantined", "uncertain"}
+                             else "completed" if success else "uncertain")
             if success:
                 for prior in row["turns"]:
                     if prior["id"] in turn.get("context_ids", []):
@@ -931,6 +938,10 @@ class CompanionReceiver:
         if not result_sent and turn.get("result", "").strip().upper() not in {"", "[SILENT]"}:
             result = await self.send(f"companion:{row['key']}", turn["result"], turn["id"])
             if not result.success:
+                if turn.get("preflight_failure"):
+                    from .imessage_state import ReplyPreflightError
+                    failure = turn["preflight_failure"]
+                    raise ReplyPreflightError(failure["error"], retryable=failure["retryable"], status_code=failure.get("status_code"))
                 raise RuntimeError("Companion saved reply could not be delivered")
         turn["state"] = "completed"
         await self._activity(row, turn, "completed")
@@ -994,19 +1005,65 @@ class CompanionReceiver:
 
     async def dispatch_reply(self, row: dict, turn: dict, method: Any, *args: Any, **kwargs: Any) -> Any:
         """Retain the originating receipt and ownership until the SDK send finishes."""
+        from .imessage_state import ReplyPreflightError
         self._require_owner()
         self._check_local_reply_authority(row, turn)
         if row["state"] in {"paused", "failed", "revoked"}:
             raise RuntimeError("Companion conversation is paused")
         if turn["state"] not in {"submitting", "submitted", "completed"}:
             raise RuntimeError("Companion reply requires its original turn")
+        threaded = row["meta"]["channel"] == "imessage" and turn.get("imessage_threaded_replies")
+        if threaded:
+            kwargs.update(await self.preflight_reply(row, turn, self.adapter._reply_identity))
+            self._require_owner()
+            self._check_local_reply_authority(row, turn)
         if turn.get("delivery"):
             turn["delivery"]["state"] = "sending"
             self._save(row)
-        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        def send_checked():
+            if threaded:
+                try:
+                    self._check_native_reply_authority(row, turn)
+                except Exception:
+                    raise ReplyPreflightError("Original Companion iMessage ownership changed; no send attempted") from None
+            return method(*args, **kwargs)
+        task = asyncio.create_task(asyncio.to_thread(send_checked))
         self.outbound.add(task)
         task.add_done_callback(self.outbound.discard)
-        return await asyncio.shield(task)
+        try:
+            return await asyncio.shield(task)
+        except ReplyPreflightError as exc:
+            if turn.get("delivery", {}).get("state") == "sending":
+                turn["delivery"]["state"] = "pending"
+            turn["preflight_failure"] = {"error": str(exc), "retryable": False}
+            self._save(row)
+            raise
+
+    def _check_native_reply_authority(self, row, turn):
+        self._require_owner()
+        self._check_local_reply_authority(row, turn)
+        if not getattr(self.adapter, "_imessage_threaded_replies", False):
+            raise RuntimeError("Native iMessage replies are disabled")
+        if row["state"] in {"paused", "failed", "revoked"} or turn["state"] not in {"submitting", "submitted", "completed"}:
+            raise RuntimeError("Original Companion turn cannot send")
+
+    async def preflight_reply(self, row, turn, identity):
+        from .imessage_state import ReplyPreflightError, source_metadata, validate_reply_target
+        def guard():
+            self._check_native_reply_authority(row, turn)
+        source = message(turn["envelope"]) if turn.get("envelope") else {"id": turn["source_id"]}
+        meta = {**source_metadata(source), "conversation_id": turn["reply_context"]["conversation_id"]}
+        try:
+            guard()
+            options = await asyncio.to_thread(validate_reply_target, identity, meta, guard)
+            guard()
+        except Exception as exc:
+            turn["preflight_failure"] = {"error": str(exc), "retryable": isinstance(exc, ReplyPreflightError) and exc.retryable,
+                                         "status_code": getattr(exc, "status_code", None)}
+            self._save(row)
+            raise
+        turn.pop("preflight_failure", None)
+        return options
 
     def _slack_reply_context(self, envelope):
         data = envelope["data"]

@@ -96,7 +96,7 @@ def test_completed_real_worker_survives_native_slot_cleanup_and_restores_forward
                     user_id_alt="owner", user_name="Owner", chat_name="Conversation")
         original = MessageEvent(source=source, message_type=MessageType.TEXT, message_id=uid(1), text="First",
             metadata={"inkbox_reply_route": {"mode": "imessage", "chat_id": "conversation", "conversation_id": uid(30),
-                "message_id": uid(1), "imessage_reply_target": uid(1), "author": "owner"}})
+                "message_id": uid(1), "imessage_reply_target": uid(1), "imessage_sources": [{"id": uid(1)}], "author": "owner"}})
         state.turn.event = original
         state.persistent.run_generation = 1
         agent = NS(_gateway_turn_process_task_id="test-worker", _gateway_turn_process_baseline=frozenset())
@@ -109,6 +109,14 @@ def test_completed_real_worker_survives_native_slot_cleanup_and_restores_forward
         assert worker.worker_done.is_set()
         state.turn.clear()  # actual native handler drops this slot before adapter send
         identity = NS(send_imessage=Mock(side_effect=TimeoutError("ambiguous delivery")))
+        import inspect
+        identity.send_imessage.__signature__ = inspect.Signature([
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in ("reply_to_message_id", "plain_reply_fallback")
+        ])
+        identity.get_imessage = Mock(side_effect=lambda message_id: NS(id=message_id, conversation_id=uid(30)))
+        identity.get_imessage_thread = Mock(return_value=NS(conversation_id=uid(30)))
+        identity.get_imessage_conversation_thread = Mock()
         adapter = NS(gateway_runner=owner, _message_handler=None, _imessage_threaded_replies=True, _slack_enabled=False,
                      _reply_identity=identity, build_source=lambda **kwargs: NS(**kwargs))
         queue = NativeTurns(adapter, tmp_path / "native")

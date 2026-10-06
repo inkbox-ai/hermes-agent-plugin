@@ -38,6 +38,55 @@ def require_threading(identity: Any) -> None:
         raise RuntimeError("Native iMessage replies require Inkbox Python SDK 0.7.13 or newer with native reply and thread support")
 
 
+class ReplyPreflightError(RuntimeError):
+    """No upload/send was attempted; only read-only reply validation failed."""
+
+    def __init__(self, message: str, *, retryable: bool = False, status_code=None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
+def validate_reply_target(identity: Any, meta: dict, guard=None) -> dict:
+    """Verify the admitted source and backend thread capability before effects."""
+    require_threading(identity)
+    target = meta.get("imessage_reply_target")
+    if not target:
+        return {}
+    if target not in {item.get("id") for item in meta.get("imessage_sources", [])}:
+        raise ReplyPreflightError("Native iMessage reply target is not an admitted source; no send attempted")
+    conversation = str(meta.get("conversation_id") or "")
+    if not conversation:
+        raise ReplyPreflightError("Native iMessage source conversation is missing; no send attempted")
+    def field(value, name):
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+    try:
+        if guard:
+            guard()
+        source = identity.get_imessage(target)
+        if guard:
+            guard()
+        page = identity.get_imessage_thread(target, limit=1)
+        if guard:
+            guard()
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        transient = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (isinstance(status, int) and status >= 500)
+        try:
+            from httpx import TransportError
+            transient = transient or isinstance(exc, TransportError)
+        except ImportError:  # pragma: no cover - SDK already depends on httpx
+            pass
+        detail = "temporarily unavailable" if transient else "unavailable; verify source access and backend native-thread support"
+        raise ReplyPreflightError(f"Native iMessage reply preflight {detail}; no send attempted",
+                                  retryable=transient, status_code=status) from None
+    if str(field(source, "id") or "") != str(target) or any(
+        str(field(item, "conversation_id") or "") != conversation for item in (source, page)
+    ):
+        raise ReplyPreflightError("Native iMessage source/thread conversation does not match the admitted reply; no send attempted")
+    return auto_reply_kwargs(meta)
+
+
 def bind_context(session_id: str, context: dict) -> None:
     with _LOCK:
         prior = _CONTEXTS.get(session_id)

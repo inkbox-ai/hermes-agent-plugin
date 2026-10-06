@@ -1,5 +1,6 @@
 """New channel queues use real Hermes admission, processing, and native sessions."""
 import asyncio
+import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
@@ -94,6 +95,13 @@ def test_real_native_host_queue_checkpoint_and_original_reply(tmp_path, monkeypa
         adapter._slack_enabled = True
         adapter._imessage_threaded_replies = True
         identity = NS(send_imessage=Mock(return_value=NS(id=uid(80))), upload_imessage_media=Mock(return_value=NS(media_url="https://example.com/picture.png")))
+        identity.send_imessage.__signature__ = inspect.Signature([
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in ("reply_to_message_id", "plain_reply_fallback")
+        ])
+        identity.get_imessage = Mock(side_effect=lambda message_id: NS(id=message_id, conversation_id=uid(30)))
+        identity.get_imessage_thread = Mock(return_value=NS(conversation_id=uid(30)))
+        identity.get_imessage_conversation_thread = Mock()
         if unknown:
             identity.send_imessage.side_effect = [TimeoutError("ambiguous delivery"), NS(id=uid(81)), NS(id=uid(82)), NS(id=uid(83))]
         slack = Mock()
@@ -113,6 +121,7 @@ def test_real_native_host_queue_checkpoint_and_original_reply(tmp_path, monkeypa
                 user_id="+15555550101", user_id_alt="+15555550101", message_id=uid(number))
             route = {"chat_id": source.chat_id, "message_id": uid(number), "author": source.user_id, "mode": mode,
                 "conversation_id": uid(30) if mode == "imessage" else "CEXAMPLE", "imessage_reply_target": uid(number),
+                "imessage_sources": [{"id": uid(number)}],
                 "connection_id": uid(40), "thread_ts": thread, "message_ts": f"1234567891.{number:06}", "source_event_id": uid(number)}
             return MessageEvent(text="Question " + str(number), source=source, message_type=MessageType.TEXT,
                 message_id=uid(number), metadata={"inkbox_prepared": True, "inkbox_reply_route": route})
