@@ -98,7 +98,9 @@ jobs:
           uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
           uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
             --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$SDK_REQUIREMENT" \
-            pytest pyyaml fastapi uvicorn
+            pytest pyyaml fastapi 'uvicorn[standard]'
+          "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
+            "$GITHUB_WORKSPACE/tests/ci/check_voice_driver_ws.py"
 
       - name: Configure AUT identity + model + speech path (${{ matrix.scenario }})
         env:

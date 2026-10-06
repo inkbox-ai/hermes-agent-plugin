@@ -26,6 +26,7 @@ def test_live_setup_does_not_mutate_or_cache_managed_generations(name):
     assert workflow.index('hermes plugins enable inkbox') < workflow.index('tests/ci/check_hermes_runtime.py')
     assert 'uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python"' in workflow
     assert '"$SDK_REQUIREMENT"' in workflow
+    assert "pytest pyyaml fastapi 'uvicorn[standard]'" in workflow
     assert 'python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \\\n              "$GITHUB_WORKSPACE/tests/ci/check_gateway_ready.py"' in workflow
 
 
@@ -37,3 +38,17 @@ def test_native_gateway_keeps_recognized_argv_and_spy_stays_private():
     assert '${{ runner.temp }}/send_intents.jsonl' in workflow  # test input remains enabled
     upload = workflow.split('- name: Upload artifacts', 1)[1]
     assert 'send_intents.jsonl' not in upload
+
+
+@pytest.mark.parametrize('name', ['live-voice.yml', 'tests.yml'])
+def test_actual_voice_media_probe_uses_the_independent_runner(name):
+    workflow = (ROOT / '.github/workflows' / name).read_text()
+    assert "pytest pyyaml fastapi 'uvicorn[standard]'" in workflow
+    probe = ('"$RUNNER_TEMP/inkbox-live-runner/bin/python" \\\n'
+             '            "$GITHUB_WORKSPACE/tests/ci/check_voice_driver_ws.py"')
+    assert probe in workflow
+    assert workflow.index("'uvicorn[standard]'") < workflow.index(probe)
+    if name == 'live-voice.yml':
+        assert workflow.index(probe) < workflow.index('- name: Start voice driver')
+    else:
+        assert workflow.index(probe) < workflow.index('tests/ci/check_native_install.py')
