@@ -122,3 +122,42 @@ jobs:
         run: uv sync --extra test --frozen --python 3.12
       - name: Run native Windows unit tests
         run: uv run --frozen python -m pytest -v
+
+  native-install:
+    # Exercise the installed layout, not only an editable host/test environment.
+    # All remote SDK reads use a loopback fixture; no secrets or live sends.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Set up isolated runtime
+        run: echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
+      - name: Check out Hermes main
+        uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes/hermes-agent
+          fetch-depth: 1
+      - name: Install actual Hermes
+        run: |
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
+          echo "$HERMES_HOME/hermes-agent/.hermes/bin" >> "$GITHUB_PATH"
+      - name: Native admission and runtime helpers
+        run: |
+          PLUGIN_SOURCE="$(python3 "$GITHUB_WORKSPACE/tests/ci/stage_hermes_plugin.py" \
+            --source "$GITHUB_WORKSPACE" --runtime-home "$HERMES_HOME" --temp-root "$RUNNER_TEMP")"
+          mkdir -p "$HERMES_HOME/plugins"
+          ln -sfn "$PLUGIN_SOURCE" "$HERMES_HOME/plugins/inkbox"
+          hermes plugins enable inkbox
+          python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
+            "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
+          SDK_REQUIREMENT="$(python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
+            "$GITHUB_WORKSPACE/tests/ci/check_hermes_runtime.py")"
+          uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
+          uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
+            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$SDK_REQUIREMENT" \
+            pytest pyyaml fastapi uvicorn
+          "$RUNNER_TEMP/inkbox-live-runner/bin/pytest" tests/test_ci_import_isolation.py -q
+      - name: Real installed gateway readiness without credentials
+        run: python3 "$GITHUB_WORKSPACE/tests/ci/check_native_install.py"

@@ -195,12 +195,28 @@ def test_late_stop_before_executor_send_is_not_an_unknown_delivery(factory, tmp_
     asyncio.run(run())
 
 
-def test_batch_first_source_and_followups_do_not_interrupt(factory, tmp_path):
+def test_batch_first_source_and_followups_do_not_interrupt(factory, tmp_path, monkeypatch):
     async def run():
         gate = asyncio.Event()
         value = await harness(factory, tmp_path, gate=gate)
-        await value.queue.accept(receipt(1))
-        await value.queue.accept(receipt(2))
+        # Durable fsync admissions can exceed the fixture's 15ms quiet / 40ms burst windows
+        # on a loaded runner. Admit this burst before allowing its worker to
+        # batch; the independent model gate still proves no interruption.
+        admitted = asyncio.Event()
+        original_batch = value.queue._batch
+        async def batch_after_admission(*args, **kwargs):
+            await admitted.wait()
+            return await original_batch(*args, **kwargs)
+        monkeypatch.setattr(value.queue, "_batch", batch_after_admission)
+        # Model the two receipts as arriving together, independently of the
+        # filesystem latency spent durably accepting them.
+        import inkbox_plugin.native_turns as native_module
+        received_at = native_module.time.time()
+        with monkeypatch.context() as patch:
+            patch.setattr(native_module, "time", NS(time=lambda: received_at))
+            await value.queue.accept(receipt(1))
+            await value.queue.accept(receipt(2))
+        admitted.set()
         await started(value)
         assert value.inputs[0].text == "question 1\nquestion 2"
         await value.queue.accept(receipt(3))
