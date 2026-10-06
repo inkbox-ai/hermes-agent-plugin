@@ -72,8 +72,11 @@ jobs:
 
       - name: Install plugin into the gateway
         run: |
+          PLUGIN_SOURCE="$("$HERMES_HOME/hermes-agent/venv/bin/python3" \
+            "$GITHUB_WORKSPACE/tests/ci/stage_hermes_plugin.py" \
+            --source "$GITHUB_WORKSPACE" --runtime-home "$HERMES_HOME" --temp-root "$RUNNER_TEMP")"
           mkdir -p "$HERMES_HOME/plugins"
-          ln -sfn "$GITHUB_WORKSPACE" "$HERMES_HOME/plugins/inkbox"
+          ln -sfn "$PLUGIN_SOURCE" "$HERMES_HOME/plugins/inkbox"
           hermes plugins enable inkbox
           "$HERMES_HOME/hermes-agent/venv/bin/python3" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
