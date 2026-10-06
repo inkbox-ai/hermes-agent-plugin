@@ -139,6 +139,7 @@ from gateway.platforms.helpers import redact_phone
 try:
     from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
     from .native_turns import NativeTurns
+    from .tunnel_tls import install_tunnel_tls_compatibility
     from .slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
     from .slack_activity import SlackActivity
     from .imessage_state import auto_reply_kwargs, source_metadata, require_threading
@@ -188,6 +189,7 @@ try:
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
     from native_turns import NativeTurns
+    from tunnel_tls import install_tunnel_tls_compatibility
     from slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
     from slack_activity import SlackActivity
     from imessage_state import auto_reply_kwargs, source_metadata, require_threading
@@ -2610,6 +2612,7 @@ class InkboxAdapter(BasePlatformAdapter):
         _wipe_inkbox_tunnel_state(state_dir)
 
         try:
+            install_tunnel_tls_compatibility()
             # ``connect`` is sync (does an HTTPS round-trip + opens the data
             # plane); offload to a thread so the gateway event loop isn't
             # blocked. The returned listener owns its own supervisor threads.

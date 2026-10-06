@@ -7,6 +7,7 @@
 - Add access-scoped Vault metadata, secret decryption, and TOTP tools using a local Hermes Vault key.
 - Preserve pending permission scopes while fencing superseded workers; keep uncertain legacy work quarantined unless native ownership can be conclusively resolved.
 - Raise the base Inkbox SDK floor to 0.7.11; native iMessage requires 0.7.13 and Slack Companion requires 0.7.14.
+- Keep tunnel TLS compatible with native platform certificate verifiers while preserving trusted roots and hostname validation.
 
 ## 0.2.18
 

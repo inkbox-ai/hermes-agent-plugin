@@ -80,6 +80,10 @@ def main() -> None:
     home = Path(os.environ['HERMES_HOME'])
     launcher = home / 'hermes-agent/.hermes/bin/hermes'
     scripts = Path(__file__).resolve().parent
+    subprocess.run(
+        [sys.executable, str(scripts / 'hermes_python.py'), str(scripts / 'check_tunnel_tls.py')],
+        env={**os.environ, 'INKBOX_TLS_TEST_PLUGIN': str(home / 'plugins/inkbox')}, check=True, timeout=45,
+    )
     server = ThreadingHTTPServer(('127.0.0.1', 0), LocalAPI)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

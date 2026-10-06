@@ -110,7 +110,7 @@ jobs:
           uv venv --python 3.12
           uv pip install 'inkbox==${{ matrix.sdk }}' 'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8'
       - name: Verify base behavior and structural opt-in gates
-        run: .venv/bin/python -m pytest -q tests/test_optional_capabilities.py tests/test_vault_tools.py tests/test_setup_slack.py tests/test_slack_sdk.py tests/test_slack_activity.py tests/test_slack_companion_adapter.py tests/test_imessage_native_sdk.py
+        run: .venv/bin/python -m pytest -q tests/test_optional_capabilities.py tests/test_vault_tools.py tests/test_setup_slack.py tests/test_slack_sdk.py tests/test_slack_activity.py tests/test_slack_companion_adapter.py tests/test_imessage_native_sdk.py tests/test_tunnel_tls.py
 
   windows-unit:
     runs-on: windows-latest

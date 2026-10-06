@@ -648,6 +648,14 @@ A superseding instruction denies unresolved permission requests without clearing
 
 Development installs and PR checks use the published Inkbox SDK (`>=0.7.11,<1.0.0`).
 
+SDK versions 0.7.11–0.7.14 inspect certificate-store statistics that native platform
+verifiers may not expose. The plugin adapts only the exact known tunnel helper:
+unsupported statistics retain the same verifying context, roots and hostname
+checks; a known-empty store retains the SDK's certificate-bundle fallback. It
+does not change global TLS policy or installed SDK files. Unrecognized helpers
+remain untouched and are reported as such. Remove this compatibility adapter
+when the minimum supported SDK handles unsupported store statistics itself.
+
 ```bash
 python -m pytest
 python -m pytest tests/test_realtime_auth.py tests/test_realtime_bridge_parity.py
