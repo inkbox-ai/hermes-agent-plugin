@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from typing import Any, Dict, List
 from urllib.parse import urlsplit, urlunsplit
@@ -303,6 +304,30 @@ def run_doctor() -> Dict[str, Any]:
             if cfg.identity:
                 identity = client.get_identity(cfg.identity)
                 summary["identityRecord"] = object_summary(identity)
+                summary["optionalCapabilities"] = {
+                    "slackEnabled": cfg.slack_enabled,
+                    "nativeIMessageEnabled": cfg.imessage_threaded_replies,
+                    "vaultKeyConfigured": bool(os.getenv("INKBOX_HERMES_VAULT_KEY")),
+                }
+                if cfg.imessage_threaded_replies:
+                    try:
+                        from .imessage_state import require_threading
+                        require_threading(identity)
+                    except Exception:
+                        findings.append({"id": "inkbox/native-imessage-sdk", "severity": "error",
+                            "message": "Native iMessage requires Inkbox SDK 0.7.13+ reply/thread APIs. Upgrade the SDK or disable the opt-in."})
+                if cfg.slack_enabled:
+                    try:
+                        connections = client.slack.list_connections(str(identity.id))
+                        subscriptions = client.webhooks.subscriptions.list(agent_identity_id=str(identity.id))
+                        active = [item for item in _field(connections, "connections", []) if str(getattr(_field(item, "status", ""), "value", _field(item, "status", ""))) == "connected"]
+                        paused = any(str(_field(item, "status", "")) == "paused" and any(str(kind).startswith("slack.") for kind in _field(item, "event_types", [])) for item in subscriptions)
+                        if not active or paused:
+                            findings.append({"id": "inkbox/slack-not-ready", "severity": "warning",
+                                "message": "Slack needs a connected workspace and an active subscription. Rerun setup or inspect the paused subscription; do not create a duplicate."})
+                    except Exception:
+                        findings.append({"id": "inkbox/slack-diagnostics-unavailable", "severity": "warning",
+                            "message": "Slack readiness reads failed; check the installed SDK, identity, and workspace connection."})
                 incoming = identity.get_incoming_call_action()
                 incoming_action = str(
                     getattr(

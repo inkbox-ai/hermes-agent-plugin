@@ -140,6 +140,9 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     tool_names = {args[0] for args, _kwargs in ctx.tools}
     assert tool_names == {
         "inkbox_whoami",
+        "inkbox_list_vault_secrets",
+        "inkbox_get_vault_secret",
+        "inkbox_get_totp_code",
         "inkbox_lookup_contact",
         "inkbox_list_contacts",
         "inkbox_get_contact",
@@ -173,7 +176,11 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_list_a2a_sent_tasks",
         "inkbox_get_a2a_sent_task",
     }
-    assert _manifest_provides_tools() == tool_names
+    optional = {"inkbox_slack_list_connections", "inkbox_slack_list_conversations", "inkbox_slack_list_messages",
+                "inkbox_slack_search", "inkbox_slack_send_message", "inkbox_slack_get_action",
+                "inkbox_get_imessage_thread", "inkbox_get_imessage_conversation_thread"}
+    assert _manifest_provides_tools() == tool_names | optional
+    assert not tool_names & optional
 
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"

@@ -128,7 +128,7 @@ hermes gateway restart
 
 ## Companion mode
 
-Version 0.2.18 requires Inkbox SDK `>=0.7.6,<1.0.0`. An administrator can enable
+Version 0.2.19 requires Inkbox SDK `>=0.7.11,<1.0.0`. An administrator can enable
 Companion mode for an identity and select its sponsor. Installation leaves it off.
 Use an identity-scoped API key and signed Inkbox webhooks.
 
@@ -200,7 +200,7 @@ completed host turn. No automatic replay of uncertain submissions is attempted.
 Shutdown cancels Companion host processing and waits for any in-flight SDK send
 before releasing checkpoint ownership. Late callbacks cannot complete a closed
 receiver's uncertain turn. Missing Companion SDK helpers produce an explicit
-compatibility error requiring Inkbox SDK `>=0.7.6,<1.0.0`.
+compatibility error requiring Inkbox SDK `>=0.7.11,<1.0.0`.
 
 Delivery failures for tracked Companion conversations are recorded in the
 checkpoint's `delivery_failures` field, using the channel and canonical thread or
@@ -211,7 +211,7 @@ diagnostics do not schedule recovery turns or copy failed output into private ch
 
 `hermes inkbox setup` walks the active Hermes install through Inkbox configuration:
 
-1. Installs or upgrades `inkbox>=0.7.6,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
+1. Installs or upgrades `inkbox>=0.7.11,<1.0.0` and `aiohttp>=3.9` in the Hermes Python environment when needed.
 2. Authenticates to Inkbox, or starts self-signup if you do not have an API key yet.
 3. Resolves or creates the Inkbox agent identity for this Hermes gateway.
 4. Optionally provisions a local US phone number so SMS and voice are available.
@@ -232,13 +232,13 @@ The setup wizard installs dependencies into the Python environment that runs Her
 If the wizard prints a missing-SDK warning, use the exact command it prints. It will look like this:
 
 ```bash
-/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.7.6,<1.0.0' 'aiohttp>=3.9'
+/path/to/hermes/venv/bin/python3 -m pip install 'inkbox>=0.7.11,<1.0.0' 'aiohttp>=3.9'
 ```
 
 When `uv` is available, the wizard prefers:
 
 ```bash
-uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.7.6,<1.0.0' 'aiohttp>=3.9'
+uv pip install --python /path/to/hermes/venv/bin/python3 'inkbox>=0.7.11,<1.0.0' 'aiohttp>=3.9'
 ```
 
 Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; plain `pip` may point at pyenv, Homebrew, system Python, or another virtualenv.
@@ -572,7 +572,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.6 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.11 or
 newer.
 
 Realtime-only call tools:
@@ -599,12 +599,52 @@ The plugin registers all `skills/*/SKILL.md` files with Hermes.
 | `inkbox-contact-rules` | Explaining server-side contact rules; rule edit tools are not exposed in Hermes |
 | `inkbox-identity-access` | Explaining identity access; grant/revoke tools are not exposed in Hermes |
 | `inkbox-notes-memory` | Explaining note limitations; Inkbox note tools are not exposed in Hermes |
-| `inkbox-credential-use` | Explaining vault limitations; Inkbox vault tools are not exposed in Hermes |
+| `inkbox-credential-use` | Access-scoped Vault metadata, decrypted credentials, and current TOTP codes |
 | `inkbox-outreach-sequence` | Multi-step outreach over email/SMS |
+
+## Slack, native replies, and credentials
+
+These features use the existing Hermes platform, session store, authorization, and tool catalog.
+
+| Setting | Default | Behavior |
+|---|---|---|
+| `INKBOX_SLACK_ENABLED` / platform `slack_enabled` | `false` | Register Slack tools and accept signed Slack events. Explicit platform config takes precedence over the environment. |
+| `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
+| `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
+
+The base SDK floor is **0.7.11**. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+
+### Slack setup and replies
+
+Run `hermes inkbox setup` and choose Slack. The wizard can reuse saved workspaces, provision a connection using the appropriate claimed identity/admin credential, print its installation link, and wait for completion. Waiting is bounded and cancellable; skipping does not replace existing connections. Restart the gateway after changing configuration. `hermes inkbox doctor` provides read-only readiness checks.
+
+Slack tools: `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Explicit sends require an idempotency key and accept at most **12,000 characters**. Preserve opaque cursors and timestamps. For an unknown send result, inspect its action instead of sending again.
+
+Slack ordinary DMs reply inline; channel mentions normally reply in their native thread. Companion keeps channel-wide authorized history within its connection/channel/activation, but every reply retains the source's exact destination: top-level stays top-level, native subthread stays in that subthread. Safe mode and mention mode remain independent gates. Unmentioned context does not start work or activity indicators. Approval answers and Stop must match the original actor and exact thread.
+
+Inline replies show source 👀 while working, remove it on completion/cancel, and show ❌ on failure. Native-thread replies use working/awaiting-input/ready status only, with **no eyes or reaction fallback**. Indicators are aggregated and restart-cleaned. An API success is not proof that a particular Slack client renders the indicator.
+
+### Native iMessage replies
+
+With the opt-in enabled, an automatic reply targets its original source message using the SDK's explicit plain-reply fallback policy. The model cannot choose a reply target. `inkbox_get_imessage_thread` and `inkbox_get_imessage_conversation_thread` expose bounded, cursor-paginated reads; nullable ancestry remains unknown, not an invented root. Companion turns use their supplied authorized history instead of broadening it through these reads.
+
+One conversation still owns one Hermes session and serial queue. Compatible short text bursts coalesce with the **first source target**; actor, ancestry, media, and reaction boundaries split work. Follow-ups persist before acknowledgment and do not interrupt active work. Prompts, automatic attachments, and explicit same-conversation tool sends retain the originating route. Outside an inbound native turn, a deliberate proactive send remains plain and uses its explicit recipient. During an inbound native turn, changing the destination or supplying reply/fallback overrides is rejected before upload/send.
+
+### Vault and TOTP
+
+`inkbox_list_vault_secrets` lists accessible metadata without requiring the plugin key. `inkbox_get_vault_secret` decrypts a chosen secret; login payloads omit the TOTP seed and report `has_totp`. `inkbox_get_totp_code` returns only the current code and validity window. Secret IDs must come from accessible metadata. Each operation uses a fresh client and per-secret access read; expired/revoked access is not served from an old credential cache.
+
+Set **only `INKBOX_HERMES_VAULT_KEY` for this plugin** through the host's local secret mechanism. Migrate any old global `INKBOX_VAULT_KEY` or SDK-wide saved vault key out of this gateway process: the SDK itself auto-unlocks global configuration when constructing clients, which can fail unrelated operations or fetch secrets before metadata reads. The plugin does not mutate global environment/config to override that SDK behavior, and decryption always verifies the plugin-specific key. A bad plugin key does not affect ordinary channel clients or metadata listing. Never write keys, plaintext credentials, or TOTP seeds into conversation memory or logs.
+
+### Durable recovery
+
+Private identity-scoped native and Companion checkpoints retain receipts, original routes, completed answers, deliveries, and uncertain outcomes. Keep existing state when upgrading or disabling a feature; do not delete journals to force replay. Proven pre-admission failures and checkpointed answers are recoverable without rerunning the model. Unknown tool/send outcomes are never blindly retried, and callbacks do not schedule duplicate delivery.
+
+A superseding instruction denies unresolved permission requests without clearing remembered approvals or unrelated configuration. Conflicting successors are released only after the exact old native worker generation and its processes have settled. Current Hermes worker-finalizer ownership markers provide that proof for running turns; a legacy/restarted turn without conclusive native ownership remains quarantined with an actionable checkpoint error. A released session guard, fresh session, or canceled asyncio task alone is not proof of worker exit.
 
 ## Development Commands
 
-Development installs and PR checks use the published Inkbox SDK (`>=0.7.6,<1.0.0`).
+Development installs and PR checks use the published Inkbox SDK (`>=0.7.11,<1.0.0`).
 
 ```bash
 python -m pytest

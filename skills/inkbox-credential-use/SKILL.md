@@ -1,54 +1,15 @@
 ---
 name: inkbox-credential-use
-description: Use when the user asks the agent to "log into X", "get the API key for Y", "fetch the SSH key for Z", or "give me the TOTP code for service A". Hermes does not expose Inkbox vault tools; explain the limitation and do not invent credential access.
+description: Use when the user requests an accessible credential or current 2FA code, or asks the agent to log into a service using Inkbox Vault.
 user-invocable: false
 ---
 
-# Inkbox credential use
+# Inkbox credentials
 
-OpenClaw exposes Inkbox vault tools. Hermes social-tier does not register credential vault tools, so this plugin cannot list, fetch, or generate credentials/TOTP codes through Inkbox.
+Use `inkbox_list_vault_secrets` to find authorized metadata, then `inkbox_get_vault_secret` with the selected `secret_id` for the requested operation. Login results omit TOTP seeds. Use `inkbox_get_totp_code` for a current 2FA code and validity window; refetch after expiry rather than storing the code.
 
-## Hermes tool availability
+Decryption requires `INKBOX_HERMES_VAULT_KEY` in the local gateway process. If locked, explain that local configuration and restart are needed. Never ask the user to send the key through chat or pass it as a tool argument. Metadata listing does not require this plugin key. Do not infer access from an old result: fetch current credentials only when needed, and honor revoked/deleted-secret errors.
 
-- There is no `inkbox_credentials_list`, `inkbox_credentials_get_login`, `inkbox_credentials_get_api_key`, `inkbox_credentials_get_ssh_key`, or `inkbox_totp_code` tool in Hermes.
-- Do not claim that you checked the vault or retrieved a credential.
-- If the user needs vault access, direct them to Inkbox Console or a host/plugin tier that exposes the Inkbox vault tools.
+Use credentials transiently for the authorized task; do not echo plaintext unless the user specifically requested the value, and never save credentials, keys, TOTP seeds, or current codes in session memory. Do not claim to have retrieved a credential if the tool failed.
 
-## Prerequisites
-
-- The user must provide credentials through an approved host mechanism outside this Hermes Inkbox plugin.
-- Do not ask the user to paste secrets into chat unless they explicitly choose that path and the current host policy allows it.
-
-## Workflow
-
-1. **State the limitation.** Say that this Hermes installation does not expose Inkbox vault tools.
-2. **Offer a safe path.** Ask the user to configure the needed credential through the host's supported secret mechanism or Inkbox Console.
-3. **Avoid plaintext echo.** If credentials arrive through another tool, use them for the requested action and do not repeat plaintext unless the user explicitly asked to see it.
-
-## Hygiene
-
-- **Don't fake vault access.** No Inkbox vault tool is available in Hermes.
-- **Don't paste plaintext into chat.** When another approved credential source exists, use it without repeating secrets.
-- **Don't store secrets in session memory.** Treat credentials as transient.
-
-## Errors
-
-| Error | Meaning |
-|---|---|
-| Missing credential tool | This Hermes plugin tier does not expose Inkbox vault tools. |
-| User asks for a secret by name | Ask them to configure it through the host's supported secret path or Inkbox Console. |
-
-## What this skill does NOT cover
-
-- Creating, updating, or deleting secrets — there's no plugin tool for this in agent-scoped mode.
-- Granting access to secrets — admin-only via the Inkbox Console.
-- TOTP setup — initial TOTP config also happens in the Console.
-
-## When you need more — raw Inkbox docs
-
-If a payload shape, secret type, vault behavior, or TOTP detail isn't covered here, go to the source:
-
-- **https://inkbox.ai/llms.txt** — LLM-friendly index of every Inkbox doc page.
-- **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
-
-Especially useful when checking the exact fields on `LoginPayload`, `APIKeyPayload`, `SSHKeyPayload`, `KeyPairPayload`, `OtherPayload`, or `TOTPCode` rather than guessing.
+The plugin has no tools for creating/editing secrets, granting access, or configuring initial TOTP seeds. Those actions belong in Inkbox Console. A secret name alone is not a secret ID; list metadata rather than inventing an ID.

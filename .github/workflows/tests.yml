@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.6,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.11,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -74,7 +74,7 @@ jobs:
         run: |
           uv venv --python 3.14
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.6,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.11,<1.0.0' \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
@@ -95,6 +95,22 @@ jobs:
           "$GITHUB_WORKSPACE/.venv/bin/python" \
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_plugin_scan.py" \
             "$RUNNER_TEMP/plugin-scan"
+
+  sdk-compatibility:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ["0.7.11", "0.7.13", "0.7.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Install published SDK boundary
+        run: |
+          uv venv --python 3.12
+          uv pip install 'inkbox==${{ matrix.sdk }}' 'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8'
+      - name: Verify base behavior and structural opt-in gates
+        run: .venv/bin/python -m pytest -q tests/test_optional_capabilities.py tests/test_vault_tools.py tests/test_setup_slack.py tests/test_slack_sdk.py tests/test_slack_activity.py tests/test_slack_companion_adapter.py tests/test_imessage_native_sdk.py
 
   windows-unit:
     runs-on: windows-latest

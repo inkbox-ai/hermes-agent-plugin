@@ -19,11 +19,11 @@ Use this skill when an Inkbox tool fails, the user asks why Inkbox is not workin
 | `sender_sms_pending` | The Inkbox phone number is still propagating to carriers. Retry later and verify `smsStatus`. |
 | `recipient_not_opted_in` | Ask the recipient to text `START` to the agent's Inkbox number, then retry. |
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
-| `Vault is locked` | Export `INKBOX_VAULT_KEY=<the vault key>` in the shell launching this plugin's gateway process, or use the configured `vault.keyEnvVar`. |
+| `Vault is locked` | Set `INKBOX_HERMES_VAULT_KEY` through the local gateway secret mechanism and restart; never paste it in chat. |
 
 ## Vault unlock pattern
 
-Vault tools are optional and must be allowlisted before use. The plugin never persists the vault key. It reads the key once on first credential access from `INKBOX_VAULT_KEY`, or from the custom env var configured under `vault.keyEnvVar`.
+Vault tools respect native tool policy. The plugin never persists the vault key. Metadata listing needs no plugin key; each decryption/TOTP operation reads `INKBOX_HERMES_VAULT_KEY` and uses fresh SDK reads. Migrate SDK-global Vault auto-unlock settings out of this gateway process: they can affect unrelated clients before the plugin handles a tool.
 
 If vault access fails, do not ask for the vault key in chat. Tell the operator which env var needs to be set in this plugin's gateway process.
 
@@ -39,3 +39,7 @@ If a config field, error message, or setup flow here does not match what the use
 
 - **https://inkbox.ai/llms.txt** — LLM-friendly index of Inkbox docs.
 - **https://inkbox.ai/docs/all.md** — the full Inkbox documentation concatenated as one markdown file.
+
+## Optional channels
+
+Native iMessage replies require `INKBOX_IMESSAGE_THREADED_REPLIES=true` and SDK 0.7.13+. Slack requires `INKBOX_SLACK_ENABLED=true`; Slack Companion requires SDK 0.7.14+. A paused Slack subscription needs operator attention, not a duplicate subscription. Run `hermes inkbox doctor` for read-only checks. Never delete native/Companion checkpoints or resend an unknown-outcome delivery to force recovery.

@@ -5,6 +5,13 @@ import types
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from pathlib import Path
+
+# Native plugins are loaded from a flat checkout, not installed as a package.
+# Give focused test invocations the same package identity as host discovery.
+_plugin_package = types.ModuleType("inkbox_plugin")
+_plugin_package.__path__ = [str(Path(__file__).resolve().parents[1])]
+sys.modules.setdefault("inkbox_plugin", _plugin_package)
 
 
 def _real_host_available() -> bool:
