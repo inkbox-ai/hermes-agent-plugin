@@ -11,7 +11,7 @@ from importlib.metadata import version
 
 logger = logging.getLogger(__name__)
 _LOCK = threading.Lock()
-_VERSIONS = frozenset({'0.7.11', '0.7.12', '0.7.13', '0.7.14'})
+_VERSIONS = frozenset({'0.7.11', '0.7.12', '0.7.13', '0.7.14', '0.7.15'})
 # Exact published helper source, including its empty-store fallback contract.
 _FACTORY_SHA256 = '07bde8ed2c82e51f22afb38dbfbd6f8195a160223499d4263a5c9d90054a4eb9'
 
