@@ -437,24 +437,46 @@ def _aut_speech_mode(aut, call_id):
 
 
 def _hangup_call(client, call_id) -> None:
-    """End a live test call through the control API, tolerating an ended race."""
+    """End this exact call; reconcile failed control within its cleanup deadline."""
     if not call_id:
         return
     try:
         client.calls.hangup(call_id)
+        # Preserve the established successful-command path. Callers such as
+        # _sweep_matching_calls own their separate terminal-state grace period.
         return
-    except Exception as hangup_error:
-        deadline = time.monotonic() + 10
-        status = "unknown"
-        while time.monotonic() < deadline:
+    except Exception as exc:
+        hangup_error = exc
+    deadline = time.monotonic() + 10
+    status = "unknown"
+    retries = 0
+    while time.monotonic() < deadline:
+        try:
+            raw = getattr(client.calls.get(call_id), "status", "")
+            status = str(getattr(raw, "value", raw) or "").lower()
+        except Exception:
+            status = "unknown"
+        if status in {"completed", "canceled", "failed"}:
+            return
+        # The server scopes the operation to this exact call/identity and
+        # reconciles already-ended carrier legs. Retry a transient control
+        # failure only after a fresh positive active-state read, never after
+        # an accepted command or an unavailable/unknown state. Keep one fixed
+        # deadline and a small attempt bound; a stuck call must still fail.
+        if (status in {"initiated", "ringing", "answered"}
+                and getattr(hangup_error, "status_code", None) in {502, 503, 504}
+                and retries < 2 and time.monotonic() < deadline):
+            retries += 1
             try:
-                status = (getattr(client.calls.get(call_id), "status", "") or "").lower()
-            except Exception:
-                status = "unknown"
-            if status in {"completed", "canceled", "failed"}:
-                return
-            time.sleep(0.5)
-        raise RuntimeError(f"failed to hang up live test call {call_id}; status={status!r}") from hangup_error
+                client.calls.hangup(call_id)
+            except Exception as exc:
+                hangup_error = exc
+            else:
+                hangup_error = None
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.5, remaining))
+    raise RuntimeError(f"failed to hang up live test call {call_id}; status={status!r}") from hangup_error
 
 
 def _hangup_fresh_calls(client, candidates, baseline: set) -> None:

@@ -2897,6 +2897,15 @@ class InkboxAdapter(BasePlatformAdapter):
         origin = reply_route.get()
         meta = {**(metadata or {}), **origin} if origin and origin.get("chat_id") == str(chat_id) else metadata or {}
         thread_id = str(meta.get("thread_id") or "").strip()
+        recovery_target = meta.get("inkbox_recovery_target")
+        if isinstance(recovery_target, dict) and recovery_target.get("mode") == "imessage":
+            # A failure callback owns its original destination, not whichever
+            # conversation most recently used this contact's shared session.
+            return (
+                str(recovery_target.get("conversation_id") or ""),
+                str(recovery_target.get("target") or ""),
+                thread_id,
+            )
         inbound = getattr(self, "_last_inbound_imessage", {})
         imessage_meta = (
             inbound.get(_sms_state_key(chat_id, thread_id))
@@ -3108,6 +3117,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 target=to_number or None,
                 content=caption or "[media attachment]",
                 failure=failure,
+                original_route=metadata,
             )
             return failure
 
@@ -3298,6 +3308,12 @@ class InkboxAdapter(BasePlatformAdapter):
 
         meta = metadata or {}
         mode = (meta.get("mode") or "").lower().strip()
+        recovery_target = meta.get("inkbox_recovery_target")
+        source_bound_recovery = (
+            isinstance(recovery_target, dict)
+            and recovery_target.get("mode") == mode
+            and mode in {"sms", "imessage", "email"}
+        )
 
         # End-of-call grace window: when a voice call ends, the agent's last
         # in-flight turn often finishes generating *after* the WS has closed.
@@ -3320,7 +3336,7 @@ class InkboxAdapter(BasePlatformAdapter):
         active_hosted_turns = getattr(
             self, "_hosted_post_call_active_chats", {},
         )
-        if active_hosted_turns.get(chat_key, 0) > 0:
+        if active_hosted_turns.get(chat_key, 0) > 0 and not source_bound_recovery:
             logger.info(
                 "[Inkbox] Suppressed hosted post-call model text for chat %s: %s…",
                 chat_id, (content or "")[:60].replace("\n", " "),
@@ -3335,6 +3351,7 @@ class InkboxAdapter(BasePlatformAdapter):
         pending_failure_replies = failure_replies.get(chat_key, 0)
         if (
             pending_failure_replies > 0
+            and not source_bound_recovery
             and (content or "").startswith("Sorry, I encountered an error (")
         ):
             if pending_failure_replies == 1:
@@ -3355,6 +3372,7 @@ class InkboxAdapter(BasePlatformAdapter):
             and (time.time() - closed_at) < VOICE_GRACE_SECONDS
             and chat_id not in self._active_call_ws
             and not self._last_inbound_modality.get(str(chat_id))
+            and not source_bound_recovery
         ):
             logger.info(
                 "[Inkbox] Suppressed post-call voice-leakage for chat %s: %s…",
@@ -3393,6 +3411,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 target=str(chat_id) if str(chat_id).startswith("+") else None,
                 content=content,
                 failure=failure,
+                original_route=meta,
             )
             return failure
         if mode == "imessage" and len(content or "") > IMESSAGE_MAX_LENGTH:
@@ -3405,6 +3424,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 target=str(chat_id) if str(chat_id).startswith("+") else None,
                 content=content,
                 failure=failure,
+                original_route=meta,
             )
             return failure
 
@@ -3513,6 +3533,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     target=to_number or None,
                     content=content,
                     failure=failure,
+                    original_route=meta,
                 )
                 return failure
 
@@ -3535,6 +3556,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 or sms_meta.get("remote_phone_number")
                 or chat_id
             ).strip()
+            recovery_target = meta.get("inkbox_recovery_target")
+            if isinstance(recovery_target, dict) and recovery_target.get("mode") == "sms":
+                conversation_id = str(recovery_target.get("conversation_id") or "")
+                to_number = str(recovery_target.get("target") or "")
             if not conversation_id and not to_number.startswith("+"):
                 # chat_id is a contact UUID (or unknown shape) — look up the
                 # primary phone number on the contact record.
@@ -3593,11 +3618,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     target=to_number or None,
                     content=content,
                     failure=failure,
+                    original_route=meta,
                 )
                 return failure
 
         if mode == "email":
             stash = self._last_inbound_email.get(str(chat_id), {})
+            recovery_target = meta.get("inkbox_recovery_target")
+            if isinstance(recovery_target, dict) and recovery_target.get("mode") == "email":
+                stash = recovery_target.get("email_context") or {}
             to_addr = (meta.get("to_email") or stash.get("from_address") or "").strip()
             if not to_addr:
                 # If the chat_id already looks like an email address, use it
@@ -3670,6 +3699,10 @@ class InkboxAdapter(BasePlatformAdapter):
                     target=to_addr or None,
                     content=content,
                     failure=failure,
+                    original_route={
+                        **meta, "stored_message_id": stored_id, "to_email": to_addr,
+                        "subject": subject, "in_reply_to_message_id": in_reply_to,
+                    },
                 )
                 return failure
 
@@ -5433,10 +5466,13 @@ class InkboxAdapter(BasePlatformAdapter):
             if guard is not None:
                 guard._inkbox_event = event
         route = (event.metadata or {}).get("inkbox_reply_route")
+        # Native queue drains inherit the finishing task's ContextVars. An
+        # unrouted voice/hosted turn must not inherit a previous text target.
+        reply_route.set(route)
         if route:
-            reply_route.set(route)
-            self._conversation_state().row(str(event.source.chat_id))["active_author"] = route.get("author")
-            self._conversation_state().save(str(event.source.chat_id))
+            if "author" in route:
+                self._conversation_state().row(str(event.source.chat_id))["active_author"] = route["author"]
+                self._conversation_state().save(str(event.source.chat_id))
         if getattr(self, "_companion", None) is not None and self._companion.processing(event):
             return
         if getattr(self, "_native_turns", None) is not None and self._native_turns.processing(event):
@@ -5993,6 +6029,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 "subject": subject,
                 "rfc_message_id": rfc_message_id,
                 "from_address": to_address,
+                # reply-all accepts outbound stored messages and preserves
+                # their visible recipients; an RFC header ID is not this ID.
+                "stored_message_id": message_id,
             }
             await self._note_outbound_delivery_failure(
                 mode="email",
@@ -6955,6 +6994,29 @@ class InkboxAdapter(BasePlatformAdapter):
         channel_prompt, auto_skill = self._resolve_channel_overrides(
             mode, chat_id, default_skills,
         )
+        # Callback-only and post-restart failures can have no saved send route.
+        # Pin their known destination before queueing: an active call or a later
+        # inbound message must not redirect this recovery turn's normal reply.
+        # Keep the original route's email threading/native metadata when known.
+        recovery_route = dict(original_route or {})
+        recovery_route.update(chat_id=str(chat_id), mode=mode)
+        recovery_route.setdefault("thread_id", thread_id)
+        recovery_route["inkbox_recovery_target"] = {
+            "mode": mode,
+            "conversation_id": conversation_id or "",
+            "target": target or "",
+        }
+        if mode == "email":
+            recovery_route["to_email"] = target or ""
+            email_context = dict(self._last_inbound_email.get(str(chat_id), {}))
+            for field, route_field in (("stored_message_id", "stored_message_id"),
+                                       ("subject", "subject"), ("rfc_message_id", "in_reply_to_message_id")):
+                if route_field in recovery_route:
+                    # Explicit absence is authoritative too: a failed cold
+                    # send must never acquire a newer message's reply target.
+                    email_context[field] = recovery_route[route_field]
+            email_context["from_address"] = target or ""
+            recovery_route["inkbox_recovery_target"]["email_context"] = email_context
         source = self.build_source(
             chat_id=str(chat_id),
             chat_name=str(target or chat_id),
@@ -6979,7 +7041,7 @@ class InkboxAdapter(BasePlatformAdapter):
             message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
-            metadata={"inkbox_reply_route": original_route} if original_route else {},
+            metadata={"inkbox_reply_route": recovery_route},
         )
         try:
             await self._enqueue(event)
@@ -7008,6 +7070,7 @@ class InkboxAdapter(BasePlatformAdapter):
         target: Optional[str],
         content: str,
         failure: SendResult,
+        original_route: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Feed a synchronous send rejection into the delivery-failure loop.
 
@@ -7019,6 +7082,8 @@ class InkboxAdapter(BasePlatformAdapter):
             target: Remote phone number or email address, when known.
             content: The message body that was rejected.
             failure: The failed SendResult built for the host gateway.
+            original_route: Exact metadata used by the failed send; retains
+                source threading even if another turn updated the contact stash.
 
         Returns:
             None: Transient/network failures are skipped outright — the
@@ -7027,6 +7092,35 @@ class InkboxAdapter(BasePlatformAdapter):
         """
         if failure.retryable:
             return
+        route = dict(original_route or {})
+        origin = reply_route.get()
+        if origin and origin.get("chat_id") == str(chat_id) and origin.get("mode") == mode:
+            route.update(origin)
+        if mode == "email" and original_route is not None:
+            for field in ("stored_message_id", "to_email", "subject", "in_reply_to_message_id"):
+                if field in original_route:
+                    route[field] = original_route[field]
+        route.update(chat_id=str(chat_id), mode=mode)
+        thread_id = str(route.get("thread_id") or thread_id or "") or None
+        # Local length guards run before destination resolution. Resolve only
+        # that sparse case now; never replace a known attempted destination
+        # with state which may have changed while an SDK request was running.
+        if mode == "sms" and not conversation_id and not target:
+            recovery_target = route.get("inkbox_recovery_target")
+            if isinstance(recovery_target, dict) and recovery_target.get("mode") == "sms":
+                conversation_id = recovery_target.get("conversation_id") or ""
+                target = recovery_target.get("target") or ""
+            else:
+                stash = (self._last_inbound_sms.get(_sms_state_key(chat_id, thread_id or ""))
+                         or self._last_inbound_sms.get(str(chat_id), {}))
+                conversation_id = (route.get("conversation_id") or route.get("conversationId")
+                                   or _sms_conversation_target(thread_id or "") or stash.get("conversation_id"))
+                target = (route.get("to_phone") or route.get("toPhone")
+                          or route.get("remote_phone_number") or stash.get("remote_phone_number"))
+                if not conversation_id and not target:
+                    target = str(chat_id) if str(chat_id).startswith("+") else await asyncio.to_thread(self._lookup_contact_phone, chat_id)
+        elif mode == "imessage" and not conversation_id and not target:
+            conversation_id, target, thread_id = await self._resolve_imessage_destination(chat_id, route)
         keys = _outbound_failure_keys(mode, conversation_id, target, chat_id=chat_id)
         now = time.time()
         if content.startswith(_HOST_PLAINTEXT_FALLBACK_PREFIX) and any(
@@ -7058,6 +7152,7 @@ class InkboxAdapter(BasePlatformAdapter):
             error_code=error_code,
             error_detail=error_detail,
             stage="send_rejected",
+            original_route=route,
         )
 
     async def _on_text_lifecycle(self, envelope: Dict[str, Any]) -> "web.Response":
