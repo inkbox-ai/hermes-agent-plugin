@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover - local tests without Hermes
     masked_secret_prompt = None
 
 
-INKBOX_MIN_VERSION = "0.7.6"
+INKBOX_MIN_VERSION = "0.7.11"
 INKBOX_REQUIREMENTS = (
     f"inkbox>={INKBOX_MIN_VERSION},<1.0.0", "aiohttp>=3.9", "segno>=1.5",
     "audioop-lts>=0.2.1; python_version >= '3.13'",
@@ -2037,6 +2037,239 @@ def _configure_channel_display() -> None:
         save_config(config)
 
 
+def _slack_credential_error(exc: Exception) -> str | None:
+    """Translate credential rejections without printing response bodies."""
+    status = _error_status(exc)
+    detail = getattr(exc, "detail", None)
+    if status == 422:
+        return "Slack rejected the app-configuration token pair. Check the token types, expiry, and that both belong together."
+    if status == 409:
+        if isinstance(detail, dict) and detail.get("code") == "credentials_required":
+            return "Slack needs a new app-configuration access and refresh token pair."
+        if detail == "Generate a separate app-configuration token pair for this organization.":
+            return "Generate a separate app-configuration token pair for this Inkbox organization."
+        if detail == "Use app-configuration tokens from the Slack user who created these apps.":
+            return "Use app-configuration tokens from the Slack user who created this workspace's apps."
+    return None
+
+
+def _print_slack_setup_error(stage: str, exc: Exception) -> None:
+    """Identify the failed step without exposing tokens or installation URLs."""
+    status = _error_status(exc)
+    suffix = f" (HTTP {status})" if isinstance(status, int) and 100 <= status <= 599 else ""
+    print_warning(f"  Could not finish Slack setup while {stage}{suffix}.")
+    print_info("  The Slack connection was not confirmed. Rerun `hermes inkbox setup` to continue.")
+
+
+def _wait_for_slack(
+    resource: Any, identity_id: Any, *, deadline: float,
+    workspace_id: str | None = None,
+) -> Any | None:
+    """Wait for app readiness or the selected workspace's connection."""
+    while time.monotonic() < deadline:
+        snapshot = resource.list_connections(identity_id)
+        if workspace_id is not None:
+            for connection in snapshot.connections:
+                if connection.status == "connected" and connection.workspace_id == workspace_id:
+                    print_success(f"  Slack connected: {connection.workspace_name}")
+                    print_info("  Add the bot to the channels where you want to use it.")
+                    return snapshot
+        else:
+            status = getattr(getattr(snapshot, "setup", None), "status", None)
+            if status == "ready":
+                if snapshot.installation_available:
+                    return snapshot
+                print_warning("  Slack installation is currently unavailable. Check the identity in the Inkbox console.")
+                return None
+            if status == "needs_credentials":
+                print_warning("  Slack workspace credentials need updating.")
+                return snapshot
+            if status in {"failed", "unavailable"}:
+                print_warning("  Slack app preparation needs attention. Check Slack in the Inkbox console.")
+                return None
+            if status not in {"pending", "not_started"}:
+                print_warning("  Slack app preparation is not supported by this API/SDK. Upgrade and rerun setup.")
+                return None
+        time.sleep(min(4.0, max(0.0, deadline - time.monotonic())))
+    print_warning("  Still waiting for Slack. Rerun `hermes inkbox setup` to continue.")
+    return None
+
+
+def _select_slack_workspace(resource: Any, snapshot: Any, *, renew_credentials: bool = False) -> Any | None:
+    """Reuse the app's workspace or save a masked, write-only configuration pair."""
+    bound = getattr(snapshot, "provisioning_workspace", None)
+    bound_id = getattr(bound, "id", None) or getattr(snapshot.setup, "provisioning_workspace_id", None)
+    if snapshot.application_created and bound_id is None:
+        print_warning("  This app has no available workspace binding. Check Slack in the Inkbox console.")
+        return None
+    workspace = bound
+    if workspace is None:
+        workspaces = resource.list_provisioning_workspaces()
+        if bound_id is not None:
+            workspace = next((w for w in workspaces if str(w.id) == str(bound_id)), None)
+            if workspace is None:
+                print_warning("  The app's saved workspace is unavailable. Check Slack in the Inkbox console.")
+                return None
+        elif workspaces:
+            choices = [
+                f"{w.workspace_name} ({w.workspace_id})"
+                + (" — update credentials" if w.status != "ready" else "")
+                for w in workspaces
+            ] + ["Add a workspace"]
+            choice = prompt_choice("  Choose the workspace for this agent's Slack app:", choices, 0)
+            workspace = workspaces[choice] if choice < len(workspaces) else None
+        else:
+            print_info("  No saved Slack workspaces were found for this Inkbox organization.")
+    if workspace is not None and workspace.status == "ready" and not renew_credentials:
+        return workspace
+    if workspace is not None:
+        print_info(f"  Update app-configuration credentials for {workspace.workspace_name} ({workspace.workspace_id}).")
+    print_info("  Open https://api.slack.com/apps and choose your workspace under Your App Configuration Tokens.")
+    print_info("  Generate an access token and refresh token. These are not bot tokens.")
+    print_info("  Inkbox saves the pair for your organization; this bridge never saves either token locally.")
+    while True:
+        access = prompt("  Slack app-configuration access token (leave blank to skip)", password=True).strip()
+        if not access:
+            return None
+        refresh = prompt("  Slack app-configuration refresh token (leave blank to skip)", password=True).strip()
+        if not refresh:
+            return None
+        try:
+            saved = resource.save_provisioning_workspace(access_token=access, refresh_token=refresh)
+        except Exception as exc:
+            problem = _slack_credential_error(exc)
+            if problem is None:
+                _print_slack_setup_error("saving workspace credentials", exc)
+                return None
+        else:
+            if bound_id is not None and str(saved.id) != str(bound_id):
+                problem = "These tokens belong to a different workspace. This app cannot move; use its original workspace's tokens."
+            elif saved.status != "ready":
+                problem = "Workspace credentials still need attention. Generate a new app-configuration token pair."
+            else:
+                print_success(f"  Saved Slack workspace credentials: {saved.workspace_name}")
+                return saved
+        print_warning(f"  {problem}")
+        if not prompt_yes_no("  Enter another app-configuration token pair?", True):
+            return None
+
+
+def _configure_slack(api_key: str, base_url: str, handle: str, Inkbox: Any) -> bool:
+    """Opt into Slack, prepare a workspace-bound app, and confirm installation."""
+    print_header("Slack")
+    print_info("  Connect a Slack workspace to chat with this agent.")
+    enabled = _env("INKBOX_SLACK_ENABLED").lower() in {"1", "true", "yes", "on"}
+    if not prompt_yes_no("  Enable Slack integration in this bridge?", enabled):
+        _save("INKBOX_SLACK_ENABLED", "false")
+        print_info("  Slack is off in this bridge. Existing workspace connections are unchanged.")
+        return False
+
+    stage = "checking the Inkbox API key"
+    try:
+        with Inkbox(**inkbox_client_kwargs(api_key, base_url)) as client:
+            info = client.whoami()
+            stage = "loading the agent identity"
+            identity = client.get_identity(handle)
+            subtype = _enum_value(getattr(info, "auth_subtype", ""))
+            is_admin = subtype == "api_key.admin_scoped"
+            if not is_admin and (
+                subtype != "api_key.agent_scoped.claimed"
+                or getattr(info, "scope", None) != f"agent_identity:{identity.id}"
+            ):
+                print_warning("  Slack requires a claimed identity and a key for this agent. Claim it in the Inkbox console first.")
+                return enabled
+            resource = getattr(client, "slack", None)
+            if not all(callable(getattr(resource, name, None)) for name in (
+                "start_setup", "list_provisioning_workspaces", "save_provisioning_workspace", "start_installation",
+            )):
+                print_warning("  Slack setup requires an Inkbox SDK with provisioning-workspace support.")
+                print_info(f"  Upgrade the SDK and rerun setup: {_install_command_text()}")
+                return enabled
+
+            _save("INKBOX_SLACK_ENABLED", "true")
+            enabled = True
+
+            stage = "checking existing Slack connections"
+            snapshot = resource.list_connections(identity.id)
+            connected = [c for c in snapshot.connections if c.status == "connected"]
+            if connected:
+                print_success("  Already connected: " + ", ".join(c.workspace_name for c in connected))
+                print_info("  Each identity's app stays in one workspace. Manage reconnection and permissions in the Inkbox console.")
+                return True
+            if not prompt_yes_no("  Connect Slack now?", True):
+                print_info("  Slack is enabled in this bridge. Rerun `hermes inkbox setup` anytime to connect.")
+                return True
+            setup = getattr(snapshot, "setup", None)
+            if setup is None or setup.status == "unavailable":
+                print_warning("  Slack setup is unavailable. Check the identity and API in the Inkbox console.")
+                return True
+            if getattr(setup, "error_code", None) == "outcome_unknown":
+                print_warning("  Slack app creation could not be confirmed. Contact support before trying again.")
+                return True
+            if setup.status not in {"ready", "pending"}:
+                stage = "loading saved Slack workspaces"
+                workspace = _select_slack_workspace(resource, snapshot)
+                if workspace is None:
+                    print_info("  Workspace setup skipped. Rerun `hermes inkbox setup` to continue.")
+                    return True
+                stage = "requesting Slack app preparation"
+                resource.start_setup(identity.id, workspace.id)
+            print_info("  Preparing Slack… (Ctrl+C skips; other setup steps will continue.)")
+            deadline = time.monotonic() + 300.0
+            while True:
+                stage = "waiting for Slack app preparation"
+                ready = _wait_for_slack(resource, identity.id, deadline=deadline)
+                if ready is None:
+                    return True
+                if ready.setup.status == "needs_credentials":
+                    if not prompt_yes_no("  Update the workspace credentials and retry Slack setup?", True):
+                        return True
+                    stage = "loading saved Slack workspaces"
+                    workspace = _select_slack_workspace(resource, ready, renew_credentials=True)
+                    if workspace is None:
+                        return True
+                    stage = "requesting Slack app preparation"
+                    resource.start_setup(identity.id, workspace.id)
+                    deadline = time.monotonic() + 300.0
+                    continue
+                workspace = getattr(ready, "provisioning_workspace", None)
+                if workspace is None:
+                    print_warning("  The app's workspace could not be confirmed. Check Slack in the Inkbox console.")
+                    return True
+                try:
+                    stage = "creating the Slack installation link"
+                    installation = resource.start_installation(identity.id, workspace_id=workspace.workspace_id)
+                    break
+                except Exception as exc:
+                    detail = getattr(exc, "detail", None)
+                    if not (
+                        getattr(exc, "status_code", None) == 409
+                        and isinstance(detail, dict)
+                        and detail.get("code") == "slack_setup_pending"
+                    ):
+                        raise
+                    # Only the explicit pending response proves no link was created.
+                    time.sleep(min(4.0, max(0.0, deadline - time.monotonic())))
+            if not installation.authorization_url:
+                print_warning("  No Slack installation link was returned. Rerun setup later.")
+                return True
+            print_info("  Open this installation link in your browser and approve Add to Slack:")
+            print_info(f"  {installation.authorization_url}")
+            print_info(f"  Expires: {installation.expires_at}. Keep the link private and finish in the same browser.")
+            print_info("  Waiting for a successful connection… (Ctrl+C skips.)")
+            stage = "waiting for Slack installation"
+            _wait_for_slack(
+                resource, identity.id, deadline=time.monotonic() + 300.0,
+                workspace_id=workspace.workspace_id,
+            )
+    except KeyboardInterrupt:
+        print_info("\n  Slack waiting skipped. Rerun `hermes inkbox setup` to continue.")
+    except Exception as exc:
+        _print_slack_setup_error(stage, exc)
+    return enabled
+
+
+
 def _configure_response_modes() -> None:
     """Configure independent group addressing and Companion sender gates."""
     for name, values, labels, prompt in (
@@ -2152,6 +2385,7 @@ def interactive_setup() -> None:
         authority_identity=authority_identity,
     )
 
+    _configure_slack(api_key, base_url, identity.agent_handle, Inkbox)
     _setup_signing_key(api_key, base_url, Inkbox)
 
     # Last, once every value is on disk: nothing above reaches the agent until

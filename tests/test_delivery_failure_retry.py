@@ -463,6 +463,363 @@ def test_carrier_delivery_failed_wakes_agent():
     assert adapter._last_inbound_sms["contact-123"]["conversation_id"] == "conv-123"
 
 
+@pytest.mark.parametrize("call_state", ["none", "active", "closed", "hosted"])
+@pytest.mark.parametrize("conversation_id", ["conv-123", ""])
+def test_callback_only_sms_recovery_keeps_original_sink(call_state, conversation_id):
+    """A real callback/queue/send path must not retry through voice or a newer SMS."""
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity, contact={"id": "contact-123", "name": "Kim"})
+        ws = AsyncMock()
+        if call_state == "active":
+            adapter._active_call_ws["contact-123"] = ws
+        envelope = _delivery_failed_envelope(conversation_id=conversation_id)
+        response = await adapter._on_text_lifecycle(envelope)
+        assert response.status == 200
+        event = adapter._enqueued[0]
+        original_target = envelope["data"]["text_message"]["remote_phone_number"]
+
+        # A later incoming channel/conversation must not change the captured
+        # callback destination while the native worker is waiting to run.
+        adapter._last_inbound_modality["contact-123"] = "email"
+        if call_state == "closed":
+            adapter._voice_recently_closed["contact-123"] = time.time()
+            adapter._last_inbound_modality.clear()
+        elif call_state == "hosted":
+            adapter._hosted_post_call_active_chats = {"contact-123": 1}
+        adapter._last_inbound_sms["contact-123"] = {
+            "conversation_id": "other-conversation", "remote_phone_number": "+15555550999",
+        }
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            result = await adapter.send(
+                str(queued.source.chat_id), "Safe SMS retry", reply_to=queued.message_id,
+                metadata={"thread_id": queued.source.thread_id},
+            )
+            assert result.success
+
+        adapter.handle_message = handle_message
+        # Exercise the production ContextVar handoff, not a test-only explicit
+        # mode passed directly to send(). No model task or prompt is replaced.
+        task = await InkboxAdapter._enqueue(adapter, event)
+        await task
+        expected = {"conversation_id": conversation_id} if conversation_id else {"to": original_target}
+        assert identity.sent_texts == [{**expected, "text": "Safe SMS retry"}]
+        assert identity.sent_emails == []
+        ws.send_str.assert_not_awaited()
+        if call_state == "active":
+            # The recovery route is task-local: ordinary live-call output still
+            # uses its native socket after the SMS recovery finishes.
+            result = await adapter.send("contact-123", "Legitimate voice reply")
+            assert result.success
+            assert ws.send_str.await_count == 2
+            assert json.loads(ws.send_str.await_args_list[0].args[0])["delta"] == "Legitimate voice reply"
+        elif call_state in {"closed", "hosted"}:
+            result = await adapter.send("contact-123", "Unbound voice reflection")
+            assert result.success
+            assert result.message_id in {"suppressed-post-call-leak", "suppressed-hosted-post-call-text"}
+            assert len(identity.sent_texts) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["imessage", "email"])
+@pytest.mark.parametrize("active_call", [False, True])
+def test_shared_missing_context_recovery_pins_channel_and_target(mode, active_call):
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity)
+        ws = AsyncMock()
+        if active_call:
+            adapter._active_call_ws["contact-123"] = ws
+        adapter._last_inbound_email["contact-123"] = {
+            "from_address": "original@example.test", "stored_message_id": "original-mail",
+            "rfc_message_id": "original-rfc", "subject": "Original subject",
+        }
+        await adapter._note_outbound_delivery_failure(
+            mode=mode, chat_id="contact-123", thread_id=None, conversation_id=None,
+            target="original@example.test" if mode == "email" else "+15555550101",
+            failed_body="Synthetic original", error_code="40002", error_detail="Temporary rejection",
+            stage="delivery_failed",
+        )
+        event = adapter._enqueued[0]
+        adapter._last_inbound_modality["contact-123"] = "sms"
+        adapter._last_inbound_imessage["contact-123"] = {
+            "conversation_id": "other-conversation", "remote_number": "+15555550999",
+        }
+        adapter._last_inbound_email["contact-123"] = {
+            "from_address": "other@example.test", "stored_message_id": "other-mail",
+        }
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            result = await adapter.send("contact-123", "Safe recovery", reply_to=queued.message_id)
+            assert result.success
+
+        adapter.handle_message = handle_message
+        task = await InkboxAdapter._enqueue(adapter, event)
+        await task
+        if mode == "imessage":
+            assert identity.sent_imessages == [{"to": "+15555550101", "text": "Safe recovery"}]
+            assert identity.sent_emails == []
+        else:
+            assert identity.sent_emails == [{"reply_to_message_id": "original-mail", "body_text": "Safe recovery"}]
+            assert identity.sent_imessages == []
+        assert identity.sent_texts == []
+        ws.send_str.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_callback_only_email_recovery_uses_authoritative_stored_message():
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity, contact={"id": "contact-123", "name": "Kim"})
+        adapter._active_call_ws["contact-123"] = AsyncMock()
+        response = await adapter._on_mail_delivery_failure({
+            "id": "bounce-event", "event_type": "message.bounced",
+            "data": {"message": {
+                "id": "failed-stored-mail", "message_id": "<failed-rfc@example.test>",
+                "to_addresses": ["original@example.test"], "direction": "outbound",
+                "thread_id": "original-mail-thread", "status": "bounced", "subject": "Original",
+            }},
+        })
+        assert response.status == 200
+        event = adapter._enqueued[0]
+        adapter._last_inbound_email["contact-123"] = {
+            "from_address": "other@example.test", "stored_message_id": "other-mail",
+        }
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            result = await adapter.send("contact-123", "Safe retry", reply_to=queued.message_id)
+            assert result.success
+
+        adapter.handle_message = handle_message
+        task = await InkboxAdapter._enqueue(adapter, event)
+        await task
+        assert identity.sent_emails == [{"reply_to_message_id": "failed-stored-mail", "body_text": "Safe retry"}]
+        adapter._active_call_ws["contact-123"].send_str.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("retained_author", [None, "original-author"])
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_recovery_route_does_not_take_another_turns_group_context(retained_author, outcome):
+    async def run():
+        adapter = _adapter(FakeIdentity())
+        journal = adapter._conversation_state()
+        journal.row("contact-123")["active_author"] = "current-author"
+        journal.quiet("contact-123", "quiet-input", "Unrelated quiet context")
+        journal.consume("contact-123", "other-turn")
+        before_quiet = json.loads(json.dumps(journal.row("contact-123")["quiet"]))
+        original = {"author": retained_author} if retained_author else None
+        await adapter._note_outbound_delivery_failure(
+            mode="sms", chat_id="contact-123", thread_id="sms:conv-123", conversation_id="conv-123",
+            target="+15555550101", failed_body="Synthetic", error_code="40002",
+            error_detail="Temporary rejection", stage="delivery_failed", original_route=original,
+        )
+        event = adapter._enqueued[0]
+        token = adapter_mod.reply_route.set(None)
+        try:
+            await adapter.on_processing_start(event)
+            assert adapter_mod.reply_route.get()["mode"] == "sms"
+            assert journal.row("contact-123")["active_author"] == (retained_author or "current-author")
+            await adapter.on_processing_complete(event, outcome)
+        finally:
+            adapter_mod.reply_route.reset(token)
+        assert journal.row("contact-123")["quiet"] == before_quiet
+        assert journal.row("contact-123")["active_author"] == (retained_author or "current-author")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["sms", "imessage"])
+def test_synchronous_overlength_recovery_captures_original_conversation(mode):
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity)
+        adapter._active_call_ws["contact-123"] = AsyncMock()
+        route = {"chat_id": "contact-123", "mode": mode, "author": "original-author",
+                 "thread_id": f"{mode}:original-conversation", "conversation_id": "original-conversation"}
+        maximum = adapter_mod.SMS_MAX_LENGTH if mode == "sms" else adapter_mod.IMESSAGE_MAX_LENGTH
+        token = adapter_mod.reply_route.set(route)
+        try:
+            result = await adapter.send("contact-123", "x" * (maximum + 1))
+        finally:
+            adapter_mod.reply_route.reset(token)
+        assert not result.success
+        assert identity.sent_texts == identity.sent_imessages == []
+        event = adapter._enqueued[0]
+        adapter._last_inbound_sms["contact-123"] = {"conversation_id": "new-conversation"}
+        adapter._last_inbound_imessage["contact-123"] = {"conversation_id": "new-conversation"}
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            result = await adapter.send("contact-123", "Short retry", reply_to=queued.message_id)
+            assert result.success
+
+        adapter.handle_message = handle_message
+        task = await InkboxAdapter._enqueue(adapter, event)
+        await task
+        sends = identity.sent_texts if mode == "sms" else identity.sent_imessages
+        assert sends == [{"conversation_id": "original-conversation", "text": "Short retry"}]
+        adapter._active_call_ws["contact-123"].send_str.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_synchronous_email_rejection_keeps_original_route_over_newer_stash():
+    async def run():
+        identity = FakeIdentity(email_exc=RuntimeError("Temporary send rejection"))
+        adapter = _adapter(identity)
+        route = {"chat_id": "contact-123", "mode": "email", "author": "original-author",
+                 "to_email": "original@example.test", "stored_message_id": "original-mail",
+                 "thread_id": "email:original-thread"}
+        adapter._last_inbound_email["contact-123"] = {
+            "stored_message_id": "newer-mail", "from_address": "newer@example.test",
+        }
+        token = adapter_mod.reply_route.set(route)
+        try:
+            result = await adapter.send("contact-123", "First reply")
+        finally:
+            adapter_mod.reply_route.reset(token)
+        assert not result.success
+        identity._email_exc = None
+        event = adapter._enqueued[0]
+        adapter._active_call_ws["contact-123"] = AsyncMock()
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            result = await adapter.send("contact-123", "Safe retry", reply_to=queued.message_id)
+            assert result.success
+
+        adapter.handle_message = handle_message
+        task = await InkboxAdapter._enqueue(adapter, event)
+        await task
+        assert identity.sent_emails == [{"reply_to_message_id": "original-mail", "body_text": "Safe retry"}]
+        assert event.metadata["inkbox_reply_route"]["author"] == "original-author"
+        adapter._active_call_ws["contact-123"].send_str.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_nested_callback_sms_length_rejection_keeps_target_and_budget():
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity, contact={"id": "contact-123", "name": "Kim"})
+        await adapter._on_text_lifecycle(_delivery_failed_envelope(conversation_id=""))
+        first = adapter._enqueued[0]
+        target = first.metadata["inkbox_reply_route"]["inkbox_recovery_target"]["target"]
+        adapter._last_inbound_sms["contact-123"] = {
+            "conversation_id": "newer-conversation", "remote_phone_number": "+15555550999",
+        }
+        adapter._background_tasks = set()
+
+        async def too_long(event):
+            result = await adapter.send("contact-123", "x" * (adapter_mod.SMS_MAX_LENGTH + 1), reply_to=event.message_id)
+            assert not result.success
+
+        adapter.handle_message = too_long
+        await (await InkboxAdapter._enqueue(adapter, first))
+        second = adapter._enqueued[1]
+        assert f"attempt=2/{MAX}" in second.text
+
+        async def corrected(event):
+            result = await adapter.send("contact-123", "Short retry", reply_to=event.message_id)
+            assert result.success
+
+        adapter.handle_message = corrected
+        await (await InkboxAdapter._enqueue(adapter, second))
+        assert identity.sent_texts == [{"to": target, "text": "Short retry"}]
+        assert all("newer-conversation" not in key and "+15555550999" not in key
+                   for key in adapter._outbound_failure_state)
+
+    asyncio.run(run())
+
+
+def test_repeated_callback_email_rejection_keeps_attempted_stored_message():
+    async def run():
+        identity = FakeIdentity(email_exc=RuntimeError("Synthetic temporary rejection"))
+        adapter = _adapter(identity, contact={"id": "contact-123", "name": "Kim"})
+        await adapter._on_mail_delivery_failure({
+            "event_type": "message.bounced", "data": {"message": {
+                "id": "original-stored", "to_addresses": ["original@example.test"],
+                "direction": "outbound", "status": "bounced", "subject": "Original subject",
+            }},
+        })
+        first = adapter._enqueued[0]
+        adapter._last_inbound_email["contact-123"] = {
+            "stored_message_id": "newer-stored", "from_address": "newer@example.test", "subject": "Newer subject",
+        }
+        adapter._background_tasks = set()
+
+        async def rejected(event):
+            result = await adapter.send("contact-123", "First recovery", reply_to=event.message_id)
+            assert not result.success
+
+        adapter.handle_message = rejected
+        await (await InkboxAdapter._enqueue(adapter, first))
+        second = adapter._enqueued[1]
+        assert f"attempt=2/{MAX}" in second.text
+        assert second.metadata["inkbox_reply_route"]["subject"] == "Re: Original subject"
+        identity._email_exc = None
+
+        async def corrected(event):
+            result = await adapter.send("contact-123", "Second recovery", reply_to=event.message_id)
+            assert result.success
+
+        adapter.handle_message = corrected
+        await (await InkboxAdapter._enqueue(adapter, second))
+        assert identity.sent_emails == [{"reply_to_message_id": "original-stored", "body_text": "Second recovery"}]
+
+    asyncio.run(run())
+
+
+def test_rejected_cold_email_never_acquires_a_newer_stored_reply_target():
+    async def run():
+        identity = FakeIdentity()
+        adapter = _adapter(identity)
+        attempts = []
+
+        def reject_cold_send(**kwargs):
+            attempts.append(kwargs)
+            # Another inbound message arrives while the original SDK call is
+            # in flight. Its stored ID is not authority for this cold send.
+            adapter._last_inbound_email["contact-123"] = {
+                "stored_message_id": "unrelated-newer-mail", "from_address": "newer@example.test",
+                "subject": "Unrelated newer subject", "rfc_message_id": "unrelated-rfc",
+            }
+            raise RuntimeError("Synthetic send rejection")
+
+        identity.send_email = reject_cold_send
+        result = await adapter.send("contact-123", "Original cold email", metadata={
+            "mode": "email", "to_email": "original@example.test", "subject": "Original subject",
+        })
+        assert not result.success
+        assert attempts == [{"to": ["original@example.test"], "subject": "Original subject",
+                             "body_text": "Original cold email"}]
+        recovery = adapter._enqueued[0]
+        route = recovery.metadata["inkbox_reply_route"]
+        assert route["inkbox_recovery_target"]["email_context"]["stored_message_id"] is None
+        assert route["subject"] == "Original subject"
+        adapter._background_tasks = set()
+
+        async def handle_message(queued):
+            retry = await adapter.send("contact-123", "Cold email retry", reply_to=queued.message_id)
+            assert not retry.success
+            assert retry.error == "Email reply requires its stored message ID"
+
+        adapter.handle_message = handle_message
+        await (await InkboxAdapter._enqueue(adapter, recovery))
+        assert len(attempts) == 1
+        assert identity.sent_emails == []
+
+    asyncio.run(run())
+
+
 def test_terminal_sms_delivery_failure_requires_silent_and_no_resend():
     adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
     envelope = _delivery_failed_envelope()

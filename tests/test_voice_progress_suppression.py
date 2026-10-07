@@ -56,6 +56,15 @@ def test_session_search_progress_ping_is_admin_notice():
     assert _is_hermes_admin_notice("🔍 searching past sessions") is True
 
 
+@pytest.mark.parametrize("marker", [None, False, "true", 1, True])
+def test_only_native_boolean_approval_marker_exempts_warning_body(marker):
+    assert _is_hermes_admin_notice("⚠️ A command needs your approval", {"is_approval_prompt": marker}) is (marker is not True)
+
+
+def test_explicit_admin_notice_tag_is_not_overridden_by_prompt_marker():
+    assert _is_hermes_admin_notice("⚠️ Internal diagnostic", {"notice_type": "tool_progress", "is_approval_prompt": True})
+
+
 def test_voice_calls_do_not_support_tool_progress():
     adapter = _bare_adapter()
     adapter._active_call_ws["contact-voice"] = object()

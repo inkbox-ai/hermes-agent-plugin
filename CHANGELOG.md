@@ -1,10 +1,26 @@
 # Changelog
 
-## 0.2.18
+## 0.2.20
 
 ### Fixed
 
 - Realtime calls validate local audio conversion before accepting raw-media mode, allowing the configured STT/TTS fallback when audio dependencies are missing or unusable.
+
+## 0.2.19
+
+- Add opt-in Slack tools, guided workspace installation, signed channel reception, channel-wide Companion, exact-thread controls, and inline/thread-specific activity.
+- Add opt-in native iMessage reply/thread APIs with durable serial follow-ups, source-bound text/media/tool replies, saved-answer recovery, and duplicate/uncertain-send protection.
+- Add access-scoped Vault metadata, secret decryption, and TOTP tools using a local Hermes Vault key.
+- Preserve pending permission scopes while fencing superseded workers; keep uncertain legacy work quarantined unless native ownership can be conclusively resolved.
+- Keep native approval prompts visible while filtering operational chatter, and quarantine interrupted media/tool sends without replaying saved answers or spinning the recovery queue.
+- Raise the base Inkbox SDK floor to 0.7.11; native iMessage requires 0.7.13 and Slack Companion requires 0.7.14.
+- Keep tunnel TLS compatible with native platform certificate verifiers while preserving trusted roots and hostname validation.
+
+## 0.2.18
+
+### Fixed
+
+- A2A progress updates continue after a turn hands work to background subagents, and stop once that work and any follow-up turn finish or the task settles. Callers no longer see a long silence on tasks that are still running.
 
 ## 0.2.17
 

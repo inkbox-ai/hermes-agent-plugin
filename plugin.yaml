@@ -1,11 +1,21 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.18
+version: 0.2.20
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
 optional_env:
+  - name: INKBOX_SLACK_ENABLED
+    description: "Enable Slack messaging (default false)."
+    prompt: "Enable Slack"
+    secret: false
+  - name: INKBOX_IMESSAGE_THREADED_REPLIES
+    description: "Enable native iMessage source replies (default false)."
+    secret: false
+  - name: INKBOX_HERMES_VAULT_KEY
+    description: "Optional local Vault unlock key for credential and TOTP reads."
+    secret: true
   - name: INKBOX_GROUP_REPLY_MODE
     description: "Group replies: auto (default) or mention."
     prompt: "Group reply mode"
@@ -136,6 +146,17 @@ provides_tools:
   - inkbox_list_a2a_messages
   - inkbox_list_a2a_sent_tasks
   - inkbox_get_a2a_sent_task
+  - inkbox_slack_list_connections
+  - inkbox_slack_list_conversations
+  - inkbox_slack_list_messages
+  - inkbox_slack_search
+  - inkbox_slack_send_message
+  - inkbox_slack_get_action
+  - inkbox_list_vault_secrets
+  - inkbox_get_vault_secret
+  - inkbox_get_totp_code
+  - inkbox_get_imessage_thread
+  - inkbox_get_imessage_conversation_thread
 provides_hooks:
   - post_tool_call
   - pre_llm_call

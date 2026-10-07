@@ -19,6 +19,7 @@ Env:
   VOICE_DRIVER_PORT       local port the tunnel forwards to (default 8090)
   VOICE_DRIVER_STATE      path to write the JSON state file
   VOICE_DRIVER_LINE       the one line the driver speaks (default below)
+  VOICE_DRIVER_AUTO_STOP  false when the test owns call hangup (default true)
   VOICE_DRIVER_ANSWER_SETTLE  seconds to keep media open after hearing the answer
   VOICE_DRIVER_TEST_OWNS_HANGUP  leave completion hangup to the asserting test
   VOICE_DRIVER_WAIT_FOR_PEER  require initial peer speech before the quiet gate
@@ -60,9 +61,10 @@ SPEAK_AFTER_S = float(os.environ.get("VOICE_DRIVER_SPEAK_AFTER", "3"))
 # announcement -- the call is hung up before the agent ever speaks. Answer the
 # way a person does: one word, immediately, then silence.
 GREETING = os.environ.get("VOICE_DRIVER_GREETING", "Hello?")
-# Then give the agent a turn and hang up — a dropped WS does NOT end the call, so we
-# must send an explicit stop or the leg lingers until the server max-duration cap.
+# Bound scripted re-asking. Tests with finally cleanup own the call lifetime;
+# standalone drivers still hang up explicitly because dropping WS does not.
 LISTEN_S = float(os.environ.get("VOICE_DRIVER_LISTEN", "12"))
+AUTO_STOP = os.environ.get("VOICE_DRIVER_AUTO_STOP", "true").strip().lower() != "false"
 # Re-ask the question this often while the agent is idle. An ask the greeting
 # talked over is otherwise never repeated and the call idles out with the agent
 # still waiting for a request. 0 disables re-asking.
@@ -129,7 +131,8 @@ async def phone_media_ws(ws: WebSocket) -> None:
         await _speak(GREETING)
         if not await _wait_for_greeting(state):
             log.info("peer did not pause before the greeting deadline")
-            await ws.send_text(json.dumps({"event": "stop"}))
+            if AUTO_STOP:
+                await ws.send_text(json.dumps({"event": "stop"}))
             return
         await _speak(LINE)
         asked_at = loop.time()
@@ -163,6 +166,8 @@ async def phone_media_ws(ws: WebSocket) -> None:
                 reasks += 1
         if answered.is_set() and ANSWER_SETTLE_S > 0:
             await asyncio.sleep(ANSWER_SETTLE_S)
+        if not AUTO_STOP:
+            return  # Keep the receive loop alive until test-owned hangup.
         try:
             await ws.send_text(json.dumps({"event": "stop"}))
             log.info("sent stop (hangup)")

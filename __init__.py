@@ -136,6 +136,7 @@ def _env_enablement() -> dict | None:
             "name": os.getenv("INKBOX_HOME_CHANNEL_NAME", "Inkbox Home"),
         }
     seed["contact_memories_enabled"] = cfg.contact_memories_enabled
+    seed["slack_enabled"] = cfg.slack_enabled
     if cfg.realtime_api_key or os.getenv("INKBOX_REALTIME_ENABLED"):
         seed["realtime"] = {
             "enabled": os.getenv("INKBOX_REALTIME_ENABLED", "auto"),
@@ -167,6 +168,8 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "requireSignature": "require_signature",
         "contact_memories_enabled": "contact_memories_enabled",
         "contactMemoriesEnabled": "contact_memories_enabled",
+        "slack_enabled": "slack_enabled",
+        "slackEnabled": "slack_enabled",
         "companion_max_bytes": "companion_max_bytes",
         "voice_stack": "voice_stack",
         "voiceStack": "voice_stack",
@@ -247,12 +250,12 @@ def register(ctx) -> None:
         standalone_sender_fn=_standalone_send,
         allowed_users_env="INKBOX_ALLOWED_USERS",
         allow_all_env="INKBOX_ALLOW_ALL_USERS",
-        max_message_length=4096,
+        max_message_length=12000,
         pii_safe=True,
         emoji="📨",
         platform_hint=(
             "You are chatting through Inkbox email, SMS/MMS, iMessage, or "
-            "voice. Inbound messages may start with an [inkbox:...] routing "
+            "voice, or Slack. Inbound messages may start with an [inkbox:...] routing "
             "marker; use it for channel/contact context and never echo it. "
             "During live voice calls, answer conversationally in text; the "
             "adapter speaks the response over the active call."

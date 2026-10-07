@@ -71,3 +71,7 @@ When someone puts a tapback on one of **your** messages, you receive a turn pref
 - `love` / `like` / `laugh` / `dislike` are usually just acknowledgements that need no response.
 
 Decide based on the reaction and the conversation. **If no visible reply is warranted, return exactly `[SILENT]`** — the Inkbox bridge drops it and nothing is sent. Reply normally (via `inkbox_send_imessage`) only when a response genuinely adds value.
+
+## Native reply opt-in
+
+When `INKBOX_IMESSAGE_THREADED_REPLIES` is enabled, write ordinary final text (or native `MEDIA:` attachments) and let the gateway anchor it to the source. Do not supply reply target/fallback overrides. The active turn's explicit iMessage tools may only use the original conversation; proactive work outside that turn can use its explicit recipient without inheriting a stale reply target. The opt-in's persisted queue keeps follow-ups serial and does not create sessions per native subthread. Use bounded native thread reads only when needed; preserve nullable ancestry and cursors. Companion turns already contain their authorized context and must not broaden it with thread reads. An uncertain delivery is not permission to resend.
