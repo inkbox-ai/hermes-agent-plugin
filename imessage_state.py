@@ -1,0 +1,174 @@
+"""Trusted native-turn reply context, shared by the gateway and Hermes tools."""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import inspect
+import threading
+from typing import Any
+
+_CONTEXTS: dict[str, dict] = {}
+_HOST_TURNS: dict[str, str] = {}
+_LOCK = threading.RLock()
+
+
+def source_metadata(message: Any, event_id: str | None = None) -> dict:
+    def value(name):
+        item = message.get(name) if isinstance(message, dict) else getattr(message, name, None)
+        return str(item) if item not in (None, "") else None
+    source = {key: value(key) for key in ("id", "reply_to_message_id", "thread_id", "thread_root_message_id")}
+    receipt = str(event_id or source["id"] or "")
+    return {"imessage_reply_target": source["id"], "source_message_id": source["id"],
+            "imessage_event_id": receipt, "imessage_event_ids": [receipt], "imessage_sources": [source],
+            **{key: source[key] for key in ("reply_to_message_id", "thread_id", "thread_root_message_id")}}
+
+
+def auto_reply_kwargs(meta: dict) -> dict:
+    target = meta.get("imessage_reply_target")
+    return {"reply_to_message_id": target, "plain_reply_fallback": True} if target else {}
+
+
+def require_threading(identity: Any) -> None:
+    try:
+        supported = all(callable(getattr(identity, name, None)) for name in (
+            "get_imessage_thread", "get_imessage_conversation_thread", "get_imessage", "send_imessage",
+        )) and {"reply_to_message_id", "plain_reply_fallback"} <= set(inspect.signature(identity.send_imessage).parameters)
+    except (TypeError, ValueError):
+        supported = False
+    if not supported:
+        raise RuntimeError("Native iMessage replies require Inkbox Python SDK 0.7.13 or newer with native reply and thread support")
+
+
+class ReplyPreflightError(RuntimeError):
+    """No upload/send was attempted; only read-only reply validation failed."""
+
+    def __init__(self, message: str, *, retryable: bool = False, status_code=None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
+def validate_reply_target(identity: Any, meta: dict, guard=None) -> dict:
+    """Verify the admitted source and backend thread capability before effects."""
+    require_threading(identity)
+    target = meta.get("imessage_reply_target")
+    if not target:
+        return {}
+    if target not in {item.get("id") for item in meta.get("imessage_sources", [])}:
+        raise ReplyPreflightError("Native iMessage reply target is not an admitted source; no send attempted")
+    conversation = str(meta.get("conversation_id") or "")
+    if not conversation:
+        raise ReplyPreflightError("Native iMessage source conversation is missing; no send attempted")
+    def field(value, name):
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+    try:
+        if guard:
+            guard()
+        source = identity.get_imessage(target)
+        if guard:
+            guard()
+        page = identity.get_imessage_thread(target, limit=1)
+        if guard:
+            guard()
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        transient = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (isinstance(status, int) and status >= 500)
+        try:
+            from httpx import TransportError
+            transient = transient or isinstance(exc, TransportError)
+        except ImportError:  # pragma: no cover - SDK already depends on httpx
+            pass
+        detail = "temporarily unavailable" if transient else "unavailable; verify source access and backend native-thread support"
+        raise ReplyPreflightError(f"Native iMessage reply preflight {detail}; no send attempted",
+                                  retryable=transient, status_code=status) from None
+    if str(field(source, "id") or "") != str(target) or any(
+        str(field(item, "conversation_id") or "") != conversation for item in (source, page)
+    ):
+        raise ReplyPreflightError("Native iMessage source/thread conversation does not match the admitted reply; no send attempted")
+    return auto_reply_kwargs(meta)
+
+
+def bind_context(session_id: str, context: dict) -> None:
+    with _LOCK:
+        prior = _CONTEXTS.get(session_id)
+        if prior and prior.get("leases"):
+            raise RuntimeError("Previous iMessage tool execution has not settled")
+        _CONTEXTS[session_id] = {**context, "active": True, "leases": 0, "explicit_sends": []}
+
+
+def active_context(session_id: str) -> dict | None:
+    with _LOCK:
+        context = _CONTEXTS.get(str(session_id))
+        try:
+            from gateway.session_context import get_session_env
+            native_source = get_session_env("HERMES_SESSION_MESSAGE_ID")
+        except ImportError:
+            native_source = ""
+        if context and not context.get("active"):
+            # A positively observed NEW native worker may reuse the session for
+            # proactive/other-channel work. Its own ContextVar must match; the
+            # old worker still carries its old source and remains fenced.
+            current = _HOST_TURNS.get(str(session_id))
+            if current is not None and current != context.get("turn_id") and native_source == current and not context.get("leases"):
+                return None
+            raise RuntimeError("The original iMessage turn is no longer active")
+        if context and native_source and native_source != context.get("turn_id"):
+            raise RuntimeError("The tool belongs to a different native iMessage turn")
+        return context
+
+
+def clear_context(session_id: str, turn_id: str) -> bool:
+    with _LOCK:
+        context = _CONTEXTS.get(session_id)
+        if not context or context.get("turn_id") != turn_id:
+            return True
+        context["active"] = False
+        # Keep the tombstone until the next native turn; a late old tool cannot
+        # reinterpret cancellation as permission for an untargeted send.
+        return not context["leases"]
+
+
+def validate_target(context: dict | None, conversation_id: str | None, to: Any) -> None:
+    if context is None:
+        return
+    if to is not None or str(conversation_id or "") != context.get("conversation_id"):
+        raise ValueError("This iMessage turn may only access its original conversation; do not change its destination")
+
+
+@contextmanager
+def explicit_send(session_id: str, conversation_id: str | None, to: Any, *, allow_other_destination=False):
+    with _LOCK:
+        owner = active_context(session_id)
+        context = owner
+        if allow_other_destination and owner and (to is not None or str(conversation_id or "") != owner.get("conversation_id")):
+            context = None
+        validate_target(context, conversation_id, to)
+        if owner:
+            owner["leases"] += 1
+    try:
+        yield context
+    finally:
+        if owner:
+            with _LOCK:
+                owner["leases"] -= 1
+
+
+def record_explicit(context: dict | None, content: str, message: Any) -> None:
+    if context is not None:
+        message_id = str(getattr(message, "id", "") or "")
+        if message_id:
+            with _LOCK:
+                context["explicit_sends"].append({"content": content, "message_id": message_id})
+            callback = context.get("record_explicit")
+            if callback:
+                callback(content, message)
+
+
+def lease_count(session_id: str) -> int:
+    with _LOCK:
+        return int((_CONTEXTS.get(str(session_id)) or {}).get("leases", 0))
+
+
+def observe_host_turn(session_id: str, source_id: str) -> None:
+    """Called only at the native worker boundary, never from model arguments."""
+    with _LOCK:
+        _HOST_TURNS[str(session_id)] = str(source_id or "")

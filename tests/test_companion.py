@@ -1,6 +1,7 @@
 """Companion delivery at the Hermes enqueue and processing boundaries."""
 
 import asyncio
+import inspect
 import json
 import sys
 import threading
@@ -100,6 +101,7 @@ def factory(tmp_path, monkeypatch):
         adapter._identity_id = uid(100)
         adapter._background_tasks = set()
         adapter._active_sessions = {}
+        adapter._human_delay_range_ms = None  # BasePlatformAdapter.__init__ default.
         adapter.build_source = lambda **kw: types.SimpleNamespace(**kw)
         adapter._resolve_channel_overrides = lambda *args: ("Reply to this conversation.", None)
         adapter._resolve_contact_full = AsyncMock(return_value={"id": uid(900), "name": "Saved contact"})
@@ -116,6 +118,13 @@ def factory(tmp_path, monkeypatch):
         identity = types.SimpleNamespace(**{method: Mock(return_value=types.SimpleNamespace(id=uid(800))) for method in (
             "reply_all_email", "send_email", "send_text", "send_imessage",
         )})
+        identity.send_imessage.__signature__ = inspect.Signature([
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in ("reply_to_message_id", "plain_reply_fallback")
+        ])
+        identity.get_imessage = Mock(side_effect=lambda message_id: types.SimpleNamespace(id=message_id, conversation_id=uid(30)))
+        identity.get_imessage_thread = Mock(return_value=types.SimpleNamespace(conversation_id=uid(30)))
+        identity.get_imessage_conversation_thread = Mock()
         adapter._inkbox = types.SimpleNamespace(companion=resource, get_identity=Mock(return_value=identity))
         adapter._companion = CompanionReceiver(adapter, root or tmp_path / str(len(created)), max_bytes)
         receiver = adapter._companion
@@ -157,6 +166,31 @@ async def wait_inputs(instance, count):
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"Expected {count} host inputs; received {len(instance.inputs)}")
+
+
+def test_native_reply_preflight_retry_preserves_companion_result(factory):
+    async def run():
+        instance = factory("imessage")
+        instance.adapter._imessage_threaded_replies = True
+        instance.receiver.retry_delay = .01
+        instance.identity.get_imessage_thread.side_effect = [TimeoutError("read only"), types.SimpleNamespace(conversation_id=uid(30))]
+        async def handle(item):
+            instance.inputs.append(item)
+            await instance.adapter.on_processing_start(item)
+            instance.receiver.capture_result(item, "Saved answer")
+            result = await instance.adapter.send(item.source.chat_id, "Saved answer", reply_to=item.message_id)
+            await instance.adapter.on_processing_complete(item, "success" if result.success else "failure")
+        instance.adapter.handle_message = handle
+        await instance.receiver.accept(event("imessage"))
+        await idle(instance)
+        assert len(instance.inputs) == 1
+        instance.identity.send_imessage.assert_called_once()
+        assert instance.identity.get_imessage_thread.call_count == 2
+        row = next(iter(instance.receiver.rows.values()))
+        assert row["state"] == "initialized"
+        assert row["turns"][0]["state"] == "completed"
+        await instance.receiver.close()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("channel", ["mail", "phone", "imessage"])

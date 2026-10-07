@@ -138,8 +138,11 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     }]
 
     tool_names = {args[0] for args, _kwargs in ctx.tools}
-    assert tool_names == {
+    base_tools = {
         "inkbox_whoami",
+        "inkbox_list_vault_secrets",
+        "inkbox_get_vault_secret",
+        "inkbox_get_totp_code",
         "inkbox_lookup_contact",
         "inkbox_list_contacts",
         "inkbox_get_contact",
@@ -173,7 +176,11 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_list_a2a_sent_tasks",
         "inkbox_get_a2a_sent_task",
     }
-    assert _manifest_provides_tools() == tool_names
+    optional = {"inkbox_slack_list_connections", "inkbox_slack_list_conversations", "inkbox_slack_list_messages",
+                "inkbox_slack_search", "inkbox_slack_send_message", "inkbox_slack_get_action",
+                "inkbox_get_imessage_thread", "inkbox_get_imessage_conversation_thread"}
+    assert tool_names == base_tools | optional == _manifest_provides_tools()
+    assert all(not kwargs["check_fn"]() for args, kwargs in ctx.tools if args[0] in optional)
 
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
@@ -222,3 +229,31 @@ def test_skill_required_tools_match_runtime_tools():
             continue
         required = set(re.findall(r"`(inkbox_[A-Za-z0-9_]+)`", match.group("section")))
         assert required <= available, f"{skill_md} requires unavailable tools: {required - available}"
+
+
+def test_optional_tools_follow_yaml_after_registration_and_disabled_dispatch_stays_closed(monkeypatch):
+    import json
+    entry = _load_entry_module()
+    monkeypatch.setenv("INKBOX_API_KEY", "ApiKey_synthetic_test_only")
+    monkeypatch.setenv("INKBOX_IDENTITY", "example-agent")
+    monkeypatch.delenv("INKBOX_SLACK_ENABLED", raising=False)
+    monkeypatch.delenv("INKBOX_IMESSAGE_THREADED_REPLIES", raising=False)
+    entry.set_runtime_config_extra({})
+    ctx = DummyContext()
+    entry.register(ctx)
+    registered = {args[0]: (args[3], kwargs["check_fn"]) for args, kwargs in ctx.tools}
+    names = ["inkbox_slack_list_connections", "inkbox_get_imessage_thread"]
+    assert all(not registered[name][1]() for name in names)
+    entry._apply_yaml_config({}, {"slack_enabled": True})
+    assert registered[names[0]][1]()
+    assert not registered[names[1]][1]()
+    monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "true")
+    assert registered[names[1]][1]()
+    entry._apply_yaml_config({}, {"slack_enabled": False})
+    monkeypatch.setenv("INKBOX_SLACK_ENABLED", "true")
+    assert not registered[names[0]][1]()
+    assert "disabled" in json.loads(registered[names[0]][0]({}))["error"]
+    monkeypatch.delenv("INKBOX_IMESSAGE_THREADED_REPLIES")
+    assert not registered[names[1]][1]()
+    assert "disabled" in json.loads(registered[names[1]][0]({"message_id": "synthetic-source"}))["error"]
+    entry.set_runtime_config_extra({})

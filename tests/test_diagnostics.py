@@ -28,6 +28,61 @@ def _clear_inkbox_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.mark.parametrize("mode,expected", [("ready", "verified"), ("empty", "unverified_no_source"), ("unsupported", "unavailable")])
+def test_native_backend_doctor_requires_readonly_source_and_thread_proof(mode, expected):
+    calls = []
+    source = types.SimpleNamespace(id="message", conversation_id="conversation")
+    class Identity:
+        def list_imessages(self, **kwargs):
+            calls.append(("list", kwargs))
+            return [] if mode == "empty" else [source]
+        def get_imessage(self, message_id):
+            calls.append(("source", message_id))
+            return source
+        def get_imessage_thread(self, message_id, **kwargs):
+            calls.append(("thread", message_id, kwargs))
+            if mode == "unsupported":
+                raise RuntimeError("private backend details")
+            return types.SimpleNamespace(conversation_id="conversation")
+        def get_imessage_conversation_thread(self):
+            raise AssertionError("Unneeded read")
+        def send_imessage(self, *, reply_to_message_id=None, plain_reply_fallback=True):
+            raise AssertionError("Doctor must not send")
+    result = doctor._native_imessage_capability(Identity())
+    assert result == {"sdkSupported": True, "backend": expected}
+    assert calls[0] == ("list", {"limit": 1, "include_groups": True})
+    if mode != "empty":
+        assert calls[1:] == [("source", "message"), ("thread", "message", {"limit": 1})]
+    assert "private backend details" not in json.dumps(result)
+
+
+def test_doctor_queue_counts_are_identity_scoped_content_free_and_read_only(tmp_path, monkeypatch):
+    import hashlib
+    cfg = types.SimpleNamespace(base_url="https://example.com", identity="configured-agent")
+    identity_id = "configured-identity"
+    key = hashlib.sha256(json.dumps([cfg.base_url, cfg.identity, identity_id]).encode()).hexdigest()
+    monkeypatch.setattr(doctor, "inkbox_state_path", lambda: tmp_path / "inkbox.json")
+    directory = tmp_path / "inkbox_native_turns" / key
+    directory.mkdir(parents=True)
+    checkpoint = directory / "scope.json"
+    checkpoint.write_text(json.dumps({"blocked": True, "turns": [
+        {"state": "answer_ready", "answer": "SECRET_MESSAGE"},
+        {"state": "uncertain", "event": {"text": "SECRET_MESSAGE"}},
+    ]}))
+    before = checkpoint.read_bytes()
+    other = tmp_path / "inkbox_native_turns" / "different-identity"
+    other.mkdir()
+    (other / "scope.json").write_text('{"turns":[{"state":"pending"}]}')
+    result = doctor._local_queue_counts(cfg, identity_id)
+    assert result["native"] == {"scopes": 1, "blockedScopes": 1, "turns": 2,
+                                "states": {"answer_ready": 1, "uncertain": 1},
+                                "unreadable": 0, "truncated": False}
+    assert result["companion"]["scopes"] == 0
+    assert not (tmp_path / "inkbox_companion").exists()
+    assert checkpoint.read_bytes() == before
+    assert "SECRET_MESSAGE" not in json.dumps(result)
+
+
 def test_missing_config_messages_point_to_setup():
     message = missing_config_message("INKBOX_API_KEY")
 

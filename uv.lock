@@ -541,7 +541,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.18"
+version = "0.2.19"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -560,7 +560,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
-    { name = "inkbox", specifier = ">=0.7.6,<1.0.0" },
+    { name = "inkbox", specifier = ">=0.7.11,<1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -633,7 +633,7 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.7.7"
+version = "0.7.14"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -643,9 +643,9 @@ dependencies = [
     { name = "h2" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/95/6e/b5e45858c64c458d84cf9b0590e3b387888b2852b6159b901a226f205d9c/inkbox-0.7.7.tar.gz", hash = "sha256:ecc14eb1e209013bfba8a9ffcd4de44cdb9445dfcd8d8eb0b3ede2f92fd4fd8f", size = 460696, upload-time = "2026-09-22T20:52:25.284Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/83/e7059205c3e0b6fda14615d1b79b18004fd5b27fb604aecb421b287410da/inkbox-0.7.14.tar.gz", hash = "sha256:e7bc95209a566a90cf98707a997f362e8f97cb7366c32c82025fdc3646cbafd4", size = 498611, upload-time = "2026-10-05T04:56:26.42Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/f7/2eea6215600e03ae40c71a9eb1ebb5fb0f3f56d4c7cede5a838168e9970e/inkbox-0.7.7-py3-none-any.whl", hash = "sha256:ae1dd641d7452a96daad28bee3f1d30add66b11d329c98a9602e760801a089d3", size = 301883, upload-time = "2026-09-22T20:52:23.852Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/81/b3ac755d61656d7e154a8d34a6ecc16a35bfaefabd406eb1b1fe82a07db5/inkbox-0.7.14-py3-none-any.whl", hash = "sha256:d76c98352bc8adc273ca1e13f05da890a9432c58b5260fb342be255aa517c450", size = 324088, upload-time = "2026-10-05T04:56:25.157Z" },
 ]
 
 [[package]]

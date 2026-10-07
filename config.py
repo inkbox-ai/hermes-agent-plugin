@@ -57,6 +57,8 @@ class InkboxPluginConfig:
     voice_ai_authority_mode: str = "contact_scoped"
     voicemail_detection: str = "enabled"
     contact_memories_enabled: bool = True
+    slack_enabled: bool = False
+    imessage_threaded_replies: bool = False
 
 
 def inkbox_base_url_kwargs(base_url: str | None = None) -> Dict[str, str]:
@@ -136,6 +138,8 @@ def read_config(extra: Dict[str, Any] | None = None) -> InkboxPluginConfig:
         realtime_api_key=realtime_api_key,
     )
     return InkboxPluginConfig(
+        slack_enabled=str(extra.get("slack_enabled", os.getenv("INKBOX_SLACK_ENABLED", "false"))).lower() in {"1", "true", "yes", "on"},
+        imessage_threaded_replies=os.getenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false").lower() in {"1", "true", "yes", "on"},
         api_key=str(extra.get("api_key") or os.getenv("INKBOX_API_KEY") or "").strip(),
         identity=str(extra.get("identity") or os.getenv("INKBOX_IDENTITY") or "").strip(),
         signing_key=str(extra.get("signing_key") or os.getenv("INKBOX_SIGNING_KEY") or "").strip(),

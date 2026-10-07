@@ -31,7 +31,7 @@ def test_plugin_does_not_import_removed_hermes_modules():
 def test_live_workflow_uses_isolated_pytest_entrypoint(workflow_name):
     workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
 
-    assert 'PYTEST="$HERMES_HOME/hermes-agent/venv/bin/pytest"' in workflow
+    assert 'PYTEST="$RUNNER_TEMP/inkbox-live-runner/bin/pytest"' in workflow
     assert '"$PY" -m pytest' not in workflow
 
 

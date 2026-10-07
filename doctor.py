@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 from datetime import date, datetime
 from typing import Any, Dict, List
 from urllib.parse import urlsplit, urlunsplit
@@ -123,6 +125,60 @@ def _local_a2a_tasks(limit: int = 10) -> List[Dict[str, Any]]:
             }
         rows.append(row)
     return rows
+
+
+def _local_queue_counts(cfg, identity_id):
+    """Read only configured-identity counts; never include saved message bodies."""
+    key = hashlib.sha256(json.dumps([cfg.base_url, cfg.identity, str(identity_id)]).encode()).hexdigest()
+    result = {}
+    for name, directory in (("native", "inkbox_native_turns"), ("companion", "inkbox_companion")):
+        counts = {"scopes": 0, "blockedScopes": 0, "turns": 0, "states": {}, "unreadable": 0, "truncated": False}
+        for index, path in enumerate((inkbox_state_path().parent / directory / key).glob("*.json")):
+            if index >= 1000:
+                counts["truncated"] = True
+                break
+            try:
+                if path.is_symlink() or path.stat().st_size > 16 * 1024 * 1024:
+                    raise ValueError("Unsupported checkpoint")
+                row = json.loads(path.read_text())
+                turns = row["turns"]
+                if not isinstance(turns, list) or not all(isinstance(turn, dict) for turn in turns):
+                    raise ValueError("Invalid checkpoint")
+                counts["scopes"] += 1
+                counts["blockedScopes"] += bool(row.get("blocked") or row.get("state") in {"paused", "failed", "revoked"})
+                for turn in turns:
+                    state = turn.get("state")
+                    if state not in {"pending", "ready", "running", "submitting", "submitted", "answer_ready", "sending", "completed", "done", "uncertain", "cancelled", "quarantined", "context_only", "control_submitting"}:
+                        state = "unknown"
+                    counts["states"][state] = counts["states"].get(state, 0) + 1
+                    counts["turns"] += 1
+            except (OSError, ValueError, TypeError, KeyError):
+                counts["unreadable"] += 1
+        result[name] = counts
+    return result
+
+
+def _native_imessage_capability(identity):
+    from .imessage_state import require_threading, source_metadata, validate_reply_target
+    result = {"sdkSupported": False, "backend": "not_checked"}
+    try:
+        require_threading(identity)
+    except Exception:
+        return result
+    result["sdkSupported"] = True
+    try:
+        messages = identity.list_imessages(limit=1, include_groups=True)
+        if not messages:
+            result["backend"] = "unverified_no_source"
+            return result
+        source = messages[0]
+        if not _field(source, "id"):
+            raise ValueError("Visible source has no message identifier")
+        validate_reply_target(identity, {**source_metadata(source), "conversation_id": str(_field(source, "conversation_id") or "")})
+        result["backend"] = "verified"
+    except Exception:
+        result["backend"] = "unavailable"
+    return result
 
 
 def _delivery_result(row: Any) -> str:
@@ -303,6 +359,33 @@ def run_doctor() -> Dict[str, Any]:
             if cfg.identity:
                 identity = client.get_identity(cfg.identity)
                 summary["identityRecord"] = object_summary(identity)
+                summary["optionalCapabilities"] = {
+                    "slackEnabled": cfg.slack_enabled,
+                    "nativeIMessageEnabled": cfg.imessage_threaded_replies,
+                    "vaultKeyConfigured": bool(os.getenv("INKBOX_HERMES_VAULT_KEY")),
+                }
+                summary["channelQueues"] = _local_queue_counts(cfg, identity.id)
+                if cfg.imessage_threaded_replies:
+                    capability = _native_imessage_capability(identity)
+                    summary["optionalCapabilities"]["nativeIMessage"] = capability
+                    if not capability["sdkSupported"]:
+                        findings.append({"id": "inkbox/native-imessage-sdk", "severity": "error",
+                            "message": "Native iMessage requires Inkbox SDK 0.7.13+ reply/thread APIs. Upgrade the SDK or disable the opt-in."})
+                    elif capability["backend"] != "verified":
+                        findings.append({"id": "inkbox/native-imessage-backend", "severity": "warning",
+                            "message": "Native reply backend support is not verified. Doctor uses read-only source/thread probes; no visible source or failed endpoint cannot prove readiness. Every targeted send preflights again before upload/send."})
+                if cfg.slack_enabled:
+                    try:
+                        connections = client.slack.list_connections(str(identity.id))
+                        subscriptions = client.webhooks.subscriptions.list(agent_identity_id=str(identity.id))
+                        active = [item for item in _field(connections, "connections", []) if str(getattr(_field(item, "status", ""), "value", _field(item, "status", ""))) == "connected"]
+                        paused = any(str(_field(item, "status", "")) == "paused" and any(str(kind).startswith("slack.") for kind in _field(item, "event_types", [])) for item in subscriptions)
+                        if not active or paused:
+                            findings.append({"id": "inkbox/slack-not-ready", "severity": "warning",
+                                "message": "Slack needs a connected workspace and an active subscription. Rerun setup or inspect the paused subscription; do not create a duplicate."})
+                    except Exception:
+                        findings.append({"id": "inkbox/slack-diagnostics-unavailable", "severity": "warning",
+                            "message": "Slack readiness reads failed; check the installed SDK, identity, and workspace connection."})
                 incoming = identity.get_incoming_call_action()
                 incoming_action = str(
                     getattr(

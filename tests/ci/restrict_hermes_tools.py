@@ -20,7 +20,7 @@ def restrict_inkbox_platform(config: dict) -> dict:
 
 
 def main() -> None:
-    import yaml
+    import hermes_yaml as yaml
 
     config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}

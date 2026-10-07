@@ -20,7 +20,8 @@ def test_every_live_workflow_uses_retrying_installer():
         assert 'bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh"' in workflow
         assert '"$GITHUB_WORKSPACE/tests/ci/resolve_inkbox_identity.py"' in workflow
         assert 'os.environ["HERMES_INKBOX_API_KEY"]' not in workflow
-        assert "--skip-browser --no-skills" in workflow
+        assert "--skip-browser" in workflow
+        assert "--no-skills" not in workflow
         assert '"$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"' in workflow
         assert "hermes-agent.nousresearch.com/install.sh" not in workflow
 
@@ -135,10 +136,57 @@ INSTALL
     sleep.write_text("#!/bin/bash\nexit 0\n")
     sleep.chmod(0o755)
     result = subprocess.run(
-        ["bash", str(ROOT / "tests/ci/install_hermes.sh"), "--skip-browser", "--no-skills"],
+        ["bash", str(ROOT / "tests/ci/install_hermes.sh"), "--skip-browser"],
         env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path),
              "HERMES_INSTALL_TIMEOUT": "0.1", "HERMES_INSTALL_ATTEMPTS": "2"},
         capture_output=True, text=True, timeout=5,
     )
     assert result.returncode == 0, result.stderr
     assert "attempt 1 failed; retrying" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="exercises the POSIX Bash installer")
+@pytest.mark.parametrize("workflow_name", (
+    "live-a2a.yml", "live-channels.yml", "live-external-events.yml", "live-voice.yml",
+))
+def test_live_installer_arguments_match_current_host_cli(tmp_path, workflow_name):
+    """Execute each workflow's actual arguments through the download/retry wrapper.
+
+    Hermes main's installer accepts non-interactive/browser flags, but rejects
+    the retired --no-skills flag before installing anything. Keep that strict
+    argument boundary; don't silently discard unsupported caller arguments.
+    """
+    import shlex
+    import subprocess
+
+    workflow = ROOT.joinpath(".github", "workflows", workflow_name).read_text()
+    invocation = next(line.strip() for line in workflow.splitlines()
+                      if 'bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh"' in line)
+    arguments = shlex.split(invocation)[2:]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl = bin_dir / "curl"
+    curl.write_text('''#!/bin/bash
+cat > "$RUNNER_TEMP/hermes-install.sh" <<'INSTALL'
+#!/bin/bash
+set -eu
+for argument in "$@"; do
+  case "$argument" in
+    --non-interactive|--skip-browser) ;;
+    *) echo "unknown option: $argument" >&2; exit 1 ;;
+  esac
+done
+printf '%s\\n' "$@" > "$RUNNER_TEMP/accepted-arguments"
+INSTALL
+''')
+    curl.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(ROOT / "tests/ci/install_hermes.sh"), *arguments],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+             "RUNNER_TEMP": str(tmp_path), "HERMES_INSTALL_ATTEMPTS": "1"},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "accepted-arguments").read_text().splitlines() == [
+        "--non-interactive", "--skip-browser",
+    ]
