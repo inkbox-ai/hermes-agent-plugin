@@ -212,14 +212,14 @@ class CompanionReceiver:
                 self.rows[row["key"]] = row
                 unresolved = [turn for turn in row["turns"] if turn["state"] not in {"pending", "ready", "completed", "context_only"}]
                 recoverable = bool(unresolved) and all(turn.get("result_ready") and turn.get("delivery", {}).get("state")
-                                                       not in {"sending", "uncertain"} for turn in unresolved)
+                                                       not in {"sending", "uncertain"} and not self._uncertain_media(turn) for turn in unresolved)
                 if row["state"] == "failed" or (row["state"] == "paused" and recoverable):
                     row["state"] = (
                         "initialized" if any(turn["phase"] == "initialization" and turn["state"] == "completed"
                                              for turn in row["turns"])
                         else "pending" if row["meta"].get("activation_id") else "ordinary"
                     )
-                if any(turn["state"] in {"submitting", "submitted", "control_submitting"} and not turn.get("result_ready")
+                if any(self._uncertain_media(turn) or turn["state"] in {"submitting", "submitted", "control_submitting"} and not turn.get("result_ready")
                        for turn in row["turns"]):
                     row["state"] = "paused"
                     row["error"] = "Host acceptance or completion is uncertain; inspect the host session before recovery."
@@ -569,6 +569,7 @@ class CompanionReceiver:
         except Exception as exc:
             uncertain = any(
                 turn.get("delivery", {}).get("state") in {"sending", "uncertain"}
+                or self._uncertain_media(turn)
                 or (turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
                     and not turn.get("result_ready"))
                 for turn in row["turns"]
@@ -919,7 +920,7 @@ class CompanionReceiver:
             self.adapter._reply_identity = await asyncio.to_thread(self.adapter._inkbox.get_identity, self.adapter._identity_handle)
         self._require_owner()
         delivery = turn.get("delivery", {})
-        if delivery.get("state") in {"sending", "uncertain"}:
+        if self._uncertain_media(turn) or delivery.get("state") in {"sending", "uncertain"}:
             raise RuntimeError("Companion send outcome is uncertain")
         await self._activity(row, turn, "accepted")
         result_sent = delivery.get("state") == "sent" and delivery.get("fingerprint") == digest(turn.get("result", ""))
@@ -951,8 +952,8 @@ class CompanionReceiver:
             return SendResult(success=False, error="Companion conversation is paused")
         if content.strip().upper() == "[SILENT]":
             return SendResult(success=True, message_id="suppressed-silent-marker")
-        if turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
-            return SendResult(success=False, error="Explicit iMessage send outcome is uncertain; no automatic resend")
+        if self._uncertain_media(turn) or turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
+            return SendResult(success=False, error="Original media or explicit send outcome is uncertain; no automatic resend", raw_response={"inkbox_no_retry": True})
         explicit = next((item for item in turn.get("explicit_sends", []) if item["content"] == content), None)
         if explicit:
             return SendResult(success=True, message_id=explicit["message_id"])
@@ -990,6 +991,79 @@ class CompanionReceiver:
                 turn["delivery"]["state"] = "uncertain"
             self._save(row)
             return SendResult(success=False, error=f"Companion reply failed ({type(exc).__name__})")
+
+    @staticmethod
+    def _uncertain_media(turn):
+        return any(item.get("state") in {"sending", "uncertain"}
+                   for item in turn.get("media_deliveries", {}).values())
+
+    def _check_slack_media_authority(self, row, turn):
+        self._require_owner()
+        self._check_local_reply_authority(row, turn)
+        if not getattr(self.adapter, "_slack_enabled", False):
+            raise PermissionError("Slack is disabled")
+        if row["state"] in {"paused", "failed", "revoked"} or turn["state"] not in {"submitting", "submitted", "completed"}:
+            raise RuntimeError("Original Companion turn cannot send media")
+        if turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
+            raise RuntimeError("Original explicit delivery is uncertain")
+
+    async def send_slack_media(self, row, turn, payload, *, link=False):
+        """Keep attachments and hosted links separate from final-answer delivery."""
+        from .slack import upload_reply, operation_summary, validate_connection
+        self._check_slack_media_authority(row, turn)
+        route = self._slack_route(turn)
+        fingerprint = digest(json.dumps([route, payload], sort_keys=True))
+        prior = turn.setdefault("media_deliveries", {}).get(fingerprint)
+        if prior and prior["state"] == "sent":
+            return SendResult(success=True, message_id=prior["operation"]["id"], raw_response=prior["operation"])
+        if prior or self._uncertain_media(turn):
+            return SendResult(success=False, error="Original Slack file outcome requires inspection with inkbox_slack_get_operation",
+                              raw_response={"inkbox_no_retry": True, **(prior or {}).get("operation", {})})
+        await self._authorize_slack(row, turn)
+        self._check_slack_media_authority(row, turn)
+        # Another attachment may have completed while the authorization read yielded.
+        prior = turn["media_deliveries"].get(fingerprint)
+        if prior and prior["state"] == "sent":
+            return SendResult(success=True, message_id=prior["operation"]["id"], raw_response=prior["operation"])
+        if prior or self._uncertain_media(turn):
+            return SendResult(success=False, error="Original Slack media outcome is retained; no resend", raw_response={"inkbox_no_retry": True})
+        delivery = turn["media_deliveries"][fingerprint] = {"state": "sending"}
+        self._save(row)
+
+        def checked_upload():
+            self._check_slack_media_authority(row, turn)
+            validate_connection(self.adapter._inkbox.slack, str(self.adapter._identity_id), route)
+            self._check_slack_media_authority(row, turn)
+            key = "hermes:media:" + digest(turn["id"] + fingerprint)
+            if link:
+                return self.adapter._inkbox.slack.send_message(
+                    route["connection_id"], conversation_id=route["conversation_id"],
+                    thread_ts=route.get("thread_ts"), idempotency_key=key, **payload,
+                )
+            return upload_reply(self.adapter._inkbox, route, payload, idempotency_key=key)
+
+        task = asyncio.create_task(asyncio.to_thread(checked_upload))
+        self.outbound.add(task)
+        task.add_done_callback(self.outbound.discard)
+        try:
+            operation = await asyncio.shield(task)
+            summary = operation_summary(operation)
+            succeeded = operation.status == ("sent" if link else "succeeded")
+            # A definitive rejection is not an unknown external effect. Retain
+            # it to suppress retries without quarantining future user turns.
+            delivery.update(state="sent" if succeeded else "failed" if operation.status == "failed" else "uncertain", operation=summary)
+            self._save(row)
+            if succeeded:
+                return SendResult(success=True, message_id=str(operation.id), raw_response=summary)
+            inspection = "inkbox_slack_get_action" if link else "inkbox_slack_get_operation"
+            return SendResult(success=False,
+                              error=f"Slack operation {operation.id} is {operation.status}; inspect {inspection}; no resend",
+                              raw_response={"inkbox_no_retry": True, **summary})
+        except Exception as exc:
+            delivery["state"] = "uncertain"
+            self._save(row)
+            return SendResult(success=False, error=f"Slack upload outcome is uncertain ({type(exc).__name__}); no resend",
+                              raw_response={"inkbox_no_retry": True})
 
     async def dispatch_reply(self, row: dict, turn: dict, method: Any, *args: Any, **kwargs: Any) -> Any:
         """Retain the originating receipt and ownership until the SDK send finishes."""
@@ -1078,7 +1152,8 @@ class CompanionReceiver:
             raise ValueError("Invalid Companion Slack source")
         self._validate_slack_route(envelope, turn["reply_context"], exact=True)
         return {**parsed[2], "thread_ts": envelope["_hermes_slack_source"]["thread_ts"],
-                "sender": turn["author"]}
+                "sender": turn["author"],
+                "recipient_team_id": envelope["_hermes_slack_source"]["author"].split(":", 1)[0]}
 
     async def _authorize_slack(self, row, turn):
         if not getattr(self.adapter, "_slack_enabled", False):
@@ -1184,7 +1259,7 @@ class CompanionReceiver:
         from .host_fencing import fence_turn
         unresolved = [turn for turn in row["turns"] if not turn.get("fenced") and (
             (turn["state"] in {"submitting", "submitted", "uncertain", "control_submitting"}
-             and not turn.get("result_ready")) or turn.get("delivery", {}).get("state") in {"sending", "uncertain"})]
+             and not turn.get("result_ready")) or turn.get("delivery", {}).get("state") in {"sending", "uncertain"} or self._uncertain_media(turn))]
         if not unresolved:
             return False
         for turn in unresolved:

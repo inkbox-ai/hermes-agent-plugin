@@ -91,6 +91,7 @@ import socket as _socket
 import time
 import uuid
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -238,6 +239,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     )
 
 logger = logging.getLogger(__name__)
+_host_final_reply = ContextVar("inkbox_host_final_reply", default=None)
 
 
 class _ExpectedTunnelIdleFilter(logging.Filter):
@@ -401,6 +403,20 @@ _REPLY_AUTOSEND_DIRECTIVES: Dict[str, str] = {
     "email": "Your reply to this email is sent automatically as a threaded reply — "
     "just write it. Only call inkbox_send_email to email a DIFFERENT thread or "
     "recipient, never to reply here (that sends your message twice).",
+    "slack": "You are replying in Slack. Your reply is sent automatically to the "
+    "original conversation/thread — just write it. Only call inkbox_slack_send_message "
+    "for an explicitly requested separate message, never to duplicate your reply here. "
+    "Use Slack mrkdwn for all Slack-facing replies, progress updates, and explicit "
+    "messages: links are <https://example.com|label> or bare URLs, NOT [label](url); "
+    "bold is *bold*, NOT **bold**; italic is _italic_ and strikethrough is ~text~. "
+    "Use `inline code` or triple-backtick code blocks without language tags for code. "
+    "Avoid Markdown headings, tables, and image syntax; use short paragraphs, "
+    "simple bullets, and occasional bold labels instead. Keep updates conversational "
+    "and concise; lead with the answer or changed status rather than a report-style "
+    "preamble. Use <@USER_ID> or <#CHANNEL_ID> only with known Slack IDs and intentional "
+    "mentions; do not invent IDs or broadcast mentions. Escape literal &, <, and > "
+    "as &amp;, &lt;, and &gt; without escaping valid Slack links or mentions. "
+    "These rules govern chat presentation, not the syntax of requested files or code.",
 }
 _ACTION_EXECUTION_GUIDANCE = (
     "For a requested action such as placing a call or sending to another channel, "
@@ -1484,6 +1500,54 @@ _TOOL_PROGRESS_GLYPHS: Tuple[str, ...] = (
 _TOOL_PROGRESS_TAIL_RE = re.compile(
     r"\s+[A-Za-z_][A-Za-z0-9_.-]*(?:\s*\(|\s*:|\.{3})(?:\s|$)",
 )
+_SLACK_PROGRESS_LABELS = (
+    (r"🔀\s+Delegating\b", "Delegating work"),
+    (r"📄\s+Reading\b", "Reading information"),
+    (r"👁️?\s+Looking at the image\b", "Checking the image"),
+    (r"✍️?\s+Writing\b", "Writing files"),
+    (r"📝\s+Editing\b", "Editing files"),
+    (r"🔍\s+Searching past sessions\b", "Checking earlier context"),
+    (r"🔎\s+Searching (?:the web|files)\b", "Searching for information"),
+    (r"🌐\s+Browsing\b", "Reading a webpage"),
+    (r"💻\s+Running\b", "Running a command"),
+    (r"🐍\s+Running code\b", "Running code"),
+    (r"🎨\s+Generating image\b", "Generating an image"),
+    (r"🎬\s+Generating video\b", "Generating a video"),
+    (r"🔊\s+Generating speech\b", "Generating audio"),
+    (r"📚\s+(?:Reading|Listing|Updating) skills?\b", "Checking instructions"),
+    (r"📋\s+Updating tasks\b", "Updating the task list"),
+)
+
+
+def _slack_progress_status(content, metadata=None, *, known_handle=False):
+    """Recognize host narration without publishing tool arguments or worker IDs."""
+    meta = metadata or {}
+    if meta.get("is_approval_prompt") is True:
+        return None
+    tagged = str(meta.get("notice_type") or "").strip().lower() == "tool_progress"
+    lines = [line.strip() for line in (content or "").splitlines() if line.strip()]
+    if lines and any(lines[0].startswith(glyph) and _TOOL_PROGRESS_TAIL_RE.match(lines[0][len(glyph):])
+                     for glyph in _TOOL_PROGRESS_GLYPHS):
+        return "Working on your request"  # Verbose continuation lines contain raw tool arguments/results.
+    labels = []
+    for line in lines:
+        label = next((label for pattern, label in _SLACK_PROGRESS_LABELS if re.match(pattern, line)), None)
+        if tagged and line.startswith("Delegating"):
+            label = "Delegating work"
+        if label == "Delegating work":
+            action = re.match(r"(?:🔀\s+)?Delegating\s+(list|steer|stop)\b", line)
+            if action:
+                label = {"list": "Checking delegated work", "steer": "Updating delegated work",
+                         "stop": "Stopping delegated work"}[action[1]]
+        if label is None:
+            if not tagged and not known_handle:
+                return None
+            if re.match(r"^[\w ]+[.!…]?\Z", line) and len(line) <= 160:
+                label = line
+            else:
+                label = "Working on your request"
+        labels.append(label)
+    return labels[-1] if labels else "Working on your request" if tagged or known_handle else None
 
 # Internal producers (status_callback, interim assistant chatter, the
 # "Still working" notifier, the trajectory compressor…) tag their outbound
@@ -2084,6 +2148,15 @@ class InkboxAdapter(BasePlatformAdapter):
     def _send_retry_is_final(self, result: SendResult) -> bool:
         # The durable receiver, not the host's formatting fallback, owns retries.
         return bool((getattr(result, "raw_response", None) or {}).get("inkbox_no_retry"))
+
+    async def _send_final_text(self, event, *args, **kwargs):
+        # Only the host's final-delivery boundary can bypass narration filters;
+        # externally supplied notify metadata is not equivalent authority.
+        token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
+        try:
+            return await super()._send_final_text(event, *args, **kwargs)
+        finally:
+            _host_final_reply.reset(token)
 
     async def _extract_response_content(self, response, event, session_key, **kwargs):
         extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
@@ -2863,12 +2936,119 @@ class InkboxAdapter(BasePlatformAdapter):
     # Outbound: send / edit / get_chat_info
     # ------------------------------------------------------------------
 
+    def _slack_progress_context(self, chat_id, metadata=None, reply_to=None):
+        """Resolve only the originating receipt, never a chat's latest thread."""
+        chat_id = str(chat_id)
+        origin = reply_route.get() or {}
+        meta = metadata or {}
+        route = origin if origin.get("chat_id") == chat_id else meta.get("inkbox_reply_route", meta)
+        source_id = route.get("message_id") or reply_to
+        turn = None
+        native = getattr(self, "_native_turns", None)
+        if native is not None and source_id:
+            turn = next((turn for row in native.rows.values() if row["chat_id"] == chat_id
+                         for turn in row["turns"] if turn["id"] == source_id), None)
+            if turn is not None and not route.get("source_event_id"):
+                route = turn["route"]
+        if chat_id.startswith("companion:"):
+            receiver = getattr(self, "_companion", None)
+            row = receiver.rows.get(chat_id.removeprefix("companion:")) if receiver else None
+            if row and row["meta"]["channel"] == "slack" and source_id:
+                turn = next((turn for turn in row["turns"] if turn["id"] == source_id), None)
+                if turn is not None and not route.get("source_event_id"):
+                    route = {**receiver._slack_route(turn), "mode": "slack", "chat_id": chat_id}
+        if (route.get("mode") != "slack" or route.get("chat_id", chat_id) != chat_id
+                or not route.get("source_event_id")):
+            return None, turn
+        return route, turn
+
+    @staticmethod
+    def _matches_checkpointed_reply(turn, content):
+        rendered = turn.get("rendered") if turn else None
+        return bool(turn and any(content == value for value in (
+            turn.get("answer"), turn.get("result"), rendered.get("text_content") if isinstance(rendered, dict) else None,
+        ) if isinstance(value, str)))
+
+    @staticmethod
+    def _is_host_final_reply(chat_id, turn):
+        return bool(turn and _host_final_reply.get() == (str(chat_id), str(turn["id"])))
+
+    async def _send_slack_progress(self, chat_id, content, metadata=None, reply_to=None, message_id=None):
+        route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
+        if route is None and message_id is None:
+            return None
+        if self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn):
+            return None
+        status = _slack_progress_status(content, metadata, known_handle=message_id is not None)
+        if status is None:
+            return None
+        tracker = getattr(self, "_slack_activity", None)
+        handle = None
+        if tracker is not None:
+            try:
+                handle = await tracker.progress(str(chat_id), route or {}, status, message_id=message_id)
+            except Exception as exc:
+                logger.debug("[Inkbox] Slack progress unavailable (%s)", type(exc).__name__)
+        return SendResult(success=True, message_id=handle or "suppressed-slack-progress")
+
+    def _is_slack_media_route(self, chat_id, metadata):
+        if str(chat_id).startswith("slack:"):
+            return True  # Fail closed even when its original owner is unavailable.
+        if str(chat_id).startswith("companion:"):
+            receiver = getattr(self, "_companion", None)
+            row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+            return row is None or row["meta"]["channel"] == "slack"  # Orphans must fail closed.
+        origin = reply_route.get() or {}
+        route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
+        return route.get("mode") == "slack"
+
+    async def _send_slack_media(self, chat_id, local_path, caption, metadata, reply_to=None, filename=None, *, link_text=None):
+        from .slack import file_payload
+        try:
+            if not getattr(self, "_slack_enabled", False):
+                raise PermissionError("Slack is disabled")
+            if str(chat_id).startswith("companion:"):
+                receiver = getattr(self, "_companion", None)
+                row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+                origin = reply_route.get() or {}
+                context = (metadata or {}).get("inkbox_reply_route", metadata or {})
+                source_id = (origin.get("message_id") if origin.get("chat_id") == str(chat_id)
+                             else reply_to or (context.get("message_id") if context.get("chat_id") == str(chat_id) else None))
+                turn = (next((item for item in row["turns"] if item["id"] == source_id), None)
+                        if row and source_id else receiver.active.get(str(chat_id)) if receiver else None)
+            else:
+                receiver = getattr(self, "_native_turns", None)
+                context = metadata
+                if reply_to and receiver and not reply_route.get():
+                    # Resolve only a saved original turn, never caller-supplied destination fields.
+                    row = next((item for item in receiver.rows.values() if item["chat_id"] == str(chat_id)
+                                and any(turn["id"] == reply_to for turn in item["turns"])), None)
+                    turn = next((item for item in row["turns"] if item["id"] == reply_to), None) if row else None
+                    context = {"inkbox_reply_route": turn["route"]} if turn else metadata
+                owned = receiver.media_owner(str(chat_id), context) if receiver else None
+                row, turn = owned if owned else (None, None)
+            if row is None or turn is None:
+                raise PermissionError("Slack media requires its original native or Companion turn")
+            receiver._check_slack_media_authority(row, turn)
+            if link_text is not None:
+                if len(link_text) > 12000:
+                    raise ValueError("Slack image links must be at most 12000 characters")
+                payload = {"text": link_text}
+            else:
+                payload = await asyncio.to_thread(file_payload, local_path, filename=filename,
+                                                  initial_comment=caption, validator=self.validate_media_delivery_path)
+            return await receiver.send_slack_media(row, turn, payload, link=link_text is not None)
+        except Exception as exc:
+            return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
+
     def _is_imessage_media_route(
         self,
         chat_id: str,
         metadata: Optional[Dict[str, Any]],
     ) -> bool:
         """Whether a native media send belongs on the iMessage channel."""
+        if self._is_slack_media_route(chat_id, metadata):
+            return False
         if str(chat_id).startswith("companion:"):
             row = self._companion.rows.get(str(chat_id).removeprefix("companion:")) if self._companion else None
             return bool(row and row["meta"]["channel"] == "imessage")
@@ -3141,6 +3321,15 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 media_url=image_url,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            # No URL download: avoid adding a server-side request forgery surface.
+            if not _public_http_media_url(image_url):
+                return SendResult(success=False, error="Slack image links must be hosted HTTP(S) URLs",
+                                  raw_response={"inkbox_no_retry": True})
+            return await self._send_slack_media(
+                chat_id, None, None, metadata, reply_to,
+                link_text="\n".join(filter(None, [caption, image_url])),
+            )
         return await super().send_image(
             chat_id, image_url, caption, reply_to, metadata,
         )
@@ -3160,6 +3349,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 caption=caption,
                 metadata=metadata,
                 local_path=image_path,
+            )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, image_path, caption, metadata, reply_to,
             )
         return await super().send_image_file(
             chat_id, image_path, caption, reply_to, metadata, **kwargs,
@@ -3182,6 +3375,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 local_path=file_path,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, file_path, caption, metadata, reply_to, filename=file_name,
+            )
         return await super().send_document(
             chat_id, file_path, caption, file_name, reply_to, metadata, **kwargs,
         )
@@ -3202,6 +3399,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 local_path=video_path,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, video_path, caption, metadata, reply_to,
+            )
         return await super().send_video(
             chat_id, video_path, caption, reply_to, metadata, **kwargs,
         )
@@ -3221,6 +3422,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 caption=caption,
                 metadata=metadata,
                 local_path=audio_path,
+            )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, audio_path, caption, metadata, reply_to,
             )
         return await super().send_voice(
             chat_id, audio_path, caption, reply_to, metadata, **kwargs,
@@ -3254,13 +3459,20 @@ class InkboxAdapter(BasePlatformAdapter):
             saved = self._conversation_state().row(str(chat_id))["routes"].get(str(reply_to))
             if saved:
                 metadata = {**(metadata or {}), **saved}
+        progress = await self._send_slack_progress(chat_id, content, metadata, reply_to)
+        if progress is not None:
+            return progress
         if _is_hermes_admin_notice(content, metadata):
-            logger.debug(
-                "[Inkbox] Suppressed admin notice for chat %s: %s…",
-                chat_id, (content or "")[:60].replace("\n", " "),
-            )
-            self._stop_imessage_typing_for_chat(chat_id)
-            return SendResult(success=True, message_id="suppressed-admin-notice")
+            route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
+            explicit_notice = str((metadata or {}).get("notice_type") or "").strip().lower() in _ADMIN_NOTICE_METADATA_TYPES
+            if not (route is not None and not explicit_notice and (
+                    self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn))):
+                logger.debug(
+                    "[Inkbox] Suppressed admin notice for chat %s: %s…",
+                    chat_id, (content or "")[:60].replace("\n", " "),
+                )
+                self._stop_imessage_typing_for_chat(chat_id)
+                return SendResult(success=True, message_id="suppressed-admin-notice")
 
         if str(chat_id).startswith("a2a:"):
             return await self._send_a2a_reply(chat_id, content)
@@ -3735,6 +3947,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # Active voice call -> keep tool-progress UI out of TTS.
         if chat_id in self._active_call_ws:
             return False
+        tracker = getattr(self, "_slack_activity", None)
+        if tracker is not None and callable(getattr(tracker, "has_chat", None)) and tracker.has_chat(str(chat_id)):
+            return True
         modality = self._last_inbound_modality.get(str(chat_id), "")
         if modality == "email":
             return False
@@ -3787,6 +4002,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Stream incremental deltas to an open call. No-op for mail/SMS."""
+        if str(message_id).startswith("inkbox-slack-progress:"):
+            progress = await self._send_slack_progress(chat_id, content, metadata, message_id=message_id)
+            return progress or SendResult(success=False, error="Not a Slack progress update")
         ws = self._active_call_ws.get(chat_id)
         if ws is None:
             return SendResult(success=False, error="Not supported")
@@ -6238,7 +6456,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
         Args:
             modality (str): Inkbox channel for this event — ``email``, ``sms``,
-                ``imessage``, or ``voice``. The broad lookup key.
+                ``imessage``, ``slack``, or ``voice``. The broad lookup key.
             chat_id (Any): Inkbox contact id (or raw address) for this event.
                 The fine-grained lookup key, preferred over the modality.
             default_skills (str | list[str] | None): Skills the channel always

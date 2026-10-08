@@ -492,7 +492,7 @@ After the gateway starts:
 
 Two optional blocks under the `inkbox:` platform config tailor the agent per
 channel without editing `SOUL.md` or the bundled skills. Both are keyed by
-**modality** (`email`, `sms`, `imessage`, `voice`) or by a specific **Inkbox
+**modality** (`email`, `sms`, `imessage`, `slack`, `voice`) or by a specific **Inkbox
 contact id**, with the contact id taking precedence.
 
 - `channel_prompts` — an ephemeral system prompt injected on that channel's turns
@@ -518,6 +518,12 @@ Built-in defaults that always load (before merge): `inkbox:inkbox-troubleshootin
 on every channel, plus `inkbox:inkbox-imessage-responder` on iMessage and
 `inkbox:inkbox-call-review` on realtime call wrap-up. Skill names use the
 qualified `inkbox:<skill>` form.
+
+Slack turns, including Companion conversations, always include Slack-native formatting
+guidance in the channel prompt: concise replies, `<https://example.com|label>` links,
+single-asterisk bold, and simple lists instead of Markdown headings or tables.
+An optional `channel_prompts.slack` adds your own tone or workflow instructions
+after that built-in guidance; no extra configuration is required to enable it.
 
 ## Tools
 
@@ -616,19 +622,27 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The base SDK floor is **0.7.11**. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The base SDK floor is **0.7.15**, including the Slack file upload and operation APIs. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
 ### Slack setup and replies
 
 Run `hermes inkbox setup` and choose Slack. The wizard can reuse saved workspaces, provision a connection using the appropriate claimed identity/admin credential, print its installation link, and wait for completion. Waiting is bounded and cancellable; skipping does not replace existing connections. Restart the gateway after changing configuration. `hermes inkbox doctor` provides read-only readiness checks.
 
-Slack tools: `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, and `inkbox_slack_get_action`. Explicit sends require an idempotency key and accept at most **12,000 characters**. Preserve opaque cursors and timestamps. For an unknown send result, inspect its action instead of sending again.
+Slack tools: `inkbox_slack_list_connections`, `inkbox_slack_list_conversations`, `inkbox_slack_list_messages`, `inkbox_slack_search`, `inkbox_slack_send_message`, `inkbox_slack_get_action`, `inkbox_slack_upload_file`, and `inkbox_slack_get_operation`. Explicit sends require an idempotency key and accept at most **12,000 characters**. Preserve opaque cursors and timestamps. For an unknown text send result, inspect its action instead of sending again.
+
+Slack images and attachments require **Inkbox SDK >=0.7.15**. Local image, document, video, and voice files returned by Hermes are uploaded automatically to the original native or Companion connection/channel/thread. The host's local-media path policy applies. Each file must contain **1 byte–10 MiB**; document filename overrides must be plain names (up to 255 characters), and captions are limited to 12,000 characters. Audio/video are general Slack files, not native voice-note recordings. Remote image URLs are sent as **links only**: the plugin does not download URLs, avoiding an SSRF surface. Inbound attachment references remain metadata, not downloaded contents.
+
+For a separately requested upload, call `inkbox_slack_upload_file` with `connection_id`, `conversation_id`, `file_path`, and `idempotency_key`; optionally supply `thread_ts`, `filename`, `title`, and `initial_comment`. Reuse a key only for the exact same file bytes and payload. The result includes the operation ID, status and file ID when available. Inspect `inkbox_slack_get_operation` with the connection and operation IDs: only `succeeded` confirms upload; poll only `in_progress`. `unknown` or a transport timeout is not proof of failure. Automatic attachments checkpoint effects and do not blindly retry or fall back to another route; inspect uncertain outcomes before any manual resend.
 
 Slack ordinary DMs reply inline; channel mentions normally reply in their native thread. Unaddressed messages cannot open an unwatched channel thread. Follow-ups in an already watched thread follow the configured auto/mention policy; quiet context in mention mode starts no work or activity indicators. Companion keeps channel-wide authorized history within its connection/channel/activation, but every reply retains the source's exact destination: top-level stays top-level, native subthread stays in that subthread. Safe mode and mention mode remain independent gates. Approval answers and Stop must match the original actor and exact thread.
 
 An optional local Slack allowlist can name a verified actor as `U…`/`W…` or `T…:U…`/`T…:W…`. Ordinary routes retain the installation-qualified author; Companion can also match the verified home-workspace author from its authorized source. An unrelated workspace prefix is not an alias. Native authorization is rechecked before replies, without replacing the original conversation author or route.
 
 Inline replies show source 👀 while working, remove it on completion/cancel, and show ❌ on failure. Native-thread replies use working/awaiting-input/ready status only, with **no eyes or reaction fallback**. Indicators are aggregated and restart-cleaned. An API success is not proof that a particular Slack client renders the indicator.
+
+While a Slack turn is running, Hermes tool-progress notices update a native task card when the connection, source thread, and API support task streaming. Inline conversations and unsupported installations use one ordinary progress message edited in place; the plugin never creates a thread solely for progress. Both paths preserve the original destination, omit delegation identifiers and tool arguments, and coexist with Working/Stop. Updates are coalesced and paced; completion, Stop, and failure finish the original progress display. Final replies and approval prompts stay separate.
+
+Task streaming is detected automatically through the connection's capabilities and requires no additional app-manifest scopes beyond `chat:write`. An unsupported start may fall back to ordinary progress, but an unknown or timed-out stream operation never creates a replacement message. Restart cleanup looks up the original operation before closing a stream. The plugin prefers the SDK's typed streaming methods when available. Older supported SDKs use a narrow authenticated transport bridge until the minimum version can advance; a failed typed call never retries through that bridge. The plugin never handles Slack bot credentials directly.
 
 ### Native iMessage replies
 

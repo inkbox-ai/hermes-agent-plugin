@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Upload local Slack images, documents, video, and audio through source-bound native/Companion reply routes, with durable duplicate and uncertain-outcome protection. Remote image URLs remain links.
+- Add `inkbox_slack_upload_file` and `inkbox_slack_get_operation`, preserving operation status and file IDs. Raise the base SDK floor to 0.7.15.
+- Resume queued work after a confirmed Stop fence, including safe legacy pre-admission cancellations, while keeping uncertain deliveries quarantined.
+- Supply Slack-native formatting guidance for native and Companion replies, and show native task-card progress where supported with a source-bound in-place message fallback alongside Working/Stop controls.
+- Prefer typed SDK task-stream methods when available while preserving compatibility with older supported SDKs and uncertain-delivery handling.
+- Preserve confirmed progress outcomes across reconnects; describe unconfirmed disconnect cleanup as paused rather than claiming the run was stopped.
+
 ## 0.2.19
 
 - Add opt-in Slack tools, guided workspace installation, signed channel reception, channel-wide Companion, exact-thread controls, and inline/thread-specific activity.

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+from pathlib import Path
 from copy import copy
 from typing import Any
 
@@ -134,6 +136,11 @@ def inbound_message(envelope: dict, identity_id: str) -> tuple[str, str, dict] |
         "slack_mentioned": "mention" in kinds,
         "slack_addressed": bool(set(kinds) & {"dm", "group_dm", "mention"}),
     }
+    profile = data.get("actor_profile")
+    if (isinstance(profile, dict) and profile.get("id") == data["actor_id"]
+            and isinstance(profile.get("team_id"), str)
+            and re.fullmatch(r"T[A-Z0-9]{1,63}", profile["team_id"])):
+        meta["recipient_team_id"] = profile["team_id"]
     if "sender_access" in data:
         meta["sender_access"] = data["sender_access"]
     # Sender context never changes workspace/thread isolation or approval ownership.
@@ -194,6 +201,53 @@ def send_reply(client: Any, meta: dict, text: str) -> Any:
     return action
 
 
+SLACK_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def file_payload(file_path: str, *, filename: str | None = None, title: str | None = None,
+                 initial_comment: str | None = None, validator=None) -> dict:
+    """Read a host-approved local file with a bounded read; never fetch URLs."""
+    if validator is None:
+        from gateway.platforms.base import validate_media_delivery_path
+        validator = validate_media_delivery_path
+    safe_path = validator(file_path)
+    if not safe_path:
+        raise ValueError("Local media path is missing, unsafe, or not allowed")
+    path = Path(safe_path)
+    filename = path.name if filename is None else filename
+    if (not isinstance(filename, str) or not 1 <= len(filename) <= 255 or filename in {".", ".."}
+            or any(ord(char) < 32 or ord(char) == 127 or char in "/\\" for char in filename)):
+        raise ValueError("Provide a plain filename of 1–255 characters without paths or controls")
+    for key, value, maximum in (("title", title, 255), ("initial_comment", initial_comment, SLACK_MAX_TEXT_LENGTH)):
+        if value is not None and (not isinstance(value, str) or len(value) > maximum or "\x00" in value):
+            raise ValueError(f"{key} must be at most {maximum} characters without NUL characters")
+    if not path.is_file() or not 1 <= path.stat().st_size <= SLACK_MAX_UPLOAD_BYTES:
+        raise ValueError("Slack file must contain between 1 byte and 10 MiB")
+    with path.open("rb") as stream:
+        content = stream.read(SLACK_MAX_UPLOAD_BYTES + 1)
+    if not 1 <= len(content) <= SLACK_MAX_UPLOAD_BYTES:
+        raise ValueError("Slack file must contain between 1 byte and 10 MiB")
+    return {"filename": filename, "content_base64": base64.b64encode(content).decode("ascii"),
+            **({"title": title} if title is not None else {}),
+            **({"initial_comment": initial_comment} if initial_comment is not None else {})}
+
+
+def operation_summary(operation: Any) -> dict:
+    """Keep the inspection coordinates and outcome; never return file content."""
+    return {key: str(value) if key in {"id", "connection_id"} else value
+            for key in ("id", "connection_id", "operation", "status", "conversation_id", "thread_ts",
+                        "message_ts", "file_id", "error_code", "retry_after")
+            if (value := getattr(operation, key, None)) is not None}
+
+
+def upload_reply(client: Any, meta: dict, payload: dict, *, idempotency_key: str) -> Any:
+    method = getattr(slack_resource(client), "upload_file", None)
+    if not callable(method):
+        raise RuntimeError("Slack files require inkbox>=0.7.15,<1.0.0; upgrade the installed SDK")
+    return method(meta["connection_id"], conversation_id=meta["conversation_id"],
+                  thread_ts=meta.get("thread_ts"), idempotency_key=idempotency_key, **payload)
+
+
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {
         "name": "inkbox_slack_" + name, "description": description,
@@ -222,6 +276,18 @@ SLACK_TOOLS = [
            "thread_ts": _STRING, "idempotency_key": {
                "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"}},
           ["connection_id", "conversation_id", "text", "idempotency_key"]),
+    _tool("upload_file", "Upload a local image or file (1 byte–10 MiB) only when explicitly requested. "
+          "Use file_path, not a URL; ordinary reply attachments are automatic. Reuse idempotency_key "
+          "only for the exact same payload. Inspect get_operation after in_progress/unknown; never blindly resend.",
+          {**_CONVERSATION, "file_path": _STRING, "filename": {**_STRING, "maxLength": 255},
+           "title": {"type": "string", "maxLength": 255},
+           "initial_comment": {"type": "string", "maxLength": SLACK_MAX_TEXT_LENGTH},
+           "thread_ts": _STRING, "idempotency_key": {
+               "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"}},
+          ["connection_id", "conversation_id", "file_path", "idempotency_key"]),
+    _tool("get_operation", "Inspect a Slack file upload by operation ID. Poll only in_progress; "
+          "unknown is terminal uncertainty, not proof of failure or permission to resend.",
+          {**_CONNECTION, "operation_id": _STRING}, ["connection_id", "operation_id"]),
     _tool("get_action", "Inspect a Slack send outcome by action ID; unknown is not proof of failure.",
           {**_CONNECTION, "action_id": _STRING}, ["connection_id", "action_id"]),
 ]
@@ -238,25 +304,34 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
         if key == "limit":
             if type(value) is not int or not 1 <= value <= 100:
                 raise ValueError("limit must be an integer from 1 to 100")
-        elif not isinstance(value, str) or not value.strip():
+        elif not isinstance(value, str) or (not value.strip() and key not in {"title", "initial_comment"}):
             raise ValueError(f"{key} must be a nonempty string")
         elif "\x00" in value:
             raise ValueError(f"{key} must not contain NUL characters")
+    if "idempotency_key" in args and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", args["idempotency_key"]):
+        raise ValueError("Invalid Slack idempotency_key")
     resource = slack_resource(client)
     identity = client.get_identity(identity_handle)
     if name == "inkbox_slack_list_connections":
         return resource.list_connections(identity.id)
     # Even an organization-scoped credential must stay on the configured identity.
     connection = args.get("connection_id")
-    if connection is not None:
+    if connection is not None and name not in {"inkbox_slack_upload_file", "inkbox_slack_get_operation"}:
         owned = resource.list_connections(identity.id).connections
         if not any(str(item.id) == connection for item in owned):
             raise ValueError("Slack connection does not belong to this identity")
+    if name in {"inkbox_slack_upload_file", "inkbox_slack_get_operation"}:
+        validate_connection(resource, str(identity.id), args)
+        method = getattr(resource, name.removeprefix("inkbox_slack_"), None)
+        if not callable(method):
+            raise RuntimeError("Slack files require inkbox>=0.7.15,<1.0.0; upgrade the installed SDK")
+        if name == "inkbox_slack_upload_file":
+            payload = file_payload(args["file_path"], **{key: args[key] for key in
+                ("filename", "title", "initial_comment") if key in args})
+            return upload_reply(client, args, payload, idempotency_key=args["idempotency_key"])
     if name == "inkbox_slack_search":
         return resource.search_messages(identity_id=identity.id, **args)
     if name == "inkbox_slack_send_message":
-        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", args["idempotency_key"]):
-            raise ValueError("Invalid Slack idempotency_key")
         if len(args["text"]) > SLACK_MAX_TEXT_LENGTH:
             raise ValueError("Slack text must not exceed 12000 characters")
     return getattr(resource, name.removeprefix("inkbox_slack_"))(**args)

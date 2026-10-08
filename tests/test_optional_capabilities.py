@@ -20,7 +20,7 @@ def test_catalog_opt_ins_and_runtime_config(monkeypatch):
     register(SimpleNamespace(register_tool=lambda name, *args, **kwargs: gates.update({name: kwargs["check_fn"]})), lambda: True)
     names = {name for name, check in gates.items() if check()}
     assert {tool["name"] for tool in VAULT_TOOLS + THREAD_TOOLS} <= set(names)
-    assert len([name for name in names if name.startswith("inkbox_slack_")]) == 6
+    assert len([name for name in names if name.startswith("inkbox_slack_")]) == 8
     monkeypatch.setenv("INKBOX_SLACK_ENABLED", "false")
     monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "false")
     # Native registration precedes YAML loading. The already registered
@@ -28,7 +28,7 @@ def test_catalog_opt_ins_and_runtime_config(monkeypatch):
     names = {name for name, check in gates.items() if check()}
     assert set(names) == {tool["name"] for tool in VAULT_TOOLS}
     set_runtime_config_extra({"slack_enabled": True})
-    assert len([name for name, check in gates.items() if name.startswith("inkbox_slack_") and check()]) == 6
+    assert len([name for name, check in gates.items() if name.startswith("inkbox_slack_") and check()]) == 8
     set_runtime_config_extra({})
 
 

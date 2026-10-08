@@ -71,15 +71,30 @@ class NativeTurns(CompanionReceiver):
                 if (turn["state"] in {"running", "sending", "control_submitting"}
                         or (turn["state"] in {"pending", "answer_ready"} and uncertain_effect)):
                     turn["state"] = "uncertain"
+                if turn["state"] == "cancelled" and "fenced" not in turn:
+                    # Older active-stop checkpoints always stored a fence result;
+                    # only pending cancellation or rejected admission omitted it.
+                    # Retain a negative result before discarding session evidence.
+                    turn["fenced"] = not any(field in turn for field in (
+                        "session_id", "worker_completion", "answer", "rendered", "sent", "deliveries",
+                        "explicit_sends", "explicit_delivery_state", "media_deliveries", "preflight_failure",
+                    ))
                 turn.pop("session_id", None)
                 if turn["state"] == "cancelled":
                     self._release_context(row, turn)
                 if self._settled_proof(turn):
                     turn["fenced"] = True
-                if turn["state"] == "uncertain" and not turn.get("fenced"):
+                if ((uncertain_effect and not self._settled_proof(turn))
+                        or (turn["state"] in {"uncertain", "cancelled"} and not turn.get("fenced"))):
                     row["blocked"] = True
                     row["error"] = "Original worker or delivery ownership is uncertain; no automatic replay"
-            if row.get("blocked") and not any(turn["state"] in {"running", "sending", "uncertain"} and not turn.get("fenced") for turn in row["turns"]):
+            if row.get("blocked") and not any(
+                (turn["state"] in {"running", "sending", "uncertain", "cancelled"} and not turn.get("fenced"))
+                or (not self._settled_proof(turn) and (
+                    turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                    or any(item.get("state") in {"sending", "uncertain"} for item in turn.get("media_deliveries", {}).values())))
+                for turn in row["turns"]
+            ):
                 row.pop("blocked", None)
             self._save(row)
             self._restore_delivery_records(row)
@@ -153,17 +168,18 @@ class NativeTurns(CompanionReceiver):
                 if text.casefold() in {"/stop", "/cancel", "/clear", "/new"}:
                     for pending in row["turns"]:
                         if pending["state"] == "pending":
-                            pending["state"] = "cancelled"
+                            pending.update(state="cancelled", fenced=True)
                     self._checkpoint_control(event, row, source_id, control_turn, source_id)
                     for pending in row["turns"]:
                         if pending["state"] == "cancelled":
                             self._release_context(row, pending)
                 # The next operation crosses the actual native effect boundary.
                 self.unconfirmed_controls.pop(source_id, None)
-                await self._forward_control(event, text, control_turn)
+                await self._forward_checkpointed_control(event, text, control_turn, row, source_id)
                 control_turn["state"] = "done"
                 row["controls"][source_id] = "consumed"
             self._save(row)
+            self._kick(row)
             return
         turn = {"id": source_id, "state": "pending", "event": self._serialize(event), "source_ids": [source_id],
                 "first_at": time.time(), "last_at": time.time(), "route": copy.deepcopy(route)}
@@ -230,7 +246,7 @@ class NativeTurns(CompanionReceiver):
 
     def _kick(self, row):
         key = row["key"]
-        if self.closed or key in self.tasks or row.get("blocked"):
+        if self.closed or key in self.tasks or row.get("blocked") or "submitting" in row.get("controls", {}).values():
             return
         channel = row["turns"][0]["route"]["mode"] if row["turns"] else None
         if channel == "slack" and not getattr(self.adapter, "_slack_enabled", False):
@@ -254,6 +270,8 @@ class NativeTurns(CompanionReceiver):
             return
         signal = self.changed.setdefault(row["key"], asyncio.Event())
         while True:
+            if turn["state"] != "pending":
+                return
             tail = row["turns"][row["turns"].index(turn) + 1:]
             for candidate in tail:
                 route, next_route = turn["route"], candidate["route"]
@@ -298,6 +316,8 @@ class NativeTurns(CompanionReceiver):
 
     async def _drain(self, row):
         for turn in row["turns"]:
+            if row.get("blocked") or "submitting" in row.get("controls", {}).values():
+                return
             if turn["state"] not in {"pending", "answer_ready"}:
                 continue
             if turn["state"] == "answer_ready":
@@ -308,14 +328,21 @@ class NativeTurns(CompanionReceiver):
                     return
                 continue
             await self._batch(row, turn)
+            if turn["state"] != "pending":
+                continue
             self._prepare_delivery_context(row, turn)
             event = self._event_from_turn(row, turn)
             await self._wait_for_idle(event)
+            if turn["state"] != "pending":
+                continue
+            if row.get("blocked") or "submitting" in row.get("controls", {}).values():
+                return
             self._require_owner()
             turn["state"] = "running"
             self._save(row)
             self.active[row["chat_id"]] = turn
             self.events[turn["id"]] = event
+            event._inkbox_host_dispatched = False
             completion = asyncio.get_running_loop().create_future()
             self.completions[turn["id"]] = completion
             self.host_sessions.add(self._session_key(event))
@@ -324,12 +351,15 @@ class NativeTurns(CompanionReceiver):
             self.monitors[turn["id"]] = monitor
             token = reply_route.set(turn["route"])
             try:
+                if turn["state"] != "running" or "submitting" in row.get("controls", {}).values():
+                    return  # Stop may have completed during the activity await.
+                event._inkbox_host_dispatched = True
                 task = asyncio.create_task(self.adapter.handle_message(event))
                 self.dispatches.add(task)
                 task.add_done_callback(self.dispatches.discard)
                 await asyncio.wait_for(asyncio.shield(task), self.completion_timeout)
                 if getattr(event, "_gateway_accepted", True) is False:
-                    turn["state"] = "cancelled"
+                    turn.update(state="cancelled", fenced=True)
                 else:
                     await asyncio.wait_for(asyncio.shield(completion), self.completion_timeout)
             except asyncio.CancelledError:
@@ -343,8 +373,9 @@ class NativeTurns(CompanionReceiver):
                     self._save(row)
                     await asyncio.sleep(self.retry_delay)
                     return
-                turn["state"] = "uncertain"
-                row["blocked"] = True
+                if not (turn["state"] == "cancelled" and turn.get("fenced")):
+                    turn["state"] = "uncertain"
+                    row["blocked"] = True
             finally:
                 reply_route.reset(token)
                 monitor.cancel()
@@ -369,12 +400,38 @@ class NativeTurns(CompanionReceiver):
             if row.get("blocked"):
                 return
 
+    def _clear_fenced_block(self, row):
+        # A retained stop fence can outlive the worker's failure finalizer.
+        # It proves no replay is needed, not that an in-flight send is safe.
+        if "submitting" in row.get("controls", {}).values():
+            return False
+        if not any(turn.get("fenced") for turn in row["turns"]):
+            return False
+        for turn in row["turns"]:
+            if (turn["state"] in {"running", "sending", "control_submitting"}
+                    or (turn["state"] == "answer_ready" and turn.get("preflight_failure")
+                        and not turn["preflight_failure"].get("retryable"))
+                    or turn["state"] in {"uncertain", "cancelled"} and not turn.get("fenced")
+                    or (not self._settled_proof(turn) and (
+                        turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                        or any(item.get("state") in {"sending", "uncertain"}
+                               for item in turn.get("media_deliveries", {}).values())))):
+                return False
+            if turn.get("fenced") and turn.get("session_id") and not clear_context(turn["session_id"], turn["id"]):
+                return False
+        row.pop("blocked", None)
+        row.pop("error", None)
+        self._save(row)
+        return True
+
     async def _recover_fenced_native(self, row):
         from .host_fencing import fence_turn
+        if "submitting" in row.get("controls", {}).values():
+            return False
         unresolved = [turn for turn in row["turns"] if not turn.get("fenced")
                       and turn["state"] in {"running", "uncertain", "sending", "cancelled"}]
         if not unresolved:
-            return False
+            return self._clear_fenced_block(row)
         for turn in unresolved:
             event = self._event_from_turn(row, turn)
             if not self._host_owner()._is_user_authorized(event.source) or not await fence_turn(self.adapter, event.source, turn["id"]):
@@ -384,10 +441,7 @@ class NativeTurns(CompanionReceiver):
                 return False
             turn["fenced"] = True
             turn["state"] = "quarantined"
-        row.pop("blocked", None)
-        row.pop("error", None)
-        self._save(row)
-        return True
+        return self._clear_fenced_block(row)
 
     def _owned(self, event):
         raw = event.raw_message
@@ -504,7 +558,7 @@ class NativeTurns(CompanionReceiver):
 
     def media_owner(self, chat_id, metadata=None):
         route = reply_route.get() or (metadata or {}).get("inkbox_reply_route") or {}
-        if route.get("chat_id") != chat_id or route.get("mode") != "imessage":
+        if route.get("chat_id") != chat_id or route.get("mode") not in {"imessage", "slack"}:
             return None
         source_id = route.get("message_id")
         for row in self.rows.values():
@@ -513,6 +567,26 @@ class NativeTurns(CompanionReceiver):
                     if turn["id"] == source_id:
                         return row, turn
         return None
+
+    def _slack_route(self, turn):
+        return turn["route"]
+
+    def _check_slack_media_authority(self, row, turn):
+        self._require_owner()
+        if not getattr(self.adapter, "_slack_enabled", False):
+            raise PermissionError("Slack is disabled")
+        if (row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"}
+                or turn.get("explicit_delivery_state") in {"sending", "uncertain"}):
+            raise RuntimeError("Original native turn cannot send media")
+        owner = self._host_owner()
+        if not owner or not owner._is_user_authorized(self._event_from_turn(row, turn).source):
+            raise PermissionError("Original native sender is no longer allowed")
+
+    async def _authorize_slack(self, row, turn):
+        from .slack import validate_connection
+        self._check_slack_media_authority(row, turn)
+        await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack,
+                                str(self.adapter._identity_id), turn["route"])
 
     def check_media_authority(self, row, turn, *, admitted_send=False):
         self._require_owner()
@@ -657,7 +731,10 @@ class NativeTurns(CompanionReceiver):
             turn.setdefault("deliveries", []).append(accepted)
             if final:
                 turn["sent"] = {key: value for key, value in accepted.items() if key != "final"}
-            turn["state"] = "done" if final else previous_state
+            # A Stop can finish while the shielded send is still in flight.
+            # Keep its worker fence while retaining the accepted delivery.
+            if turn["state"] == "sending":
+                turn["state"] = "done" if final else previous_state
             self._save(row)
             if route["mode"] == "imessage":
                 self._record_outbound(row, turn, result)
@@ -710,12 +787,32 @@ class NativeTurns(CompanionReceiver):
         # No await occurs between durable admission and this effect boundary.
         self.unconfirmed_controls.pop(control_id, None)
         if stopping:
-            from .host_fencing import fence_turn
-            fenced = await fence_turn(self.adapter, event.source, active["id"])
-        await self._forward_control(event, answer or text, active)
+            try:
+                from .host_fencing import fence_turn
+                row["blocked"] = True
+                row["error"] = "Stop in progress; native worker exit is not yet confirmed"
+                # Snapshot cancellation before awaits: later receipts belong to
+                # the successor and wait until this control finishes forwarding.
+                for turn in row["turns"]:
+                    if turn["state"] == "pending":
+                        turn.update(state="cancelled", fenced=True)
+                        self._release_context(row, turn)
+                self._save(row)
+                original = self.events.get(active["id"])
+                # The activity callback yields before host admission. This live,
+                # owned event is positive proof that no worker was ever dispatched;
+                # missing events or reloaded checkpoints never receive that proof.
+                fenced = getattr(original, "_inkbox_host_dispatched", None) is False
+                if not fenced:
+                    fenced = await fence_turn(self.adapter, event.source, active["id"])
+                active["state"] = "cancelled"
+                active["fenced"] = fenced
+                self._save(row)
+            except BaseException:
+                self._control_failed(active, row, control_id, stop_failed=True)
+                raise
+        await self._forward_checkpointed_control(event, answer or text, active, row, control_id)
         if stopping:
-            active["state"] = "cancelled"
-            active["fenced"] = fenced
             if not fenced:
                 row["blocked"] = True
                 row["error"] = "Stop requested; native worker exit could not be confirmed"
@@ -725,13 +822,39 @@ class NativeTurns(CompanionReceiver):
             await self._notify(row, active, "cancelled")
         row["controls"][control_id] = "consumed"
         self._save(row)
-        if text.casefold() in {"/stop", "/cancel", "/clear", "/new"}:
-            for turn in row["turns"]:
-                if turn["state"] == "pending":
-                    turn["state"] = "cancelled"
-                    self._release_context(row, turn)
-            self._save(row)
+        if stopping and fenced:
+            self._clear_fenced_block(row)
+        self._kick(row)
         return True
+
+    async def _forward_checkpointed_control(self, event, text, active, row, control_id):
+        try:
+            await self._forward_control(event, text, active)
+        except BaseException:
+            self._control_failed(active, row, control_id)
+            raise
+
+    def _control_failed(self, active, row, control_id, *, stop_failed=False):
+        # An interrupted host can report SUCCESS with an empty response even
+        # without executor-exit proof. Keep that callback from erasing the Stop.
+        if stop_failed and not active.get("fenced"):
+            active.update(state="cancelled", fenced=False)
+            row["blocked"] = True
+            row["error"] = "Stop failed; original native worker exit remains unconfirmed"
+        # Fencing or forwarding may have run. Never replay this receipt, but
+        # do not retain a gate that falsely says submission is still active.
+        row["controls"][control_id] = "uncertain"
+        if active["state"] == "control_submitting":
+            active["state"] = "uncertain"
+            row["blocked"] = True
+            row["error"] = "Native control outcome is uncertain; inspect the original turn"
+        if active["state"] == "cancelled" and active.get("fenced"):
+            future = self.completions.get(active["id"])
+            if future and not future.done():
+                future.set_result(False)
+        self._save(row)
+        self._clear_fenced_block(row)
+        self._kick(row)
 
     async def _forward_control(self, event, text, active):
         event.text = text
