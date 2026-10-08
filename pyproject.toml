@@ -1,6 +1,6 @@
 [project]
 name = "hermes-agent-plugin"
-version = "0.2.19"
+version = "0.2.20"
 description = "Inkbox platform plugin for Hermes Agent"
 # Inkbox requires Python 3.11 or newer.
 requires-python = ">=3.11"

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.20
+
+### Fixed
+
+- Realtime calls validate local audio conversion before accepting raw-media mode, allowing the configured STT/TTS fallback when audio dependencies are missing or unusable.
+
 ## 0.2.19
 
 - Add opt-in Slack tools, guided workspace installation, signed channel reception, channel-wide Companion, exact-thread controls, and inline/thread-specific activity.

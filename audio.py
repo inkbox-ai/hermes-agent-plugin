@@ -63,3 +63,16 @@ class CallAudio:
             raise ValueError("Unsupported call audio format")
         self.inbound = AudioConverter(rate, 24000, decode_ulaw=ulaw)
         self.outbound = AudioConverter(24000, rate, encode_ulaw=ulaw)
+
+
+def check_audio_support() -> None:
+    """Exercise both call formats without advancing a live stream's state."""
+    for descriptor, incoming in (
+        (None, b"\xff" * 160),
+        ({"encoding": "L16", "sample_rate": 16000, "channels": 1}, bytes(640)),
+    ):
+        audio = CallAudio()
+        audio.configure(descriptor)
+        for converter, samples in ((audio.inbound, incoming), (audio.outbound, bytes(960))):
+            if not converter.convert(base64.b64encode(samples).decode("ascii")):
+                raise RuntimeError("Call audio conversion produced no samples")
