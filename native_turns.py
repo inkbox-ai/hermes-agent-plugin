@@ -731,7 +731,10 @@ class NativeTurns(CompanionReceiver):
             turn.setdefault("deliveries", []).append(accepted)
             if final:
                 turn["sent"] = {key: value for key, value in accepted.items() if key != "final"}
-            turn["state"] = "done" if final else previous_state
+            # A Stop can finish while the shielded send is still in flight.
+            # Keep its worker fence while retaining the accepted delivery.
+            if turn["state"] == "sending":
+                turn["state"] = "done" if final else previous_state
             self._save(row)
             if route["mode"] == "imessage":
                 self._record_outbound(row, turn, result)

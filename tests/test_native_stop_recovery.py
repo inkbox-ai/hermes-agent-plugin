@@ -465,3 +465,73 @@ def test_stop_checkpoint_failure_preserves_fence_proof(factory, tmp_path, monkey
             await value.queue.close()
             await value.adapter._slack_activity.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("fence_result", [True, False, "exception"])
+@pytest.mark.parametrize("final", [False, True])
+def test_inflight_send_preserves_stop_fence(factory, tmp_path, monkeypatch, fence_result, final):
+    import threading
+    from types import SimpleNamespace
+
+    async def run():
+        finish = asyncio.Event()
+        value = await harness(factory, tmp_path)
+        original_handle = value.adapter.handle_message
+
+        async def handle(event):
+            if event.message_id != uid(1):
+                return await original_handle(event)
+            event._gateway_accepted = True
+            value.inputs.append(event)
+            await value.adapter.on_processing_start(event)
+            await finish.wait()
+            await value.adapter.on_processing_complete(event, "success")
+
+        monkeypatch.setattr(value.adapter, "handle_message", handle)
+        await value.queue.accept(receipt(1, mode="slack"))
+        await started(value)
+        row = next(iter(value.queue.rows.values()))
+        turn = row["turns"][0]
+        content = "Final response" if final else "Approval prompt"
+        if final:
+            turn["answer"] = content
+        entered, release = threading.Event(), threading.Event()
+
+        def send(*args, **kwargs):
+            if kwargs.get("text") == content:
+                entered.set()
+                assert release.wait(5)
+            return SimpleNamespace(id=uid(70), status="sent")
+
+        value.adapter._inkbox.slack.send_message.side_effect = send
+        sending = asyncio.create_task(value.adapter.send(row["chat_id"], content, reply_to=uid(1)))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            await value.queue.accept(receipt(2, mode="slack"))
+            fence = AsyncMock(side_effect=RuntimeError("Synthetic fence failure")) if fence_result == "exception" else AsyncMock(return_value=fence_result)
+            monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+            monkeypatch.setattr(value.queue, "_forward_control", AsyncMock())
+            if fence_result == "exception":
+                with pytest.raises(RuntimeError):
+                    await value.queue.accept(stop_receipt("slack"))
+            else:
+                await value.queue.accept(stop_receipt("slack"))
+            release.set()
+            assert (await sending).success
+            assert turn["state"] == "cancelled"
+            assert turn["fenced"] is (fence_result is True)
+            assert turn["deliveries"][0]["content"] == content
+            finish.set()
+            await settle(value.queue)
+            monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", AsyncMock(return_value=False))
+            await value.queue.accept(receipt(3, mode="slack"))
+            await settle(value.queue)
+            assert bool(row.get("blocked")) is (fence_result is not True)
+            assert [event.message_id for event in value.inputs] == ([uid(1), uid(3)] if fence_result is True else [uid(1)])
+        finally:
+            release.set()
+            finish.set()
+            await asyncio.gather(sending, return_exceptions=True)
+            await value.queue.close()
+            await value.adapter._slack_activity.close()
+    asyncio.run(run())
