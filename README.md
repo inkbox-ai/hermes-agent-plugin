@@ -245,6 +245,10 @@ Do not use plain `pip install inkbox aiohttp` unless the wizard tells you to; pl
 
 ## Manual Config
 
+See [`.env.example`](.env.example) for settings grouped by capability, including
+Slack, iMessage threading, voice, and Vault. Merge the settings you need into your
+active Hermes profile's `.env` (usually `~/.hermes/.env`), then restart the gateway.
+
 The setup wizard writes to `~/.hermes/.env`:
 
 ```bash
