@@ -19,7 +19,8 @@ except ImportError:  # direct local import/test fallback
 logger = logging.getLogger(__name__)
 PREFIX = "inkbox-slack-progress:"
 _ROUTE = ("connection_id", "conversation_id", "thread_ts", "message_ts", "source_event_id")
-_TERMINAL = {"completed": "Completed.", "cancelled": "Stopped.", "failed": "Could not complete."}
+_TERMINAL = {"completed": "Completed.", "cancelled": "Stopped.", "failed": "Could not complete.",
+             "paused": "Progress paused after disconnecting."}
 _STREAM_UNSUPPORTED = {"feature_disabled", "feature_not_enabled", "app_not_eligible", "missing_scope",
                        "not_allowed_token_type", "channel_type_not_supported", "invalid_thread_ts",
                        "method_not_supported_for_channel_type", "unknown_method"}
@@ -97,6 +98,15 @@ class SlackProgress:
 
     def _queue(self, key, record, text):
         record["desired"] = text
+        # A pending provider request can prevent _run from sending anything.
+        # Persist terminal intent independently so recovery keeps the outcome.
+        # Ordinary progress stays coalesced; recovery does not replay that text.
+        if record.get("terminal"):
+            try:
+                self._save()
+            except OSError:
+                logger.warning("Slack progress intent could not be saved")
+                return
         if key not in self.tasks or self.tasks[key].done():
             task = asyncio.create_task(self._run(key, record))
             self.tasks[key] = task
@@ -203,6 +213,12 @@ class SlackProgress:
                         # new edit, without spinning on the rejected payload.
                         if self._rejected(record, result, text):
                             continue
+                        if record.get("terminal"):
+                            # A definitive ordinary-message edit failure has no
+                            # open native stream to clean up. Do not retry a
+                            # deleted card or exhausted budget on every restart.
+                            self.records.pop(key, None)
+                            self._save()
                         return
                     if getattr(result, "status", None) != "succeeded":
                         operation_id = getattr(result, "id", None)
@@ -247,6 +263,12 @@ class SlackProgress:
         self.records.update(valid)
         for key, record in valid.items():
             try:
+                if not record.get("started"):
+                    # Intent was saved, but the durable pre-send checkpoint was
+                    # never reached: there is no external card to reconcile.
+                    self.records.pop(key, None)
+                    self._save()
+                    continue
                 await self._validate(record)
                 if record.get("transport") == "stream":
                     if record.get("uncertain"):
@@ -289,8 +311,11 @@ class SlackProgress:
                         continue
                 record.pop("uncertain", None)
                 record["terminal"] = True
-                record["outcome"] = "cancelled"
-                self._queue(key, record, "Stopped after reconnecting.")
+                outcome = record.get("outcome")
+                if outcome not in _TERMINAL:
+                    outcome = "paused"
+                record["outcome"] = outcome
+                self._queue(key, record, _TERMINAL[outcome])
             except Exception:
                 logger.warning("Slack progress cleanup remains unconfirmed; no message was resent")
 
@@ -301,7 +326,7 @@ class SlackProgress:
 
     async def close(self):
         for record in list(self.active.values()):
-            await self.notify(record["chat_id"], record["route"], "cancelled")
+            await self.notify(record["chat_id"], record["route"], "paused")
         self.closing = True
         try:
             await asyncio.wait_for(asyncio.shield(self.flush()), timeout=5)

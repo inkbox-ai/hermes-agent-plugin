@@ -128,7 +128,7 @@ def test_uncertain_creation_never_resends_and_restart_looks_up_original_key(tmp_
         await restarted.flush()
         assert sdk.get_action_by_key.call_args.args[1] == sdk.send_message.call_args.kwargs["idempotency_key"]
         sdk.send_message.assert_called_once()
-        assert sdk.update_message.call_args.args[3] == "Stopped after reconnecting."
+        assert sdk.update_message.call_args.args[3] == "Stopped."
         assert json.loads(path.read_text()) == {}
     asyncio.run(scenario())
 
@@ -199,7 +199,7 @@ def test_activity_lifecycle_and_progress_are_independent(tmp_path):
         await tracker.flush()
         assert sdk.update_message.call_args.args[3] == "Waiting for your approval."
         await tracker.close()
-        assert sdk.update_message.call_args.args[3] == "Stopped."
+        assert sdk.update_message.call_args.args[3] == "Progress paused after disconnecting."
         assert [call.args[3] for call in sdk.set_processing_status.call_args_list] == ["processing", "suspended", "active"]
         assert not tracker.has_chat("chat")
     asyncio.run(scenario())

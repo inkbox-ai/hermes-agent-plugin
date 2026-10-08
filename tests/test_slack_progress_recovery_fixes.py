@@ -109,7 +109,7 @@ def test_timed_out_progress_edit_recovers_only_after_original_key_is_resolved(tm
         sdk.send_message.assert_called_once()
         if resolved:
             assert sdk.update_message.call_args.args[:3] == (dm()["connection_id"], dm()["conversation_id"], "1234567890.000010")
-            assert sdk.update_message.call_args.args[3] == "Stopped after reconnecting."
+            assert sdk.update_message.call_args.args[3] == "Completed."
             assert sdk.update_message.call_args.kwargs["idempotency_key"] != original_key
             assert json.loads(path.read_text()) == {}
         else:
