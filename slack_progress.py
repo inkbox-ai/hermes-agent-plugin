@@ -62,7 +62,7 @@ class SlackProgress:
             # An unresolved message from an earlier process is never replaced.
             if key not in self.records:
                 self.active.setdefault(key, {"chat_id": str(chat_id), "route": {
-                    k: meta.get(k) for k in (*_ROUTE, "workspace_id", "actor_id")}, "revision": 0})
+                    k: meta.get(k) for k in (*_ROUTE, "workspace_id", "actor_id", "recipient_team_id")}, "revision": 0})
             return
         record = self.active.get(key)
         if record is None:
@@ -84,7 +84,7 @@ class SlackProgress:
         if record is None or record["chat_id"] != str(chat_id):
             return None
         # Handles may locate an edit, but cannot override a supplied source route.
-        if any(k in meta and meta[k] != record["route"].get(k) for k in (*_ROUTE, "workspace_id", "actor_id")):
+        if any(k in meta and meta[k] != record["route"].get(k) for k in (*_ROUTE, "workspace_id", "actor_id", "recipient_team_id")):
             return None
         text = " ".join(content.split())[:240]
         if not text:

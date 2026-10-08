@@ -1152,7 +1152,8 @@ class CompanionReceiver:
             raise ValueError("Invalid Companion Slack source")
         self._validate_slack_route(envelope, turn["reply_context"], exact=True)
         return {**parsed[2], "thread_ts": envelope["_hermes_slack_source"]["thread_ts"],
-                "sender": turn["author"]}
+                "sender": turn["author"],
+                "recipient_team_id": envelope["_hermes_slack_source"]["author"].split(":", 1)[0]}
 
     async def _authorize_slack(self, row, turn):
         if not getattr(self.adapter, "_slack_enabled", False):

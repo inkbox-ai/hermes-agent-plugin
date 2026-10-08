@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import quote
 from uuid import UUID
@@ -41,6 +42,8 @@ class SlackTaskStreams:
         # task cards. Recipient and thread coordinates come only from admission.
         if (not self.typed and self.http is None) or not all(route.get(k) for k in ("thread_ts", "actor_id", "workspace_id")):
             return False
+        if not re.fullmatch(r"T[A-Z0-9]{1,63}", str(route.get("recipient_team_id") or "")):
+            return False
         try:
             capabilities = self.resource.capabilities(route["connection_id"])
             feature = capabilities.capabilities.get("task_streaming")
@@ -69,7 +72,7 @@ class SlackTaskStreams:
             kwargs = {"chunks": chunks, "idempotency_key": key}
             if kind == "stream_start":
                 result = self.resource.start_stream(*args, **kwargs, thread_ts=route["thread_ts"],
-                    recipient_user_id=route["actor_id"], recipient_team_id=route["workspace_id"],
+                    recipient_user_id=route["actor_id"], recipient_team_id=route["recipient_team_id"],
                     task_display_mode="timeline")
             elif kind in {"stream_append", "stream_stop"}:
                 method = self.resource.append_stream if kind == "stream_append" else self.resource.stop_stream
@@ -83,7 +86,7 @@ class SlackTaskStreams:
         body = {"chunks": chunks}
         if kind == "stream_start":
             body.update(thread_ts=route["thread_ts"], recipient_user_id=route["actor_id"],
-                        recipient_team_id=route["workspace_id"], task_display_mode="timeline")
+                        recipient_team_id=route["recipient_team_id"], task_display_mode="timeline")
         elif kind in {"stream_append", "stream_stop"}:
             path += f"/{UUID(str(stream_id))}/{kind.removeprefix('stream_')}"
         else:

@@ -136,6 +136,11 @@ def inbound_message(envelope: dict, identity_id: str) -> tuple[str, str, dict] |
         "slack_mentioned": "mention" in kinds,
         "slack_addressed": bool(set(kinds) & {"dm", "group_dm", "mention"}),
     }
+    profile = data.get("actor_profile")
+    if (isinstance(profile, dict) and profile.get("id") == data["actor_id"]
+            and isinstance(profile.get("team_id"), str)
+            and re.fullmatch(r"T[A-Z0-9]{1,63}", profile["team_id"])):
+        meta["recipient_team_id"] = profile["team_id"]
     if "sender_access" in data:
         meta["sender_access"] = data["sender_access"]
     # Sender context never changes workspace/thread isolation or approval ownership.

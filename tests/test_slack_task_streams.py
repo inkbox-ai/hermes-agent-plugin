@@ -17,7 +17,7 @@ OP_ID = "00000000-0000-4000-8000-000000000011"
 
 
 def source():
-    return {**route(), "workspace_id": "T123", "actor_id": "U123"}
+    return {**route(), "workspace_id": "T123", "actor_id": "U123", "recipient_team_id": "T123"}
 
 
 def operation(kind="stream_start", status="succeeded", **overrides):
@@ -67,7 +67,7 @@ def test_native_card_lifecycle_never_sends_an_ordinary_progress_reply(tmp_path, 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("missing", ["thread_ts", "actor_id", "workspace_id", "capability", "scope", "transport"])
+@pytest.mark.parametrize("missing", ["thread_ts", "actor_id", "workspace_id", "recipient_team_id", "capability", "scope", "transport"])
 def test_absent_native_support_falls_back_without_inventing_a_thread(tmp_path, missing):
     async def run():
         sdk = native_resource()

@@ -149,3 +149,26 @@ def test_real_typed_sdk_dispatch_and_recovery_lookup():
         assert all(r.headers["X-API-Key"] == "synthetic-test-key" for r in requests)
     finally:
         client.close()
+
+
+def test_native_stream_uses_verified_recipient_home_team_not_installation():
+    from inkbox_plugin.slack import inbound_message
+    envelope = {"id": "source", "data": {
+        "identity_id": "identity", "connection_id": source()["connection_id"],
+        "workspace_id": "TINSTALL", "conversation_id": "C123", "actor_id": "U123",
+        "message_ts": "1234567890.000001", "message_kinds": ["mention"],
+        "event": {"text": "show progress"}, "actor_profile": {"id": "U123", "team_id": "THOME"},
+    }}
+    meta = inbound_message(envelope, "identity")[2]
+    assert meta["sender"] == "TINSTALL:U123"  # Preserve existing authorization spelling.
+    assert meta["recipient_team_id"] == "THOME"
+    for sdk in (TypedResource(), native_resource()):
+        streams = SlackTaskStreams(sdk)
+        assert streams.capable(meta)
+        streams.write(meta, kind="stream_start", key="home-team", chunks=[])
+        args = sdk.calls[0][2] if streams.typed else sdk._http.post.call_args.kwargs["json"]
+        assert args["recipient_team_id"] == "THOME"
+    envelope["data"]["actor_profile"]["id"] = "UOTHER"
+    unverified = inbound_message(envelope, "identity")[2]
+    assert "recipient_team_id" not in unverified
+    assert not SlackTaskStreams(TypedResource()).capable(unverified)
