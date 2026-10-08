@@ -504,7 +504,7 @@ class NativeTurns(CompanionReceiver):
 
     def media_owner(self, chat_id, metadata=None):
         route = reply_route.get() or (metadata or {}).get("inkbox_reply_route") or {}
-        if route.get("chat_id") != chat_id or route.get("mode") != "imessage":
+        if route.get("chat_id") != chat_id or route.get("mode") not in {"imessage", "slack"}:
             return None
         source_id = route.get("message_id")
         for row in self.rows.values():
@@ -513,6 +513,26 @@ class NativeTurns(CompanionReceiver):
                     if turn["id"] == source_id:
                         return row, turn
         return None
+
+    def _slack_route(self, turn):
+        return turn["route"]
+
+    def _check_slack_media_authority(self, row, turn):
+        self._require_owner()
+        if not getattr(self.adapter, "_slack_enabled", False):
+            raise PermissionError("Slack is disabled")
+        if (row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"}
+                or turn.get("explicit_delivery_state") in {"sending", "uncertain"}):
+            raise RuntimeError("Original native turn cannot send media")
+        owner = self._host_owner()
+        if not owner or not owner._is_user_authorized(self._event_from_turn(row, turn).source):
+            raise PermissionError("Original native sender is no longer allowed")
+
+    async def _authorize_slack(self, row, turn):
+        from .slack import validate_connection
+        self._check_slack_media_authority(row, turn)
+        await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack,
+                                str(self.adapter._identity_id), turn["route"])
 
     def check_media_authority(self, row, turn, *, admitted_send=False):
         self._require_owner()

@@ -118,6 +118,9 @@ def dispatch(name, args, *, session_id="", **_kwargs):
                 result = identity.get_imessage_conversation_thread(conversation, thread, **options)
             else:
                 raise ValueError("Unknown tool")
+        if name in {"inkbox_slack_upload_file", "inkbox_slack_get_operation"}:
+            from .slack import operation_summary
+            result = operation_summary(result)
         return json.dumps({"ok": True, "result": _json_safe(result)}, ensure_ascii=False)
     except Exception as exc:
         # SDK errors can contain request material; never expose it for secrets.
@@ -127,6 +130,10 @@ def dispatch(name, args, *, session_id="", **_kwargs):
             error = str(exc)
         elif name in {tool["name"] for tool in VAULT_TOOLS}:
             error = "Vault could not decrypt this credential; verify the local key and access."
+        elif (name == "inkbox_slack_upload_file" and not isinstance(exc, (ValueError, PermissionError))
+              and not str(exc).startswith("Slack files require")):
+            error = (f"Slack upload could not be confirmed ({type(exc).__name__}); "
+                     "inspect inkbox_slack_get_operation if an operation ID is available; never blindly resend.")
         else:
             error = str(exc)
         result = {"error": error}
