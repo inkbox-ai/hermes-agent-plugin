@@ -5,7 +5,6 @@
 - Upload local Slack images, documents, video, and audio through source-bound native/Companion reply routes, with durable duplicate and uncertain-outcome protection. Remote image URLs remain links.
 - Add `inkbox_slack_upload_file` and `inkbox_slack_get_operation`, preserving operation status and file IDs. Raise the base SDK floor to 0.7.15.
 - Resume queued work after a confirmed Stop fence, including safe legacy pre-admission cancellations, while keeping uncertain deliveries quarantined.
-- Supply Slack-native formatting guidance for native and Companion replies, and consolidate tool progress into one source-bound message that updates in place alongside Working/Stop controls.
 
 ## 0.2.19
 
