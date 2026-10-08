@@ -71,6 +71,14 @@ class NativeTurns(CompanionReceiver):
                 if (turn["state"] in {"running", "sending", "control_submitting"}
                         or (turn["state"] in {"pending", "answer_ready"} and uncertain_effect)):
                     turn["state"] = "uncertain"
+                if turn["state"] == "cancelled" and "fenced" not in turn:
+                    # Older active-stop checkpoints always stored a fence result;
+                    # only pending cancellation or rejected admission omitted it.
+                    # Retain a negative result before discarding session evidence.
+                    turn["fenced"] = not any(field in turn for field in (
+                        "session_id", "worker_completion", "answer", "rendered", "sent", "deliveries",
+                        "explicit_sends", "explicit_delivery_state", "media_deliveries", "preflight_failure",
+                    ))
                 turn.pop("session_id", None)
                 if turn["state"] == "cancelled":
                     self._release_context(row, turn)
@@ -349,7 +357,7 @@ class NativeTurns(CompanionReceiver):
                 task.add_done_callback(self.dispatches.discard)
                 await asyncio.wait_for(asyncio.shield(task), self.completion_timeout)
                 if getattr(event, "_gateway_accepted", True) is False:
-                    turn["state"] = "cancelled"
+                    turn.update(state="cancelled", fenced=True)
                 else:
                     await asyncio.wait_for(asyncio.shield(completion), self.completion_timeout)
             except asyncio.CancelledError:
