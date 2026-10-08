@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import hashlib
 import sqlite3
 import json
@@ -79,7 +80,7 @@ def _mark(message_id: str, state: str) -> None:
         path = _marker_path(message_id)
         # Markers contain no message bodies or recipient information.
         temp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        with sqlite3.connect(path.parent / ".lock.sqlite3", timeout=0.1) as lock:
+        with closing(sqlite3.connect(path.parent / ".lock.sqlite3", timeout=0.1)) as lock, lock:
             lock.execute("BEGIN IMMEDIATE")
             previous = _state(message_id)
             if (state != "webhook" and previous == "webhook") or (state == "webhook" and previous == "inline"):
