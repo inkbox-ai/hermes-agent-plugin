@@ -248,6 +248,34 @@ def upload_reply(client: Any, meta: dict, payload: dict, *, idempotency_key: str
                   thread_ts=meta.get("thread_ts"), idempotency_key=idempotency_key, **payload)
 
 
+SLACK_MAX_PREVIEW_BYTES = 2 * 1024 * 1024
+
+
+def download_file_preview(resource: Any, connection_id: str, file_id: str) -> dict:
+    """Save an authenticated cached preview, never a caller-supplied URL or path."""
+    method = getattr(resource, "download_file_preview", None)
+    if not callable(method):
+        raise RuntimeError("Slack previews require inkbox>=0.7.15,<1.0.0; upgrade the installed SDK")
+    data = method(connection_id, file_id)
+    if not isinstance(data, bytes) or not 1 <= len(data) <= SLACK_MAX_PREVIEW_BYTES:
+        raise ValueError("Slack preview must contain between 1 byte and 2 MiB")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext, mimetype = ".png", "image/png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        ext, mimetype = ".jpg", "image/jpeg"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        ext, mimetype = ".gif", "image/gif"
+    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        ext, mimetype = ".webp", "image/webp"
+    else:
+        raise ValueError("Slack preview is not a supported PNG, JPEG, GIF or WebP image")
+    from gateway.platforms.base import cache_image_from_bytes
+    path = cache_image_from_bytes(data, ext=ext)
+    return {"connection_id": connection_id, "file_id": file_id, "file_path": path,
+            "mimetype": mimetype, "size_bytes": len(data), "preview_only": True,
+            "next_step": "Open file_path with vision_analyze to inspect the image. This is a preview, not necessarily the original file."}
+
+
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {
         "name": "inkbox_slack_" + name, "description": description,
@@ -266,6 +294,12 @@ SLACK_TOOLS = [
           {**_CONNECTION, **_PAGE}, ["connection_id"]),
     _tool("list_messages", "Read a Slack conversation or thread; follow next_cursor.",
           {**_CONVERSATION, **_PAGE, "thread_ts": _STRING}, ["connection_id", "conversation_id"]),
+    _tool("download_file_preview", "Download a Slack attachment's cached image preview to a local file. "
+          "Use connection_id and file_id from Slack metadata, then open the returned file_path with vision_analyze. "
+          "Accepts PNG/JPEG/GIF/WebP up to 2 MiB. A preview is not necessarily the original file; "
+          "unavailable previews return an error. No URLs or output paths accepted.",
+          {"connection_id": {**_STRING, "pattern": "^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"},
+           "file_id": {**_STRING, "pattern": "^F[A-Z0-9]{1,63}$"}}, ["connection_id", "file_id"]),
     _tool("search", "Search retained Slack text across connected workspaces. Not complete workspace "
           "history or file contents. Follow next_cursor even on an empty page.",
           {**_CONVERSATION, **_PAGE, "q": _STRING}, ["q"]),
@@ -310,8 +344,15 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
             raise ValueError(f"{key} must not contain NUL characters")
     if "idempotency_key" in args and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", args["idempotency_key"]):
         raise ValueError("Invalid Slack idempotency_key")
+    if name == "inkbox_slack_download_file_preview":
+        for key in ("connection_id", "file_id"):
+            if not re.fullmatch(schema["properties"][key]["pattern"], args[key]):
+                raise ValueError(f"Invalid Slack {key}")
     resource = slack_resource(client)
     identity = client.get_identity(identity_handle)
+    if name == "inkbox_slack_download_file_preview":
+        validate_connection(resource, str(identity.id), args)
+        return download_file_preview(resource, args["connection_id"], args["file_id"])
     if name == "inkbox_slack_list_connections":
         return resource.list_connections(identity.id)
     # Even an organization-scoped credential must stay on the configured identity.

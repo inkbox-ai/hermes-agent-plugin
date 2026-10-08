@@ -140,6 +140,10 @@ def dispatch(name, args, *, session_id="", **_kwargs):
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             result["status_code"] = status
+        if name == "inkbox_slack_download_file_preview":
+            retry_after = getattr(exc, "retry_after_seconds", None)
+            if isinstance(retry_after, int):
+                result["retry_after_seconds"] = retry_after
         return json.dumps(result)
     finally:
         if client is not None and callable(getattr(client, "close", None)):
