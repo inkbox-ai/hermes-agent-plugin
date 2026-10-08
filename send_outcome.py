@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import fcntl
+import sqlite3
 import json
 import math
 import os
@@ -79,8 +79,8 @@ def _mark(message_id: str, state: str) -> None:
         path = _marker_path(message_id)
         # Markers contain no message bodies or recipient information.
         temp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        with (path.parent / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with sqlite3.connect(path.parent / ".lock.sqlite3", timeout=0.1) as lock:
+            lock.execute("BEGIN IMMEDIATE")
             previous = _state(message_id)
             if (state != "webhook" and previous == "webhook") or (state == "webhook" and previous == "inline"):
                 return
@@ -90,7 +90,7 @@ def _mark(message_id: str, state: str) -> None:
         for old in path.parent.glob("*.json"):
             if time.time() - old.stat().st_mtime > 86400:
                 old.unlink(missing_ok=True)
-    except OSError:
+    except (OSError, sqlite3.Error):
         pass  # An accepted send must never become a resendable tool error.
 
 
