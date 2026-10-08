@@ -3,7 +3,7 @@ import asyncio
 import base64
 import json
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -203,7 +203,7 @@ def test_adapter_local_bytes_exact_original_route(factory, tmp_path, monkeypatch
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("state", ["unknown", "in_progress", "failed", "timeout"])
+@pytest.mark.parametrize("state", ["unknown", "in_progress", "timeout"])
 def test_native_uncertain_upload_blocks_resend_and_restart(factory, tmp_path, monkeypatch, local_file, state):
     async def run():
         value, row, turn = await reserved_native(factory, tmp_path, monkeypatch)
@@ -276,10 +276,18 @@ def test_native_stop_during_preflight_read_fences_sdk_effect(factory, tmp_path, 
 def test_url_image_is_link_without_download_and_orphan_file_fails_closed(factory, tmp_path, monkeypatch, local_file):
     async def run():
         value, row, turn = await reserved_native(factory, tmp_path, monkeypatch)
-        value.adapter.send = AsyncMock(return_value=NS(success=True))
+        turn.update(state="answer_ready", answer="Final answer")
+        assert (await value.adapter.send(row["chat_id"], "Final answer", reply_to=turn["id"])).success
         result = await value.adapter.send_image(row["chat_id"], "https://example.com/image.png", caption="Link", reply_to=turn["id"])
         assert result.success
-        value.adapter.send.assert_awaited_once_with(row["chat_id"], "Link\nhttps://example.com/image.png", turn["id"], None)
+        send = value.adapter._inkbox.slack.send_message
+        assert send.call_count == 2
+        assert send.call_args.kwargs["text"] == "Link\nhttps://example.com/image.png"
+        assert send.call_args.kwargs["conversation_id"] == "C123"
+        assert send.call_args.kwargs["thread_ts"] == turn["route"]["thread_ts"]
+        assert turn["sent"]["content"] == "Final answer"
+        assert (await value.adapter.send_image(row["chat_id"], "https://example.com/image.png", caption="Link", reply_to=turn["id"])).success
+        assert send.call_count == 2
         result = await value.adapter.send_image_file("slack:unknown-source", str(local_file))
         assert not result.success and result.raw_response["inkbox_no_retry"]
         value.adapter._inkbox.slack.upload_file.assert_not_called()
@@ -389,13 +397,14 @@ def test_missing_sdk_api_produces_upgrade_error(client, local_file, tool):
         run_tool(client, "agent", "inkbox_slack_" + tool, args)
 
 
-def test_companion_unknown_media_survives_restart_without_resend(slack_host, local_file):
+@pytest.mark.parametrize("status", ["unknown", "failed"])
+def test_companion_media_outcome_survives_restart_without_resend(slack_host, local_file, status):
     async def run():
         value = slack_host
         await value.receiver.accept(companion_harness.incoming())
         await idle(value)
         original = value.inputs[0]
-        value.adapter._inkbox.slack.upload_file.return_value = operation("unknown")
+        value.adapter._inkbox.slack.upload_file.return_value = operation(status)
         for _ in range(2):
             result = await value.adapter.send_document(original.source.chat_id, str(local_file), reply_to=original.message_id)
             assert not result.success and result.raw_response["inkbox_no_retry"]
@@ -404,9 +413,60 @@ def test_companion_unknown_media_survives_restart_without_resend(slack_host, loc
         await value.receiver.close()
         receiver = CompanionReceiver(value.adapter, root, 128_000)
         await receiver.start()
-        assert next(iter(receiver.rows.values()))["state"] == "paused"
-        assert not receiver.tasks
+        assert (next(iter(receiver.rows.values()))["state"] == "paused") is (status == "unknown")
+        if receiver.tasks:
+            await asyncio.gather(*list(receiver.tasks.values()))
+        assert len(value.inputs) == 1
         value.adapter._inkbox.slack.upload_file.assert_called_once()
         await receiver.close()
+        await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+def test_definitive_failed_native_upload_does_not_quarantine_completed_turn(factory, tmp_path, monkeypatch, local_file):
+    async def run():
+        value, row, turn = await reserved_native(factory, tmp_path, monkeypatch)
+        turn.update(state="answer_ready", answer="Final answer")
+        assert (await value.adapter.send(row["chat_id"], "Final answer", reply_to=turn["id"])).success
+        value.adapter._inkbox.slack.upload_file.return_value = operation("failed")
+        for _ in range(2):
+            result = await value.adapter.send_image_file(row["chat_id"], str(local_file), reply_to=turn["id"])
+            assert not result.success and result.raw_response["inkbox_no_retry"]
+        assert next(iter(turn["media_deliveries"].values()))["state"] == "failed"
+        assert turn["state"] == "done"
+        value.adapter._inkbox.slack.upload_file.assert_called_once()
+        await value.queue.close()
+        restored = NativeTurns(value.adapter, value.queue.root)
+        value.adapter._native_turns = restored
+        await restored.start()
+        await settle(restored)
+        assert not next(iter(restored.rows.values())).get("blocked")
+        assert not value.inputs  # A rejected attachment must never replay its model turn.
+        await restored.close()
+        await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+def test_companion_hosted_link_keeps_final_answer_checkpoint(slack_host):
+    async def run():
+        value = slack_host
+        await value.receiver.accept(companion_harness.incoming())
+        await idle(value)
+        original = value.inputs[0]
+        row = next(iter(value.receiver.rows.values()))
+        turn = row["turns"][0]
+        assert (await value.adapter.send(original.source.chat_id, "Final answer", reply_to=original.message_id)).success
+        final_delivery = dict(turn["delivery"])
+        sends = value.adapter._inkbox.slack.send_message
+        before = sends.call_count
+        for _ in range(2):
+            result = await value.adapter.send_image(original.source.chat_id, "https://example.com/image.png",
+                                                    caption="Link", reply_to=original.message_id)
+            assert result.success, result.error
+        assert sends.call_count == before + 1
+        assert turn["delivery"] == final_delivery
+        assert sends.call_args.kwargs["text"] == "Link\nhttps://example.com/image.png"
+        value.adapter._inkbox.slack.upload_file.assert_not_called()
+        await value.receiver.close()
         await value.adapter._slack_activity.close()
     asyncio.run(run())

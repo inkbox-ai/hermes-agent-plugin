@@ -225,7 +225,7 @@ def test_rejected_admission_is_safely_cancelled_across_restart(factory, tmp_path
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("status", ["succeeded", "unknown", "in_progress"])
+@pytest.mark.parametrize("status", ["succeeded", "failed", "unknown", "in_progress"])
 def test_confirmed_stop_preserves_slack_upload_outcome(factory, tmp_path, monkeypatch, status):
     from inkbox_plugin.slack import file_payload
     from tests.test_slack_media import operation
@@ -254,10 +254,86 @@ def test_confirmed_stop_preserves_slack_upload_outcome(factory, tmp_path, monkey
         await value.queue.accept(receipt(2, mode="slack"))
         await settle(value.queue)
         assert turn["state"] == "cancelled" and turn["fenced"]
-        assert bool(row.get("blocked")) is (status != "succeeded")
-        assert [event.message_id for event in value.inputs] == ([uid(1), uid(2)] if status == "succeeded" else [uid(1)])
+        settled = status in {"succeeded", "failed"}
+        assert bool(row.get("blocked")) is (not settled)
+        assert [event.message_id for event in value.inputs] == ([uid(1), uid(2)] if settled else [uid(1)])
         assert next(iter(turn["media_deliveries"].values()))["operation"]["status"] == status
         value.adapter._inkbox.slack.upload_file.assert_called_once()
         await value.queue.close()
         await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["slack", "imessage"])
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+def test_confirmed_stop_forward_failure_does_not_retain_submission_gate(factory, tmp_path, monkeypatch, mode, failure):
+    async def run():
+        finish = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=finish)
+        await value.queue.accept(receipt(1, mode=mode))
+        await started(value)
+        await value.queue.accept(receipt(2, mode=mode))
+
+        async def fence(*args, **kwargs):
+            finish.set()
+            await settle(value.queue)
+            return True
+
+        forward = AsyncMock(side_effect=failure("synthetic control forwarding failure"))
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+        monkeypatch.setattr(value.queue, "_forward_control", forward)
+        try:
+            with pytest.raises(failure):
+                await value.queue.accept(stop_receipt(mode))
+            await value.queue.accept(stop_receipt(mode))  # Ambiguous control is acknowledged, never replayed.
+            await value.queue.accept(receipt(3, mode=mode))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            assert row["controls"][uid(10)] == "uncertain"
+            assert not row.get("blocked")
+            assert [event.message_id for event in value.inputs] == [uid(1), uid(3)]
+            assert [turn["state"] for turn in row["turns"]] == ["cancelled", "cancelled", "done"]
+            forward.assert_awaited_once()
+        finally:
+            finish.set()
+            await value.queue.close()
+            await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["slack", "imessage"])
+def test_stop_before_host_dispatch_records_positive_fence(factory, tmp_path, monkeypatch, mode):
+    async def run():
+        value = await harness(factory, tmp_path)
+        entered, release = asyncio.Event(), asyncio.Event()
+        notify = value.queue._notify
+
+        async def delayed_notify(row, turn, state):
+            if turn["id"] == uid(1) and state == "accepted":
+                entered.set()
+                await release.wait()
+            await notify(row, turn, state)
+
+        fence = AsyncMock(return_value=False)
+        monkeypatch.setattr(value.queue, "_notify", delayed_notify)
+        monkeypatch.setattr(value.queue, "_forward_control", AsyncMock())
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+        try:
+            await value.queue.accept(receipt(1, mode=mode))
+            await asyncio.wait_for(entered.wait(), 1)
+            await value.queue.accept(stop_receipt(mode))
+            fence.assert_not_awaited()  # The host never received this owned event.
+            release.set()
+            await settle(value.queue)
+            await value.queue.accept(receipt(2, mode=mode))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            assert row["turns"][0]["state"] == "cancelled"
+            assert row["turns"][0]["fenced"] is True
+            assert not row.get("blocked")
+            assert [event.message_id for event in value.inputs] == [uid(2)]
+        finally:
+            release.set()
+            await value.queue.close()
+            await value.adapter._slack_activity.close()
     asyncio.run(run())

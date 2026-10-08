@@ -1007,8 +1007,8 @@ class CompanionReceiver:
         if turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
             raise RuntimeError("Original explicit delivery is uncertain")
 
-    async def send_slack_media(self, row, turn, payload):
-        """Checkpoint file effects separately from text; never replay an ambiguous upload."""
+    async def send_slack_media(self, row, turn, payload, *, link=False):
+        """Keep attachments and hosted links separate from final-answer delivery."""
         from .slack import upload_reply, operation_summary, validate_connection
         self._check_slack_media_authority(row, turn)
         route = self._slack_route(turn)
@@ -1025,8 +1025,8 @@ class CompanionReceiver:
         prior = turn["media_deliveries"].get(fingerprint)
         if prior and prior["state"] == "sent":
             return SendResult(success=True, message_id=prior["operation"]["id"], raw_response=prior["operation"])
-        if self._uncertain_media(turn):
-            return SendResult(success=False, error="Original Slack file outcome is uncertain", raw_response={"inkbox_no_retry": True})
+        if prior or self._uncertain_media(turn):
+            return SendResult(success=False, error="Original Slack media outcome is retained; no resend", raw_response={"inkbox_no_retry": True})
         delivery = turn["media_deliveries"][fingerprint] = {"state": "sending"}
         self._save(row)
 
@@ -1034,8 +1034,13 @@ class CompanionReceiver:
             self._check_slack_media_authority(row, turn)
             validate_connection(self.adapter._inkbox.slack, str(self.adapter._identity_id), route)
             self._check_slack_media_authority(row, turn)
-            return upload_reply(self.adapter._inkbox, route, payload,
-                                idempotency_key="hermes:media:" + digest(turn["id"] + fingerprint))
+            key = "hermes:media:" + digest(turn["id"] + fingerprint)
+            if link:
+                return self.adapter._inkbox.slack.send_message(
+                    route["connection_id"], conversation_id=route["conversation_id"],
+                    thread_ts=route.get("thread_ts"), idempotency_key=key, **payload,
+                )
+            return upload_reply(self.adapter._inkbox, route, payload, idempotency_key=key)
 
         task = asyncio.create_task(asyncio.to_thread(checked_upload))
         self.outbound.add(task)
@@ -1043,12 +1048,16 @@ class CompanionReceiver:
         try:
             operation = await asyncio.shield(task)
             summary = operation_summary(operation)
-            delivery.update(state="sent" if operation.status == "succeeded" else "uncertain", operation=summary)
+            succeeded = operation.status == ("sent" if link else "succeeded")
+            # A definitive rejection is not an unknown external effect. Retain
+            # it to suppress retries without quarantining future user turns.
+            delivery.update(state="sent" if succeeded else "failed" if operation.status == "failed" else "uncertain", operation=summary)
             self._save(row)
-            if operation.status == "succeeded":
+            if succeeded:
                 return SendResult(success=True, message_id=str(operation.id), raw_response=summary)
+            inspection = "inkbox_slack_get_action" if link else "inkbox_slack_get_operation"
             return SendResult(success=False,
-                              error=f"Slack operation {operation.id} is {operation.status}; inspect inkbox_slack_get_operation; no resend",
+                              error=f"Slack operation {operation.id} is {operation.status}; inspect {inspection}; no resend",
                               raw_response={"inkbox_no_retry": True, **summary})
         except Exception as exc:
             delivery["state"] = "uncertain"

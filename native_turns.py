@@ -175,7 +175,7 @@ class NativeTurns(CompanionReceiver):
                             self._release_context(row, pending)
                 # The next operation crosses the actual native effect boundary.
                 self.unconfirmed_controls.pop(source_id, None)
-                await self._forward_control(event, text, control_turn)
+                await self._forward_checkpointed_control(event, text, control_turn, row, source_id)
                 control_turn["state"] = "done"
                 row["controls"][source_id] = "consumed"
             self._save(row)
@@ -342,6 +342,7 @@ class NativeTurns(CompanionReceiver):
             self._save(row)
             self.active[row["chat_id"]] = turn
             self.events[turn["id"]] = event
+            event._inkbox_host_dispatched = False
             completion = asyncio.get_running_loop().create_future()
             self.completions[turn["id"]] = completion
             self.host_sessions.add(self._session_key(event))
@@ -352,6 +353,7 @@ class NativeTurns(CompanionReceiver):
             try:
                 if turn["state"] != "running" or "submitting" in row.get("controls", {}).values():
                     return  # Stop may have completed during the activity await.
+                event._inkbox_host_dispatched = True
                 task = asyncio.create_task(self.adapter.handle_message(event))
                 self.dispatches.add(task)
                 task.add_done_callback(self.dispatches.discard)
@@ -792,11 +794,17 @@ class NativeTurns(CompanionReceiver):
                     turn.update(state="cancelled", fenced=True)
                     self._release_context(row, turn)
             self._save(row)
-            fenced = await fence_turn(self.adapter, event.source, active["id"])
+            original = self.events.get(active["id"])
+            # The activity callback yields before host admission. This live,
+            # owned event is positive proof that no worker was ever dispatched;
+            # missing events or reloaded checkpoints never receive that proof.
+            fenced = getattr(original, "_inkbox_host_dispatched", None) is False
+            if not fenced:
+                fenced = await fence_turn(self.adapter, event.source, active["id"])
             active["state"] = "cancelled"
             active["fenced"] = fenced
             self._save(row)
-        await self._forward_control(event, answer or text, active)
+        await self._forward_checkpointed_control(event, answer or text, active, row, control_id)
         if stopping:
             if not fenced:
                 row["blocked"] = True
@@ -811,6 +819,26 @@ class NativeTurns(CompanionReceiver):
             self._clear_fenced_block(row)
         self._kick(row)
         return True
+
+    async def _forward_checkpointed_control(self, event, text, active, row, control_id):
+        try:
+            await self._forward_control(event, text, active)
+        except BaseException:
+            # The native boundary may have run. Never replay this receipt, but
+            # do not retain a gate that falsely says forwarding is still active.
+            row["controls"][control_id] = "uncertain"
+            if active["state"] == "control_submitting":
+                active["state"] = "uncertain"
+                row["blocked"] = True
+                row["error"] = "Native control outcome is uncertain; inspect the original turn"
+            if active["state"] == "cancelled" and active.get("fenced"):
+                future = self.completions.get(active["id"])
+                if future and not future.done():
+                    future.set_result(False)
+            self._save(row)
+            self._clear_fenced_block(row)
+            self._kick(row)
+            raise
 
     async def _forward_control(self, event, text, active):
         event.text = text

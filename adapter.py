@@ -2874,7 +2874,7 @@ class InkboxAdapter(BasePlatformAdapter):
         route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
         return route.get("mode") == "slack"
 
-    async def _send_slack_media(self, chat_id, local_path, caption, metadata, reply_to=None, filename=None):
+    async def _send_slack_media(self, chat_id, local_path, caption, metadata, reply_to=None, filename=None, *, link_text=None):
         from .slack import file_payload
         try:
             if not getattr(self, "_slack_enabled", False):
@@ -2902,9 +2902,14 @@ class InkboxAdapter(BasePlatformAdapter):
             if row is None or turn is None:
                 raise PermissionError("Slack media requires its original native or Companion turn")
             receiver._check_slack_media_authority(row, turn)
-            payload = await asyncio.to_thread(file_payload, local_path, filename=filename,
-                                              initial_comment=caption, validator=self.validate_media_delivery_path)
-            return await receiver.send_slack_media(row, turn, payload)
+            if link_text is not None:
+                if len(link_text) > 12000:
+                    raise ValueError("Slack image links must be at most 12000 characters")
+                payload = {"text": link_text}
+            else:
+                payload = await asyncio.to_thread(file_payload, local_path, filename=filename,
+                                                  initial_comment=caption, validator=self.validate_media_delivery_path)
+            return await receiver.send_slack_media(row, turn, payload, link=link_text is not None)
         except Exception as exc:
             return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
 
@@ -3193,7 +3198,10 @@ class InkboxAdapter(BasePlatformAdapter):
             if not _public_http_media_url(image_url):
                 return SendResult(success=False, error="Slack image links must be hosted HTTP(S) URLs",
                                   raw_response={"inkbox_no_retry": True})
-            return await self.send(chat_id, "\n".join(filter(None, [caption, image_url])), reply_to, metadata)
+            return await self._send_slack_media(
+                chat_id, None, None, metadata, reply_to,
+                link_text="\n".join(filter(None, [caption, image_url])),
+            )
         return await super().send_image(
             chat_id, image_url, caption, reply_to, metadata,
         )
