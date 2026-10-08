@@ -270,7 +270,10 @@ def test_published_sdk_transport_preserves_stream_routes_and_credentials(tmp_pat
 
 
 @pytest.mark.parametrize("keeps_rejecting", [False, True])
-def test_terminal_rate_limit_retries_are_bounded_and_keep_original_stream(tmp_path, monkeypatch, keeps_rejecting):
+@pytest.mark.parametrize("error_code,retry_after", [("rate_limited", 1), ("connection_failed", None)])
+def test_terminal_safe_retries_are_bounded_and_keep_original_stream(
+    tmp_path, monkeypatch, keeps_rejecting, error_code, retry_after,
+):
     async def run():
         sdk = native_resource()
         tracker = SlackProgress(sdk, tmp_path / "p.json", interval=0)
@@ -281,7 +284,7 @@ def test_terminal_rate_limit_retries_are_bounded_and_keep_original_stream(tmp_pa
         # real sleep; ordinary async scheduling still uses its monotonic clock.
         clock = iter(range(0, 1000, 10))
         monkeypatch.setattr("inkbox_plugin.slack_progress.time.time", lambda: next(clock))
-        rejected = operation("stream_stop", "failed", error_code="rate_limited", retry_after=1)
+        rejected = operation("stream_stop", "failed", error_code=error_code, retry_after=retry_after)
         sdk._http.post.side_effect = None if keeps_rejecting else [rejected, operation("stream_stop")]
         sdk._http.post.return_value = rejected
         await tracker.notify("chat", source(), "completed")
@@ -291,6 +294,24 @@ def test_terminal_rate_limit_retries_are_bounded_and_keep_original_stream(tmp_pa
         assert all(call.args[0].endswith(f"/{STREAM_ID}/stop") for call in stops)
         assert len({call.kwargs["headers"]["Idempotency-Key"] for call in stops}) == len(stops)
         assert bool(json.loads(tracker.path.read_text())) is keeps_rejecting
+        sdk.send_message.assert_not_called()
+    asyncio.run(run())
+
+
+def test_unknown_connection_failure_never_retries_terminal_stop(tmp_path):
+    async def run():
+        sdk = native_resource()
+        tracker = SlackProgress(sdk, tmp_path / "p.json", interval=0)
+        await tracker.notify("chat", source(), "accepted")
+        await tracker.progress("chat", source(), "Working")
+        await tracker.flush()
+        sdk._http.post.side_effect = None
+        sdk._http.post.return_value = operation("stream_stop", "unknown", error_code="connection_failed")
+        await tracker.notify("chat", source(), "completed")
+        await tracker.flush()
+        await tracker.close()
+        assert sdk._http.post.call_count == 2  # One start and one unconfirmed stop.
+        assert next(iter(json.loads(tracker.path.read_text()).values()))["uncertain"]
         sdk.send_message.assert_not_called()
     asyncio.run(run())
 

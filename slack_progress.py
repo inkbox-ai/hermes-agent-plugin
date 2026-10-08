@@ -108,13 +108,14 @@ class SlackProgress:
             await asyncio.to_thread(validate_connection, self.resource, self.identity_id, record["route"])
 
     def _rejected(self, record, result, text):
-        """Retry only a definitively rejected terminal rate limit, boundedly."""
+        """Bound retries to terminal rate limits and confirmed pre-send failures."""
         record.pop("uncertain", None)
         retry_after = getattr(result, "retry_after", None)
         if isinstance(retry_after, int) and retry_after > 0:
             record["retry_at"] = time.time() + retry_after
         retry = record["desired"] != text
-        if (record.get("terminal") and getattr(result, "error_code", None) in {"rate_limited", "ratelimited"}
+        if (record.get("terminal")
+                and getattr(result, "error_code", None) in {"rate_limited", "ratelimited", "connection_failed"}
                 and record.get("terminal_retries", 0) < 3):
             record["terminal_retries"] = record.get("terminal_retries", 0) + 1
             record["retry_at"] = max(record.get("retry_at", 0), time.time() + 1)
