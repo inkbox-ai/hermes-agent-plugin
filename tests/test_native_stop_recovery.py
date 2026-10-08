@@ -337,3 +337,131 @@ def test_stop_before_host_dispatch_records_positive_fence(factory, tmp_path, mon
             await value.queue.close()
             await value.adapter._slack_activity.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["slack", "imessage"])
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+@pytest.mark.parametrize("finalizer_first", [False, True])
+def test_stop_fence_exception_allows_later_proven_recovery(factory, tmp_path, monkeypatch, mode, failure, outcome, finalizer_first):
+    async def run():
+        finish = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=finish)
+        original_handle = value.adapter.handle_message
+
+        async def handle(event):
+            if event.message_id != uid(1):
+                return await original_handle(event)
+            event._gateway_accepted = True
+            value.inputs.append(event)
+            await value.adapter.on_processing_start(event)
+            await finish.wait()
+            await value.adapter.on_processing_complete(event, outcome)
+
+        monkeypatch.setattr(value.adapter, "handle_message", handle)
+        await value.queue.accept(receipt(1, mode=mode))
+        await started(value)
+        forward = AsyncMock()
+        monkeypatch.setattr(value.queue, "_forward_control", forward)
+
+        async def failed_fence(*args, **kwargs):
+            if finalizer_first:
+                finish.set()
+                await settle(value.queue)
+            raise failure("synthetic fence failure")
+
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", failed_fence)
+        try:
+            with pytest.raises(failure):
+                await value.queue.accept(stop_receipt(mode))
+            row = next(iter(value.queue.rows.values()))
+            assert row["controls"][uid(10)] == "uncertain"
+            assert row.get("blocked")
+            finish.set()
+            await settle(value.queue)
+            saved = json.loads((value.queue.root / (row["key"] + ".json")).read_text())
+            assert saved["turns"][0]["state"] == "cancelled"
+            assert saved["turns"][0]["fenced"] is False
+            assert saved["controls"][uid(10)] == "uncertain"
+            await value.queue.accept(stop_receipt(mode))  # Never replay the ambiguous Stop.
+            fence = AsyncMock(return_value=False)
+            monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+            await value.queue.accept(receipt(2, mode=mode))
+            await settle(value.queue)
+            assert row.get("blocked") and len(value.inputs) == 1
+            fence.assert_awaited_once()
+            fence.return_value = True
+            await value.queue.accept(receipt(3, mode=mode))
+            await settle(value.queue)
+            assert not row.get("blocked")
+            assert row["turns"][0]["state"] == "quarantined"
+            assert all(turn["state"] != "pending" for turn in row["turns"])
+            assert len(value.inputs) >= 2
+            forward.assert_not_awaited()
+        finally:
+            finish.set()
+            await value.queue.close()
+            await value.adapter._slack_activity.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["slack", "imessage"])
+@pytest.mark.parametrize("after_fence", [False, True])
+def test_stop_checkpoint_failure_preserves_fence_proof(factory, tmp_path, monkeypatch, mode, after_fence):
+    async def run():
+        finish = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=finish)
+        original_handle = value.adapter.handle_message
+
+        async def handle(event):
+            if event.message_id != uid(1):
+                return await original_handle(event)
+            event._gateway_accepted = True
+            value.inputs.append(event)
+            await value.adapter.on_processing_start(event)
+            await finish.wait()
+            await value.adapter.on_processing_complete(event, "failure")
+
+        monkeypatch.setattr(value.adapter, "handle_message", handle)
+        await value.queue.accept(receipt(1, mode=mode))
+        await started(value)
+        row = next(iter(value.queue.rows.values()))
+        turn = row["turns"][0]
+        save = value.queue._save
+        faults = []
+
+        def fail_once(current):
+            if (not faults and current.get("blocked")
+                    and (turn["state"] == "cancelled") is after_fence):
+                faults.append(True)
+                raise OSError("synthetic checkpoint failure")
+            save(current)
+
+        async def fence(*args, **kwargs):
+            finish.set()
+            await settle(value.queue)
+            return True
+
+        forward = AsyncMock()
+        monkeypatch.setattr(value.queue, "_save", fail_once)
+        monkeypatch.setattr(value.queue, "_forward_control", forward)
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", fence)
+        try:
+            with pytest.raises(OSError):
+                await value.queue.accept(stop_receipt(mode))
+            assert faults == [True]
+            assert row["controls"][uid(10)] == "uncertain"
+            assert bool(row.get("blocked")) is not after_fence
+            assert bool(turn.get("fenced")) is after_fence
+            forward.assert_not_awaited()
+            finish.set()
+            await settle(value.queue)
+            await value.queue.accept(receipt(3, mode=mode))
+            await settle(value.queue)
+            assert not row.get("blocked")
+            assert [event.message_id for event in value.inputs] == [uid(1), uid(3)]
+        finally:
+            finish.set()
+            await value.queue.close()
+            await value.adapter._slack_activity.close()
+    asyncio.run(run())

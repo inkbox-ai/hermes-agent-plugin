@@ -784,26 +784,30 @@ class NativeTurns(CompanionReceiver):
         # No await occurs between durable admission and this effect boundary.
         self.unconfirmed_controls.pop(control_id, None)
         if stopping:
-            from .host_fencing import fence_turn
-            row["blocked"] = True
-            row["error"] = "Stop in progress; native worker exit is not yet confirmed"
-            # Snapshot cancellation before awaits: later receipts belong to
-            # the successor and wait until this control finishes forwarding.
-            for turn in row["turns"]:
-                if turn["state"] == "pending":
-                    turn.update(state="cancelled", fenced=True)
-                    self._release_context(row, turn)
-            self._save(row)
-            original = self.events.get(active["id"])
-            # The activity callback yields before host admission. This live,
-            # owned event is positive proof that no worker was ever dispatched;
-            # missing events or reloaded checkpoints never receive that proof.
-            fenced = getattr(original, "_inkbox_host_dispatched", None) is False
-            if not fenced:
-                fenced = await fence_turn(self.adapter, event.source, active["id"])
-            active["state"] = "cancelled"
-            active["fenced"] = fenced
-            self._save(row)
+            try:
+                from .host_fencing import fence_turn
+                row["blocked"] = True
+                row["error"] = "Stop in progress; native worker exit is not yet confirmed"
+                # Snapshot cancellation before awaits: later receipts belong to
+                # the successor and wait until this control finishes forwarding.
+                for turn in row["turns"]:
+                    if turn["state"] == "pending":
+                        turn.update(state="cancelled", fenced=True)
+                        self._release_context(row, turn)
+                self._save(row)
+                original = self.events.get(active["id"])
+                # The activity callback yields before host admission. This live,
+                # owned event is positive proof that no worker was ever dispatched;
+                # missing events or reloaded checkpoints never receive that proof.
+                fenced = getattr(original, "_inkbox_host_dispatched", None) is False
+                if not fenced:
+                    fenced = await fence_turn(self.adapter, event.source, active["id"])
+                active["state"] = "cancelled"
+                active["fenced"] = fenced
+                self._save(row)
+            except BaseException:
+                self._control_failed(active, row, control_id, stop_failed=True)
+                raise
         await self._forward_checkpointed_control(event, answer or text, active, row, control_id)
         if stopping:
             if not fenced:
@@ -824,21 +828,30 @@ class NativeTurns(CompanionReceiver):
         try:
             await self._forward_control(event, text, active)
         except BaseException:
-            # The native boundary may have run. Never replay this receipt, but
-            # do not retain a gate that falsely says forwarding is still active.
-            row["controls"][control_id] = "uncertain"
-            if active["state"] == "control_submitting":
-                active["state"] = "uncertain"
-                row["blocked"] = True
-                row["error"] = "Native control outcome is uncertain; inspect the original turn"
-            if active["state"] == "cancelled" and active.get("fenced"):
-                future = self.completions.get(active["id"])
-                if future and not future.done():
-                    future.set_result(False)
-            self._save(row)
-            self._clear_fenced_block(row)
-            self._kick(row)
+            self._control_failed(active, row, control_id)
             raise
+
+    def _control_failed(self, active, row, control_id, *, stop_failed=False):
+        # An interrupted host can report SUCCESS with an empty response even
+        # without executor-exit proof. Keep that callback from erasing the Stop.
+        if stop_failed and not active.get("fenced"):
+            active.update(state="cancelled", fenced=False)
+            row["blocked"] = True
+            row["error"] = "Stop failed; original native worker exit remains unconfirmed"
+        # Fencing or forwarding may have run. Never replay this receipt, but
+        # do not retain a gate that falsely says submission is still active.
+        row["controls"][control_id] = "uncertain"
+        if active["state"] == "control_submitting":
+            active["state"] = "uncertain"
+            row["blocked"] = True
+            row["error"] = "Native control outcome is uncertain; inspect the original turn"
+        if active["state"] == "cancelled" and active.get("fenced"):
+            future = self.completions.get(active["id"])
+            if future and not future.done():
+                future.set_result(False)
+        self._save(row)
+        self._clear_fenced_block(row)
+        self._kick(row)
 
     async def _forward_control(self, event, text, active):
         event.text = text
