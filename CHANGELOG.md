@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Upload local Slack images, documents, video, and audio through source-bound native/Companion reply routes, with durable duplicate and uncertain-outcome protection. Remote image URLs remain links.
+- Add `inkbox_slack_upload_file` and `inkbox_slack_get_operation`, preserving operation status and file IDs. Raise the base SDK floor to 0.7.15.
+
 ## 0.2.19
 
 - Add opt-in Slack tools, guided workspace installation, signed channel reception, channel-wide Companion, exact-thread controls, and inline/thread-specific activity.
