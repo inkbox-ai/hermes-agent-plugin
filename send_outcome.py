@@ -83,7 +83,7 @@ def _mark(message_id: str, state: str) -> None:
         with closing(sqlite3.connect(path.parent / ".lock.sqlite3", timeout=0.1)) as lock, lock:
             lock.execute("BEGIN IMMEDIATE")
             previous = _state(message_id)
-            if (state != "webhook" and previous == "webhook") or (state == "webhook" and previous == "inline"):
+            if (state != "webhook" and previous == "webhook") or previous == "inline":
                 return
             temp.write_text(json.dumps({"state": state, "at": time.time()}))
             temp.chmod(0o600)

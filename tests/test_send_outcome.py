@@ -143,3 +143,9 @@ def test_read_count_is_bounded(monkeypatch):
     result = subject.poll_send_outcome(None, SimpleNamespace(get_text=lambda _: None), "sms", {"id": "count", "status": "queued"})
     assert not result["delivery_final"]
     assert len(reads) == 20
+
+
+def test_repeated_observation_cannot_erase_inline_report():
+    subject._mark("repeat", "inline")
+    subject.poll_send_outcome(None, None, "sms", {"id": "repeat", "status": "queued"})
+    assert asyncio.run(subject.reported_inline("repeat"))
