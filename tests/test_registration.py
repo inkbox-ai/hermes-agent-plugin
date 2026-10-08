@@ -178,6 +178,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     }
     optional = {"inkbox_slack_list_connections", "inkbox_slack_list_conversations", "inkbox_slack_list_messages",
                 "inkbox_slack_search", "inkbox_slack_send_message", "inkbox_slack_get_action",
+                "inkbox_slack_upload_file", "inkbox_slack_get_operation",
                 "inkbox_get_imessage_thread", "inkbox_get_imessage_conversation_thread"}
     assert tool_names == base_tools | optional == _manifest_provides_tools()
     assert all(not kwargs["check_fn"]() for args, kwargs in ctx.tools if args[0] in optional)

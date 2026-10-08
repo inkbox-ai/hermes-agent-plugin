@@ -2863,12 +2863,59 @@ class InkboxAdapter(BasePlatformAdapter):
     # Outbound: send / edit / get_chat_info
     # ------------------------------------------------------------------
 
+    def _is_slack_media_route(self, chat_id, metadata):
+        if str(chat_id).startswith("slack:"):
+            return True  # Fail closed even when its original owner is unavailable.
+        if str(chat_id).startswith("companion:"):
+            receiver = getattr(self, "_companion", None)
+            row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+            return row is None or row["meta"]["channel"] == "slack"  # Orphans must fail closed.
+        origin = reply_route.get() or {}
+        route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
+        return route.get("mode") == "slack"
+
+    async def _send_slack_media(self, chat_id, local_path, caption, metadata, reply_to=None, filename=None):
+        from .slack import file_payload
+        try:
+            if not getattr(self, "_slack_enabled", False):
+                raise PermissionError("Slack is disabled")
+            if str(chat_id).startswith("companion:"):
+                receiver = getattr(self, "_companion", None)
+                row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+                origin = reply_route.get() or {}
+                context = (metadata or {}).get("inkbox_reply_route", metadata or {})
+                source_id = (origin.get("message_id") if origin.get("chat_id") == str(chat_id)
+                             else reply_to or (context.get("message_id") if context.get("chat_id") == str(chat_id) else None))
+                turn = (next((item for item in row["turns"] if item["id"] == source_id), None)
+                        if row and source_id else receiver.active.get(str(chat_id)) if receiver else None)
+            else:
+                receiver = getattr(self, "_native_turns", None)
+                context = metadata
+                if reply_to and receiver and not reply_route.get():
+                    # Resolve only a saved original turn, never caller-supplied destination fields.
+                    row = next((item for item in receiver.rows.values() if item["chat_id"] == str(chat_id)
+                                and any(turn["id"] == reply_to for turn in item["turns"])), None)
+                    turn = next((item for item in row["turns"] if item["id"] == reply_to), None) if row else None
+                    context = {"inkbox_reply_route": turn["route"]} if turn else metadata
+                owned = receiver.media_owner(str(chat_id), context) if receiver else None
+                row, turn = owned if owned else (None, None)
+            if row is None or turn is None:
+                raise PermissionError("Slack media requires its original native or Companion turn")
+            receiver._check_slack_media_authority(row, turn)
+            payload = await asyncio.to_thread(file_payload, local_path, filename=filename,
+                                              initial_comment=caption, validator=self.validate_media_delivery_path)
+            return await receiver.send_slack_media(row, turn, payload)
+        except Exception as exc:
+            return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
+
     def _is_imessage_media_route(
         self,
         chat_id: str,
         metadata: Optional[Dict[str, Any]],
     ) -> bool:
         """Whether a native media send belongs on the iMessage channel."""
+        if self._is_slack_media_route(chat_id, metadata):
+            return False
         if str(chat_id).startswith("companion:"):
             row = self._companion.rows.get(str(chat_id).removeprefix("companion:")) if self._companion else None
             return bool(row and row["meta"]["channel"] == "imessage")
@@ -3141,6 +3188,12 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 media_url=image_url,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            # No URL download: avoid adding a server-side request forgery surface.
+            if not _public_http_media_url(image_url):
+                return SendResult(success=False, error="Slack image links must be hosted HTTP(S) URLs",
+                                  raw_response={"inkbox_no_retry": True})
+            return await self.send(chat_id, "\n".join(filter(None, [caption, image_url])), reply_to, metadata)
         return await super().send_image(
             chat_id, image_url, caption, reply_to, metadata,
         )
@@ -3160,6 +3213,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 caption=caption,
                 metadata=metadata,
                 local_path=image_path,
+            )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, image_path, caption, metadata, reply_to,
             )
         return await super().send_image_file(
             chat_id, image_path, caption, reply_to, metadata, **kwargs,
@@ -3182,6 +3239,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 local_path=file_path,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, file_path, caption, metadata, reply_to, filename=file_name,
+            )
         return await super().send_document(
             chat_id, file_path, caption, file_name, reply_to, metadata, **kwargs,
         )
@@ -3202,6 +3263,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 metadata=metadata,
                 local_path=video_path,
             )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, video_path, caption, metadata, reply_to,
+            )
         return await super().send_video(
             chat_id, video_path, caption, reply_to, metadata, **kwargs,
         )
@@ -3221,6 +3286,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 caption=caption,
                 metadata=metadata,
                 local_path=audio_path,
+            )
+        if self._is_slack_media_route(chat_id, metadata):
+            return await self._send_slack_media(
+                chat_id, audio_path, caption, metadata, reply_to,
             )
         return await super().send_voice(
             chat_id, audio_path, caption, reply_to, metadata, **kwargs,
