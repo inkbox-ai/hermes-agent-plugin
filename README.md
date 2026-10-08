@@ -492,7 +492,7 @@ After the gateway starts:
 
 Two optional blocks under the `inkbox:` platform config tailor the agent per
 channel without editing `SOUL.md` or the bundled skills. Both are keyed by
-**modality** (`email`, `sms`, `imessage`, `voice`) or by a specific **Inkbox
+**modality** (`email`, `sms`, `imessage`, `slack`, `voice`) or by a specific **Inkbox
 contact id**, with the contact id taking precedence.
 
 - `channel_prompts` — an ephemeral system prompt injected on that channel's turns
@@ -518,6 +518,12 @@ Built-in defaults that always load (before merge): `inkbox:inkbox-troubleshootin
 on every channel, plus `inkbox:inkbox-imessage-responder` on iMessage and
 `inkbox:inkbox-call-review` on realtime call wrap-up. Skill names use the
 qualified `inkbox:<skill>` form.
+
+Slack turns, including Companion conversations, always include Slack-native formatting
+guidance in the channel prompt: concise replies, `<https://example.com|label>` links,
+single-asterisk bold, and simple lists instead of Markdown headings or tables.
+An optional `channel_prompts.slack` adds your own tone or workflow instructions
+after that built-in guidance; no extra configuration is required to enable it.
 
 ## Tools
 
@@ -633,6 +639,10 @@ Slack ordinary DMs reply inline; channel mentions normally reply in their native
 An optional local Slack allowlist can name a verified actor as `U…`/`W…` or `T…:U…`/`T…:W…`. Ordinary routes retain the installation-qualified author; Companion can also match the verified home-workspace author from its authorized source. An unrelated workspace prefix is not an alias. Native authorization is rechecked before replies, without replacing the original conversation author or route.
 
 Inline replies show source 👀 while working, remove it on completion/cancel, and show ❌ on failure. Native-thread replies use working/awaiting-input/ready status only, with **no eyes or reaction fallback**. Indicators are aggregated and restart-cleaned. An API success is not proof that a particular Slack client renders the indicator.
+
+While a Slack turn is running, Hermes tool-progress notices update a native task card when the connection, source thread, and API support task streaming. Inline conversations and unsupported installations use one ordinary progress message edited in place; the plugin never creates a thread solely for progress. Both paths preserve the original destination, omit delegation identifiers and tool arguments, and coexist with Working/Stop. Updates are coalesced and paced; completion, Stop, and failure finish the original progress display. Final replies and approval prompts stay separate.
+
+Task streaming is detected automatically through the connection's capabilities and requires no additional app-manifest scopes beyond `chat:write`. An unsupported start may fall back to ordinary progress, but an unknown or timed-out stream operation never creates a replacement message. Restart cleanup looks up the original operation before closing a stream. The plugin uses the authenticated Inkbox SDK transport for stream routes until typed methods are available in its minimum SDK version; it never handles Slack bot credentials directly.
 
 ### Native iMessage replies
 
