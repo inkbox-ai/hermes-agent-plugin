@@ -1,4 +1,4 @@
-"""Narrow task-stream transport using the authenticated Inkbox SDK connection."""
+"""Task-stream access through the authenticated Inkbox SDK resource."""
 
 from __future__ import annotations
 
@@ -17,16 +17,20 @@ class StreamOperation:
 
 
 class SlackTaskStreams:
-    """Bridge stream routes until the published SDK exposes typed stream methods.
+    """Prefer typed stream methods while older supported SDKs finish upgrading.
 
     Keep credentials, base URL, timeouts, and connection ownership in the SDK;
-    never access Slack tokens or accept arbitrary paths. Replace this bridge when
-    typed resource methods are available at the plugin's minimum SDK version.
+    never access Slack tokens or accept arbitrary paths. Remove the transport
+    fallback when typed methods are available at the minimum SDK version.
     """
 
     def __init__(self, resource):
         self.resource = resource
-        self.http = vars(resource).get("_http")
+        methods = ("start_stream", "append_stream", "stop_stream", "get_operation_by_key")
+        # Inspect the class so dynamic proxy/mock attributes cannot advertise
+        # methods which do not actually exist on the resource.
+        self.typed = all(callable(getattr(type(resource), name, None)) for name in methods)
+        self.http = None if self.typed else vars(resource).get("_http")
 
     @staticmethod
     def _base(route):
@@ -35,7 +39,7 @@ class SlackTaskStreams:
     def capable(self, route):
         # Ordinary inline DMs must not acquire an unexpected thread just to show
         # task cards. Recipient and thread coordinates come only from admission.
-        if self.http is None or not all(route.get(k) for k in ("thread_ts", "actor_id", "workspace_id")):
+        if (not self.typed and self.http is None) or not all(route.get(k) for k in ("thread_ts", "actor_id", "workspace_id")):
             return False
         try:
             capabilities = self.resource.capabilities(route["connection_id"])
@@ -46,6 +50,8 @@ class SlackTaskStreams:
 
     @staticmethod
     def _parse(raw, route, kind):
+        if not isinstance(raw, dict):
+            raw = vars(raw)
         if (not isinstance(raw, dict) or raw.get("operation") != kind
                 or str(raw.get("connection_id")) != str(route["connection_id"])
                 or raw.get("conversation_id") != route["conversation_id"]
@@ -58,6 +64,21 @@ class SlackTaskStreams:
         return StreamOperation(operation_id, raw["status"], timestamp, raw.get("error_code"), raw.get("retry_after"))
 
     def write(self, route, *, kind, key, chunks, stream_id=None):
+        if self.typed:
+            args = (route["connection_id"], route["conversation_id"])
+            kwargs = {"chunks": chunks, "idempotency_key": key}
+            if kind == "stream_start":
+                result = self.resource.start_stream(*args, **kwargs, thread_ts=route["thread_ts"],
+                    recipient_user_id=route["actor_id"], recipient_team_id=route["workspace_id"],
+                    task_display_mode="timeline")
+            elif kind in {"stream_append", "stream_stop"}:
+                method = self.resource.append_stream if kind == "stream_append" else self.resource.stop_stream
+                result = method(*args, str(UUID(str(stream_id))), **kwargs)
+            else:
+                raise ValueError("Invalid task-stream operation kind")
+            # A typed call may already have reached Slack. Never fall through to
+            # the older transport after a failure or an unconfirmed response.
+            return self._parse(result, route, kind)
         path = f"{self._base(route)}/conversations/{quote(route['conversation_id'], safe='')}/streams"
         body = {"chunks": chunks}
         if kind == "stream_start":
@@ -71,5 +92,8 @@ class SlackTaskStreams:
         return self._parse(raw, route, kind)
 
     def lookup(self, route, *, kind, key):
-        raw = self.http.get(f"{self._base(route)}/operations/by-key", headers={"Idempotency-Key": key})
+        if self.typed:
+            raw = self.resource.get_operation_by_key(route["connection_id"], idempotency_key=key)
+        else:
+            raw = self.http.get(f"{self._base(route)}/operations/by-key", headers={"Idempotency-Key": key})
         return self._parse(raw, route, kind)

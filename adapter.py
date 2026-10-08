@@ -91,6 +91,7 @@ import socket as _socket
 import time
 import uuid
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -238,6 +239,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     )
 
 logger = logging.getLogger(__name__)
+_host_final_reply = ContextVar("inkbox_host_final_reply", default=None)
 
 
 class _ExpectedTunnelIdleFilter(logging.Filter):
@@ -2147,6 +2149,15 @@ class InkboxAdapter(BasePlatformAdapter):
         # The durable receiver, not the host's formatting fallback, owns retries.
         return bool((getattr(result, "raw_response", None) or {}).get("inkbox_no_retry"))
 
+    async def _send_final_text(self, event, *args, **kwargs):
+        # Only the host's final-delivery boundary can bypass narration filters;
+        # externally supplied notify metadata is not equivalent authority.
+        token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
+        try:
+            return await super()._send_final_text(event, *args, **kwargs)
+        finally:
+            _host_final_reply.reset(token)
+
     async def _extract_response_content(self, response, event, session_key, **kwargs):
         extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
         native = getattr(self, "_native_turns", None)
@@ -2958,11 +2969,15 @@ class InkboxAdapter(BasePlatformAdapter):
             turn.get("answer"), turn.get("result"), rendered.get("text_content") if isinstance(rendered, dict) else None,
         ) if isinstance(value, str)))
 
+    @staticmethod
+    def _is_host_final_reply(chat_id, turn):
+        return bool(turn and _host_final_reply.get() == (str(chat_id), str(turn["id"])))
+
     async def _send_slack_progress(self, chat_id, content, metadata=None, reply_to=None, message_id=None):
         route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
         if route is None and message_id is None:
             return None
-        if self._matches_checkpointed_reply(turn, content):
+        if self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn):
             return None
         status = _slack_progress_status(content, metadata, known_handle=message_id is not None)
         if status is None:
@@ -3450,7 +3465,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if _is_hermes_admin_notice(content, metadata):
             route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
             explicit_notice = str((metadata or {}).get("notice_type") or "").strip().lower() in _ADMIN_NOTICE_METADATA_TYPES
-            if not (route is not None and not explicit_notice and self._matches_checkpointed_reply(turn, content)):
+            if not (route is not None and not explicit_notice and (
+                    self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn))):
                 logger.debug(
                     "[Inkbox] Suppressed admin notice for chat %s: %s…",
                     chat_id, (content or "")[:60].replace("\n", " "),

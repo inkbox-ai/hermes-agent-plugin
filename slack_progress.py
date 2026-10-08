@@ -275,10 +275,16 @@ class SlackProgress:
                         continue
                     record["message_ts"] = result.message_ts
                 elif record.get("uncertain"):
-                    if not record.get("operation_id"):
-                        continue
-                    result = await asyncio.to_thread(self.resource.get_operation,
-                        record["route"]["connection_id"], record["operation_id"])
+                    if record.get("operation_id"):
+                        result = await asyncio.to_thread(self.resource.get_operation,
+                            record["route"]["connection_id"], record["operation_id"])
+                    else:
+                        # A timed-out PATCH has no returned operation id, but its
+                        # exact key was durable before the original effect.
+                        result = await asyncio.to_thread(self.streams.lookup, record["route"],
+                            kind="message_update", key=f"hermes:progress:{key}:{record['revision']}")
+                        if result.status == "succeeded" and result.message_ts != record["message_ts"]:
+                            continue
                     if result.status not in {"succeeded", "failed"}:
                         continue
                 record.pop("uncertain", None)
