@@ -737,3 +737,11 @@ local allowlist:
 ```bash
 INKBOX_ALLOW_ALL_USERS=true
 ```
+
+## Send delivery outcomes
+
+SMS and iMessage send tools wait up to five seconds for a delivery update, checking every half second. Results include `status`, `service`, `delivery_final`, `error_code`, `error_detail`, and a readable `note`. A non-final result is still in flight: read its status later; do not send it again. A final result can also be a failure or an unconfirmed outcome, not just successful delivery.
+
+For 1:1 iMessage/RCS, delivered or failed is final. For iMessage groups and messages sent as SMS through the iMessage channel, sent is final but does not prove receipt on a device. Ordinary SMS/MMS waits for a delivery receipt or terminal failure/unconfirmed status. Pending iMessage sends report transport as unknown.
+
+`INKBOX_SEND_POLL_SECONDS` (default `5`, maximum `10`) and `INKBOX_SEND_POLL_INTERVAL_SECONDS` (default `0.5`, minimum `0.05`) tune the observation window, with at most 20 reads. A failed or timed-out status read returns the last known state and never repeats the send. The API's finality field is preferred when available, with compatibility for older SDKs.

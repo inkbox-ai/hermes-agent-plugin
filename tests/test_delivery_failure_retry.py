@@ -1316,3 +1316,15 @@ def test_email_send_to_webhook_correlation_flow():
 
     # Verify terminal cleanup
     assert msg_id not in adapter._outbound_context
+
+
+def test_inline_failure_counts_once_without_retry_wakeup(monkeypatch, tmp_path):
+    from inkbox_plugin import send_outcome
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _adapter(FakeIdentity(), contact={"id": "contact-123", "name": "Kim"})
+    envelope = _delivery_failed_envelope()
+    send_outcome._mark(envelope["data"]["text_message"]["id"], "inline")
+    asyncio.run(adapter._on_text_lifecycle(envelope))
+    asyncio.run(adapter._on_text_lifecycle(envelope))
+    assert not adapter._enqueued
+    assert max(row["attempts"] for row in adapter._outbound_failure_state.values()) == 1

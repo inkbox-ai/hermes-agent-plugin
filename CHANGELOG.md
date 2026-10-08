@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.20 (unreleased)
+
+- Send tools wait briefly for delivery updates and report status, transport, finality, and a plain-English outcome without repeating a send.
+- Suppress duplicate delivery-failure wakeups after an inline result while preserving retry accounting and native reply ownership.
+
 ## Unreleased
 
 - Add `inkbox_slack_download_file_preview` to save available Slack image previews locally for vision inspection, without requiring a public image URL.

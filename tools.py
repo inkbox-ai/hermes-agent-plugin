@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+try:
+    from .send_outcome import poll_send_outcome
+except ImportError:
+    from send_outcome import poll_send_outcome
+
 import dataclasses
 import json
 import mimetypes
@@ -887,7 +892,7 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),
             "to": None if conversation_id else payload.get("to"),
-            "status": object_summary(getattr(msg, "delivery_status", None) or getattr(msg, "status", None)),
+            **poll_send_outcome(_client, identity, "sms", msg),
         })
     except Exception as exc:
         return _json(_safe_tool_error(exc))
@@ -1145,8 +1150,7 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             "conversation_id": _json_safe(
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),
-            "service": _json_safe(getattr(msg, "service", None)),
-            "status": _json_safe(getattr(msg, "status", None)),
+            **poll_send_outcome(_client, identity, "imessage", msg, group=len(to_list or []) > 1),
         })
     except Exception as exc:
         return _json({"error": str(exc)})
