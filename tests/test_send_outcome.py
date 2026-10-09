@@ -149,3 +149,17 @@ def test_repeated_observation_cannot_erase_inline_report():
     subject._mark("repeat", "inline")
     subject.poll_send_outcome(None, None, "sms", {"id": "repeat", "status": "queued"})
     assert asyncio.run(subject.reported_inline("repeat"))
+
+
+def test_ambiguous_send_is_final_but_unknown_and_must_not_be_resent():
+    result = subject.outcome({"status": "error", "error_code": "send_outcome_ambiguous", "error_message": "Delivery could not be confirmed."}, "imessage")
+    assert result["delivery_final"]
+    assert result["error_detail"] == "Delivery could not be confirmed."
+    assert "unknown; do not resend" in result["note"]
+    assert "Delivery failed" not in result["note"]
+
+
+def test_rejection_preserves_explanation_from_error_message():
+    result = subject.outcome({"status": "error", "error_code": "message_send_rejected", "error_message": "Message content could not be sent."}, "imessage")
+    assert result["error_detail"] == "Message content could not be sent."
+    assert "Message content could not be sent." in result["note"]

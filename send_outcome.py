@@ -36,8 +36,11 @@ def outcome(message: Any, kind: str, *, group: bool = False) -> dict:
         final = status in FAILURES or status == "delivered" or (
             kind == "sms" and status == "delivery_unconfirmed"
         ) or (kind == "imessage" and status == "sent" and (service == "sms" or group))
-    detail = value(message, "error_detail", "errorDetail", "error_message", "errorMessage")
-    if status in FAILURES:
+    detail = value(message, "error_detail", "errorDetail") or value(message, "error_message", "errorMessage")
+    code = value(message, "error_code", "errorCode")
+    if code == "send_outcome_ambiguous" or value(message, "error_reason", "errorReason") == "delivery_unconfirmed":
+        note = "Delivery could not be confirmed. The outcome is unknown; do not resend."
+    elif status in FAILURES:
         note = "Delivery failed: " + (str(detail) if detail else "the message could not be delivered.")
     elif status == "delivery_unconfirmed":
         note = "No delivery receipt was received; the outcome is unknown. Do not resend."
@@ -51,7 +54,7 @@ def outcome(message: Any, kind: str, *, group: bool = False) -> dict:
     else:
         note = "Still in flight. Re-read the message for the outcome; do not resend."
     return {"status": status, "service": service, "delivery_final": final,
-            "error_code": value(message, "error_code", "errorCode"), "error_detail": detail, "note": note}
+            "error_code": code, "error_detail": detail, "note": note}
 
 
 def _setting(name: str, default: float, maximum: float, minimum: float = 0) -> float:
