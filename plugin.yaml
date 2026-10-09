@@ -154,6 +154,7 @@ provides_tools:
   - inkbox_slack_get_action
   - inkbox_slack_upload_file
   - inkbox_slack_get_operation
+  - inkbox_slack_download_file_preview
   - inkbox_list_vault_secrets
   - inkbox_get_vault_secret
   - inkbox_get_totp_code
