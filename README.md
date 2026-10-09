@@ -668,9 +668,10 @@ A superseding instruction denies unresolved permission requests without clearing
 
 ## Development Commands
 
-Development installs and PR checks use the published Inkbox SDK (`>=0.7.11,<1.0.0`).
+Development installs use the published Inkbox SDK (`>=0.7.15,<1.0.0`); PR checks
+also exercise older SDK compatibility boundaries.
 
-SDK versions 0.7.11–0.7.15 inspect certificate-store statistics that native platform
+SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:
 unsupported statistics retain the same verifying context, roots and hostname
 checks; a known-empty store retains the SDK's certificate-bundle fallback. It
