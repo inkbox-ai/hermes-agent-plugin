@@ -4,7 +4,9 @@ import asyncio
 import builtins
 import logging
 import ssl
+from importlib.metadata import version
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from inkbox.tunnels.client import _runtime, _tls
@@ -18,12 +20,16 @@ def restore_factories(monkeypatch):
     monkeypatch.setattr(_runtime, 'create_default_verify_context', _runtime.create_default_verify_context)
 
 
-def test_published_sdk_factory_is_adapted_idempotently_under_concurrency():
+def test_sdk_factory_is_adapted_only_when_needed_under_concurrency():
     context_class, default_factory = ssl.SSLContext, ssl.create_default_context
+    original = _tls.create_default_verify_context
+    needs_adapter = version('inkbox') in tunnel_tls._VERSIONS
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        assert all(pool.map(lambda _: tunnel_tls.install_tunnel_tls_compatibility(), range(24)))
-    assert _tls.create_default_verify_context is tunnel_tls._verify_context
-    assert _runtime.create_default_verify_context is tunnel_tls._verify_context
+        results = list(pool.map(lambda _: tunnel_tls.install_tunnel_tls_compatibility(), range(24)))
+    assert results == [needs_adapter] * 24
+    expected = tunnel_tls._verify_context if needs_adapter else original
+    assert _tls.create_default_verify_context is expected
+    assert _runtime.create_default_verify_context is expected
     assert ssl.SSLContext is context_class and ssl.create_default_context is default_factory
 
 
@@ -103,7 +109,7 @@ def test_missing_factory_leaves_other_binding_untouched(monkeypatch):
     assert not hasattr(_tls, 'create_default_verify_context')
 
 
-def test_gateway_adapts_before_connecting_tunnel(monkeypatch, tmp_path):
+def test_gateway_supports_native_verifier_before_connecting_tunnel(monkeypatch, tmp_path):
     from inkbox_plugin import adapter as adapter_module
     gateway = adapter_module.InkboxAdapter.__new__(adapter_module.InkboxAdapter)
     gateway._identity_handle = 'local-fixture'
@@ -111,10 +117,14 @@ def test_gateway_adapts_before_connecting_tunnel(monkeypatch, tmp_path):
     gateway._port = 8765
     gateway._inkbox = object()
     monkeypatch.setattr(adapter_module, '_inkbox_tunnel_state_dir', lambda: tmp_path / 'tunnel')
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    monkeypatch.setattr(context, 'cert_store_stats', Mock(side_effect=NotImplementedError))
+    monkeypatch.setattr(ssl, 'create_default_context', lambda: context)
     calls = []
     def connect(client, **kwargs):
         assert client is gateway._inkbox
-        assert _runtime.create_default_verify_context is tunnel_tls._verify_context
+        assert _runtime.create_default_verify_context() is context
+        assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
         calls.append(kwargs)
         return SimpleNamespace(wait=lambda: None, public_url='https://localhost', tunnel=SimpleNamespace(public_host='localhost'))
     monkeypatch.setattr(adapter_module, 'inkbox_tunnel_connect', connect)

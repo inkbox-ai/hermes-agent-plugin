@@ -11,6 +11,11 @@
 - Prefer typed SDK task-stream methods when available while preserving compatibility with older supported SDKs and uncertain-delivery handling.
 - Preserve confirmed progress outcomes across reconnects; describe unconfirmed disconnect cleanup as paused rather than claiming the run was stopped.
 
+## 0.2.20
+
+- Restore tunnels with Inkbox SDK 0.7.16 and native platform certificate verifiers.
+- Keep TLS compatibility checks valid for newer SDKs that handle certificate-store inspection themselves.
+
 ## 0.2.19
 
 - Add opt-in Slack tools, guided workspace installation, signed channel reception, channel-wide Companion, exact-thread controls, and inline/thread-specific activity.

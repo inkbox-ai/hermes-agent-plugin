@@ -78,10 +78,10 @@ async def check(plugin: Path, directory: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     original_factory = _tls.create_default_verify_context
-    assert module.install_tunnel_tls_compatibility(), 'inspected SDK factory was not adapted'
-    assert module.install_tunnel_tls_compatibility(), 'adapter is not idempotent'
+    adapted = module.install_tunnel_tls_compatibility()
+    assert module.install_tunnel_tls_compatibility() == adapted, 'adapter is not idempotent'
     assert _runtime.create_default_verify_context is _tls.create_default_verify_context
-    assert original_factory is not _tls.create_default_verify_context
+    assert (_tls.create_default_verify_context is not original_factory) == adapted
 
     async def accept(reader, writer):
         try:
