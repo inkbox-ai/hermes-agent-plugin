@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.20 (unreleased)
+## 0.2.21 (unreleased)
 
 - Send tools wait briefly for delivery updates and report status, transport, finality, and a plain-English outcome without repeating a send.
 - Suppress duplicate delivery-failure wakeups after an inline result while preserving retry accounting and native reply ownership.
