@@ -79,6 +79,11 @@ semantics).
 
 from __future__ import annotations
 
+try:
+    from .send_outcome import reported_inline
+except ImportError:
+    from send_outcome import reported_inline
+
 import asyncio
 import hashlib
 import json
@@ -7114,6 +7119,7 @@ class InkboxAdapter(BasePlatformAdapter):
         error_code: Optional[str],
         error_detail: Optional[str],
         stage: str,
+        reported_inline_id: str = "",
         contact: Optional[Dict[str, Any]] = None,
         original_route: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -7155,6 +7161,8 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return
         attempts = self._record_outbound_failure(keys)
+        if await reported_inline(reported_inline_id):
+            return
         if attempts >= OUTBOUND_FAILURE_MAX_ATTEMPTS:
             logger.error(
                 "[Inkbox] Outbound %s to %s failed %d/%d times (%s %s) — retry budget exhausted, thread goes quiet",
@@ -7500,6 +7508,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 error_code=str(error_code) if error_code else None,
                 error_detail=str(error_detail) if error_detail else None,
                 stage="delivery_failed",
+                reported_inline_id=text_id,
                 contact=contact,
                 original_route=(ctx or {}).get("reply_route"),
             )
@@ -7974,6 +7983,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 error_code=str(error_code) if error_code else None,
                 error_detail=str(error_detail) if error_detail else None,
                 stage="delivery_failed",
+                reported_inline_id=message_id,
                 contact=contact,
                 original_route=(ctx or {}).get("reply_route"),
             )
