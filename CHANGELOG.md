@@ -17,6 +17,7 @@
 - Surface terminal tunnel failures without retrying rejected credentials or replacing another active client.
 - Keep the gateway process and readiness endpoint available when a tunnel terminates after adapter startup.
 - Ignore stale shutdown callbacks and prevent startup from reporting a stopped tunnel as connected.
+- Preserve terminal tunnel status when the host publishes delayed startup or reconnect results.
 
 ## 0.2.20
 

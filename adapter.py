@@ -2443,6 +2443,7 @@ class InkboxAdapter(BasePlatformAdapter):
     async def connect(self, is_reconnect: bool = False, **kwargs) -> bool:
         self._a2a_closing = False
         self._tunnel_startup_complete = False
+        self._guard_host_tunnel_status()
         if not check_inkbox_requirements():
             logger.warning(
                 "[Inkbox] aiohttp or `inkbox` SDK not installed. "
@@ -2684,6 +2685,38 @@ class InkboxAdapter(BasePlatformAdapter):
             or self._tunnel is None
             or not self._tunnel.is_connected
         )
+
+    def _guard_host_tunnel_status(self) -> None:
+        """Preserve terminal status when the host publishes a saved connect result."""
+        owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+        publish = getattr(owner, "_update_platform_runtime_status", None)
+        if not callable(publish) or getattr(publish, "_inkbox_tunnel_status_guard", False):
+            return
+        from functools import wraps
+        platform_key = self.platform
+
+        @wraps(publish)
+        def guarded(platform, **status):
+            # Both startup aggregation and reconnect installation can outlive
+            # connect(). Only the currently installed primary owns this status;
+            # stale adapters, other platforms/profiles and shutdown pass through.
+            current = getattr(owner, "adapters", {}).get(platform_key)
+            if (
+                platform == platform_key.value
+                and status.get("platform_state") in {"connected", "retrying"}
+                and getattr(current, "_tunnel_startup_complete", False)
+                and getattr(current, "_tunnel_generation", None) is not None
+                and getattr(current, "_tunnel_terminal_reason", None) is not None
+                and current.has_fatal_error and not current.fatal_error_retryable
+            ):
+                status.update(
+                    platform_state="fatal", error_code=current.fatal_error_code,
+                    error_message=current.fatal_error_message, needs_attention=True, retrying_since=None,
+                )
+            return publish(platform, **status)
+
+        guarded._inkbox_tunnel_status_guard = True
+        owner._update_platform_runtime_status = guarded
 
     def _publish_tunnel_readiness(self) -> None:
         """Publish SDK recovery without asking the host to open another tunnel."""
