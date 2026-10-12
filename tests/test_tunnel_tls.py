@@ -111,7 +111,7 @@ def test_missing_factory_leaves_other_binding_untouched(monkeypatch):
 
 def test_gateway_supports_native_verifier_before_connecting_tunnel(monkeypatch, tmp_path):
     from inkbox_plugin import adapter as adapter_module
-    gateway = adapter_module.InkboxAdapter.__new__(adapter_module.InkboxAdapter)
+    gateway = adapter_module.InkboxAdapter(adapter_module.PlatformConfig(extra={"identity": "local-fixture"}))
     gateway._identity_handle = 'local-fixture'
     gateway._tunnel_name_override = ''
     gateway._port = 8765
@@ -130,4 +130,5 @@ def test_gateway_supports_native_verifier_before_connecting_tunnel(monkeypatch, 
     monkeypatch.setattr(adapter_module, 'inkbox_tunnel_connect', connect)
     assert asyncio.run(gateway._provision_inkbox_tunnel())
     gateway._tunnel_runtime_thread.join(timeout=2)
+    assert callable(calls[0].pop('on_status'))
     assert calls == [{'name': 'local-fixture', 'forward_to': 'http://127.0.0.1:8765', 'state_dir': tmp_path / 'tunnel'}]
