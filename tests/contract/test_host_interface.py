@@ -92,7 +92,8 @@ def test_send_result_accepts_plugin_fields():
 
 @pytest.mark.parametrize(
     "method",
-    ["_acquire_platform_lock", "_release_platform_lock", "build_source", "handle_message"],
+    ["_acquire_platform_lock", "_release_platform_lock", "build_source", "handle_message",
+     "_set_fatal_error", "_notify_fatal_error", "_write_runtime_status_safe"],
 )
 def test_base_adapter_methods_present(method):
     from gateway.platforms.base import BasePlatformAdapter

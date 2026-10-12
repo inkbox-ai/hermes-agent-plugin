@@ -284,6 +284,14 @@ INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=180
 
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
 
+The local adapter's `GET /health` is a readiness check, not process liveness.
+It returns 503 while startup or tunnel recovery is incomplete. A terminal tunnel
+exit is reported in gateway status and stops the adapter; its HTTP listener may
+then be unavailable. Transient reconnection remains SDK-managed. Rejected
+credentials and replacement by another client require operator attention; the
+plugin does not reopen a terminal listener. With `INKBOX_PUBLIC_URL`, readiness continues
+to describe adapter startup and does not probe the externally hosted URL.
+
 Verified inbound events include generated memories for the matched sender or caller by default. They are added as background context and are never treated as instructions. Disable them with `INKBOX_CONTACT_MEMORIES_ENABLED=false`, or override the environment setting in Hermes config:
 
 ```yaml

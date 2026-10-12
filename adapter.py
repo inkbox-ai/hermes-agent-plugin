@@ -2311,6 +2311,10 @@ class InkboxAdapter(BasePlatformAdapter):
         self._site: Optional[Any] = None
         self._tunnel: Optional[Any] = None  # inkbox.tunnels.client.TunnelListener
         self._tunnel_runtime_thread: Optional["threading.Thread"] = None
+        self._tunnel_generation: object | None = None
+        self._tunnel_terminal_reason: tuple[str, str] | None = None
+        self._tunnel_startup_complete = False
+        self._tunnel_failure_tasks: set[asyncio.Task] = set()
         # contact_id → active call WebSocket. Used by send()/edit_message() to
         # push voice replies to the correct ongoing call.
         self._active_call_ws: Dict[str, Any] = {}
@@ -2439,6 +2443,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def connect(self, is_reconnect: bool = False, **kwargs) -> bool:
         self._a2a_closing = False
+        self._tunnel_startup_complete = False
         if not check_inkbox_requirements():
             logger.warning(
                 "[Inkbox] aiohttp or `inkbox` SDK not installed. "
@@ -2552,10 +2557,21 @@ class InkboxAdapter(BasePlatformAdapter):
             return False
         await self._catch_up_hosted_call_completions()
         await self._catch_up_a2a_tasks()
+        if self._tunnel is not None:
+            # A terminal callback may still be queued behind startup work.
+            self._handle_tunnel_status(self._tunnel_generation, self._tunnel.status)
+            if not self._tunnel_runtime_thread.is_alive():
+                self._handle_tunnel_exit(self._tunnel_generation)
+        if self._tunnel_terminal_reason is not None:
+            await self._cleanup()
+            self._release_platform_lock()
+            return False
         # The host publishes this as live runtime status. Catch-up can still
         # fail or be cancelled by its connection deadline, so publish only
         # once every awaited startup operation has finished.
+        self._tunnel_startup_complete = True
         self._mark_connected()
+        self._publish_tunnel_readiness()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
             self._identity_handle, self._public_url, self._host, self._port,
@@ -2571,6 +2587,9 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        # Invalidate callbacks before close() unblocks the listener thread.
+        self._tunnel_generation = None
+        self._tunnel_startup_complete = False
         self._a2a_closing = True
         if getattr(self, "_native_turns", None) is not None:
             await self._native_turns.close()
@@ -2656,6 +2675,67 @@ class InkboxAdapter(BasePlatformAdapter):
     # Bootstrap helpers
     # ------------------------------------------------------------------
 
+    @property
+    def send_path_degraded(self) -> bool:
+        """Report a managed tunnel's actual receive readiness to the host."""
+        if self._public_url_override:
+            return False
+        return (
+            self._tunnel_terminal_reason is not None
+            or self._tunnel is None
+            or not self._tunnel.is_connected
+        )
+
+    def _publish_tunnel_readiness(self) -> None:
+        """Publish SDK recovery without asking the host to open another tunnel."""
+        if not self._tunnel_startup_complete or self._tunnel_terminal_reason is not None:
+            return
+        degraded = self.send_path_degraded
+        self._write_runtime_status_safe(
+            "tunnel_readiness",
+            platform_state="retrying" if degraded else "connected",
+            error_code=None,
+            error_message="Tunnel reconnecting" if degraded else None,
+        )
+
+    def _handle_tunnel_status(self, generation: object, status: str) -> None:
+        """Consume an SDK status callback on the gateway event loop."""
+        if generation is not self._tunnel_generation or generation is None:
+            return
+        if status in {"closed", "superseded"}:
+            self._handle_tunnel_exit(generation, superseded=status == "superseded")
+        else:
+            self._publish_tunnel_readiness()
+
+    def _handle_tunnel_exit(self, generation: object, *, superseded: bool = False) -> None:
+        """Make an unexpected waiter completion terminal exactly once."""
+        if generation is not self._tunnel_generation or generation is None:
+            return
+        if self._tunnel_terminal_reason is not None:
+            return
+        reason = (
+            ("tunnel_superseded", "Another tunnel client replaced this gateway.")
+            if superseded else
+            ("tunnel_stopped", "Tunnel stopped. Check the gateway logs before restarting.")
+        )
+        self._tunnel_terminal_reason = reason
+        # Transient retry belongs to the SDK. Reopening a terminal listener
+        # here would also retry rejected credentials or reclaim another owner.
+        self._set_fatal_error(*reason, retryable=False)
+        if self._tunnel_startup_complete:
+            task = asyncio.create_task(self._notify_tunnel_failure(generation))
+            self._tunnel_failure_tasks.add(task)
+            task.add_done_callback(self._tunnel_failure_tasks.discard)
+
+    async def _notify_tunnel_failure(self, generation: object) -> None:
+        """Hand terminal cleanup to the host unless shutdown already owns it."""
+        if generation is not self._tunnel_generation:
+            return
+        try:
+            await self._notify_fatal_error()
+        except Exception:
+            logger.exception("[Inkbox] Failed to report tunnel termination to the gateway")
+
     async def _provision_inkbox_tunnel(self) -> bool:
         """Open an SDK-managed tunnel to inkboxwire.com.
 
@@ -2689,6 +2769,15 @@ class InkboxAdapter(BasePlatformAdapter):
 
         _wipe_inkbox_tunnel_state(state_dir)
 
+        loop = asyncio.get_running_loop()
+        generation = self._tunnel_generation = object()
+        self._tunnel_terminal_reason = None
+
+        def on_status(status: str) -> None:
+            # SDK callbacks run on its transport thread, not the gateway loop.
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._handle_tunnel_status, generation, status)
+
         try:
             install_tunnel_tls_compatibility()
             # ``connect`` is sync (does an HTTPS round-trip + opens the data
@@ -2700,6 +2789,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 name=tunnel_name,
                 forward_to=forward_to,
                 state_dir=state_dir,
+                on_status=on_status,
             )
         except TunnelNotProvisioned:
             # The identity exists but its tunnel does not (1:1 invariant
@@ -2734,10 +2824,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 listener.wait()
             except KeyboardInterrupt:
                 pass
-            except Exception:
-                logger.exception(
-                    "[Inkbox] Tunnel runtime exited with error",
-                )
+            except Exception as exc:
+                logger.error("[Inkbox] Tunnel runtime exited (%s)", type(exc).__name__)
+            finally:
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._handle_tunnel_exit, generation)
 
         self._tunnel_runtime_thread = threading.Thread(
             target=_drive_listener,
@@ -2750,7 +2841,7 @@ class InkboxAdapter(BasePlatformAdapter):
         self._public_url = self._tunnel.public_url.rstrip("/")
         self._public_host = self._tunnel.tunnel.public_host
         logger.info(
-            "[Inkbox] Tunnel ready: %s → 127.0.0.1:%d",
+            "[Inkbox] Tunnel listener started: %s → 127.0.0.1:%d",
             self._public_url, self._port,
         )
         return True
@@ -4050,9 +4141,14 @@ class InkboxAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
-        ready = self.is_connected
+        ready = self.is_connected and not self.send_path_degraded
+        status = "ok" if ready else "starting"
+        if self._tunnel_terminal_reason is not None:
+            status = "unavailable"
+        elif not ready and self._tunnel_startup_complete:
+            status = "reconnecting"
         return web.json_response({
-            "status": "ok" if ready else "starting",
+            "status": status,
             "platform": "inkbox",
             "identity": self._identity_handle,
             "public_url": self._public_url,

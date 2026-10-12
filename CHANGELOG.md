@@ -11,6 +11,12 @@
 - Prefer typed SDK task-stream methods when available while preserving compatibility with older supported SDKs and uncertain-delivery handling.
 - Preserve confirmed progress outcomes across reconnects; describe unconfirmed disconnect cleanup as paused rather than claiming the run was stopped.
 
+## 0.2.21
+
+- Report tunnel disconnections in readiness and gateway status, and restore readiness after SDK-managed recovery.
+- Surface terminal tunnel failures without retrying rejected credentials or replacing another active client.
+- Ignore stale shutdown callbacks and prevent startup from reporting a stopped tunnel as connected.
+
 ## 0.2.20
 
 - Restore tunnels with Inkbox SDK 0.7.16 and native platform certificate verifiers.
