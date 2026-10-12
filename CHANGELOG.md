@@ -15,6 +15,7 @@
 
 - Report tunnel disconnections in readiness and gateway status, and restore readiness after SDK-managed recovery.
 - Surface terminal tunnel failures without retrying rejected credentials or replacing another active client.
+- Keep the gateway process and readiness endpoint available when a tunnel terminates after adapter startup.
 - Ignore stale shutdown callbacks and prevent startup from reporting a stopped tunnel as connected.
 
 ## 0.2.20

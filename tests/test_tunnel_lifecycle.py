@@ -1,4 +1,4 @@
-"""Exercise threaded transport status, startup, and host-owned terminal cleanup."""
+"""Exercise threaded transport status, startup, and independent gateway liveness."""
 from __future__ import annotations
 
 import asyncio
@@ -92,7 +92,7 @@ def runtime(monkeypatch, tmp_path):
 
 
 async def drain():
-    # Thread callbacks and the separately retained host notification get turns.
+    # Give callbacks scheduled from the SDK thread gateway-loop turns.
     for _ in range(5):
         await asyncio.sleep(0)
 
@@ -145,7 +145,7 @@ def test_terminal_waiter_failure_is_visible_and_never_retries(runtime, failure):
         assert not adapter.is_connected
         assert adapter.has_fatal_error and not adapter.fatal_error_retryable
         assert adapter.fatal_error_code == ("tunnel_superseded" if failure == "superseded" else "tunnel_stopped")
-        assert runtime.notifications == [adapter]
+        assert not runtime.notifications
         assert len(runtime.calls) == 1
         assert "private error" not in str(runtime.statuses)
         # Delayed connected status cannot resurrect a terminated generation.
@@ -177,6 +177,7 @@ def test_terminal_exit_during_startup_cannot_be_overwritten(runtime, monkeypatch
         # Failed connect is returned to the host; no concurrent teardown callback.
         assert not runtime.notifications
         assert runtime.listener.close_calls == 1
+        assert runtime.adapter._site is None
         assert not any(status["platform_state"] == "connected" for _, status in runtime.statuses)
     asyncio.run(scenario())
 
@@ -219,7 +220,7 @@ def test_stale_generation_and_shutdown_completion_cannot_change_status(runtime):
     asyncio.run(scenario())
 
 
-def test_shutdown_before_queued_notification_suppresses_host_recovery(runtime):
+def test_shutdown_after_terminal_status_does_not_request_recovery(runtime):
     async def scenario():
         adapter = runtime.adapter
         assert await adapter.connect()
@@ -231,20 +232,25 @@ def test_shutdown_before_queued_notification_suppresses_host_recovery(runtime):
     asyncio.run(scenario())
 
 
-def test_host_terminal_cleanup_closes_adapter_without_new_owner(runtime):
+def test_terminal_exit_keeps_local_http_readiness_available(runtime):
     async def scenario():
+        from aiohttp import ClientSession
+
         adapter = runtime.adapter
-        completed = asyncio.Event()
-        async def host_cleanup(failed):
-            assert not failed.fatal_error_retryable
-            await failed.disconnect()
-            completed.set()
-        adapter.set_fatal_error_handler(host_cleanup)
         assert await adapter.connect()
         await asyncio.to_thread(runtime.listener.finish)
-        await asyncio.wait_for(completed.wait(), 3)
-        assert adapter._site is None and adapter._tunnel is None
+        await asyncio.to_thread(adapter._tunnel_runtime_thread.join, 2)
+        await drain()
+        port = adapter._runner.addresses[0][1]
+        async with ClientSession() as client:
+            async with client.get(f"http://127.0.0.1:{port}/health") as response:
+                assert response.status == 503
+                assert (await response.json())["status"] == "unavailable"
+        assert not runtime.notifications
+        assert adapter._site is not None and adapter._tunnel is runtime.listener
         assert len(runtime.calls) == 1
+        assert runtime.listener.close_calls == 0
+        await adapter.disconnect()
         assert runtime.listener.close_calls == 1
     asyncio.run(scenario())
 

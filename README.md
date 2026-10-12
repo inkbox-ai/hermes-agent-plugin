@@ -285,9 +285,11 @@ INKBOX_A2A_PROGRESS_INTERVAL_SECONDS=180
 Without `INKBOX_PUBLIC_URL`, the adapter uses the Inkbox SDK tunnel.
 
 The local adapter's `GET /health` is a readiness check, not process liveness.
-It returns 503 while startup or tunnel recovery is incomplete. A terminal tunnel
-exit is reported in gateway status and stops the adapter; its HTTP listener may
-then be unavailable. Transient reconnection remains SDK-managed. Rejected
+It returns 503 while startup or tunnel recovery is incomplete. After adapter
+startup succeeds, a terminal tunnel exit is reported in gateway status while the
+local health endpoint remains available with 503; the gateway process is not
+stopped. Terminal failures detected during startup still refuse the connection
+and clean up the listener. Transient reconnection remains SDK-managed. Rejected
 credentials and replacement by another client require operator attention; the
 plugin does not reopen a terminal listener. With `INKBOX_PUBLIC_URL`, readiness continues
 to describe adapter startup and does not probe the externally hosted URL.

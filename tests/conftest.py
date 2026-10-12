@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import types
-import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -132,12 +131,6 @@ if not _real_host_available() and "gateway.config" not in sys.modules:
 
         def set_fatal_error_handler(self, handler):
             self._fatal_error_handler = handler
-
-        async def _notify_fatal_error(self):
-            if self._fatal_error_handler:
-                result = self._fatal_error_handler(self)
-                if asyncio.iscoroutine(result):
-                    await result
 
         @property
         def has_fatal_error(self):

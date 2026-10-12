@@ -2314,7 +2314,6 @@ class InkboxAdapter(BasePlatformAdapter):
         self._tunnel_generation: object | None = None
         self._tunnel_terminal_reason: tuple[str, str] | None = None
         self._tunnel_startup_complete = False
-        self._tunnel_failure_tasks: set[asyncio.Task] = set()
         # contact_id → active call WebSocket. Used by send()/edit_message() to
         # push voice replies to the correct ongoing call.
         self._active_call_ws: Dict[str, Any] = {}
@@ -2722,19 +2721,9 @@ class InkboxAdapter(BasePlatformAdapter):
         # Transient retry belongs to the SDK. Reopening a terminal listener
         # here would also retry rejected credentials or reclaim another owner.
         self._set_fatal_error(*reason, retryable=False)
-        if self._tunnel_startup_complete:
-            task = asyncio.create_task(self._notify_tunnel_failure(generation))
-            self._tunnel_failure_tasks.add(task)
-            task.add_done_callback(self._tunnel_failure_tasks.discard)
-
-    async def _notify_tunnel_failure(self, generation: object) -> None:
-        """Hand terminal cleanup to the host unless shutdown already owns it."""
-        if generation is not self._tunnel_generation:
-            return
-        try:
-            await self._notify_fatal_error()
-        except Exception:
-            logger.exception("[Inkbox] Failed to report tunnel termination to the gateway")
+        # The SDK closes its runtime before wait() finishes. Keep the local
+        # readiness listener alive: the host fatal callback stops the entire
+        # gateway when this is its last adapter, including unrelated work.
 
     async def _provision_inkbox_tunnel(self) -> bool:
         """Open an SDK-managed tunnel to inkboxwire.com.
