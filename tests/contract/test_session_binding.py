@@ -322,6 +322,7 @@ def test_native_group_interruption_preserves_fifo_and_protects_nonordinary_work(
     from run_agent import AIAgent
     from gateway.config import PlatformConfig
     from gateway.platforms.base import MessageEvent, MessageType, SendResult
+    from gateway.run_busy import GatewayBusySessionMixin
     from gateway.run_turn import GatewayTurnMixin
     from inkbox_plugin.adapter import InkboxAdapter
     from inkbox_plugin.conversation import ConversationState, reply_route
@@ -343,7 +344,7 @@ def test_native_group_interruption_preserves_fifo_and_protects_nonordinary_work(
         started, release, cancelled, finish_cancel = (asyncio.Event() for _ in range(4))
         seen = []
 
-        class Runner:
+        class Runner(GatewayBusySessionMixin):
             state = SimpleNamespace(turn=SimpleNamespace(event=None, agent=None))
             _draining = False
 

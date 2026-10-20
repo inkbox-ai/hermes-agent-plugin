@@ -18,7 +18,8 @@ isolated_home = native_harness.isolated_home
 @pytest.mark.parametrize("startup", [False, True])
 @pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("unsafe", [None, "explicit", "media", "reply"])
-def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, startup, detached, unsafe):
+@pytest.mark.parametrize("mode", ["slack", "imessage"])
+def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, startup, detached, unsafe, mode):
     async def run():
         value = await harness(factory, tmp_path)
         # Offline unit suite has no host process registry; model its read-only API.
@@ -26,6 +27,7 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
         monkeypatch.setitem(sys.modules, "tools.process_registry", NS(
             process_registry=NS(snapshot_running_ids=lambda task_id: set())))
         queue = value.queue
+        queue.max_burst_sources = 1  # Keep successor receipts separate in both channels.
         if detached:
             queue.completion_timeout = .06
         owner = queue._host_owner()
@@ -61,9 +63,9 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
         monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", AsyncMock(return_value=False))
         monkeypatch.setattr(queue, "_forward_control", AsyncMock())
         try:
-            await queue.accept(receipt(1, mode="slack"))
+            await queue.accept(receipt(1, mode=mode))
             await started(value)
-            await queue.accept(stop_receipt("slack"))
+            await queue.accept(stop_receipt(mode))
             row = next(iter(queue.rows.values()))
             turn = row["turns"][0]
             assert row.get("blocked") and turn["fenced"] is False
@@ -73,8 +75,8 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
                 turn["media_deliveries"] = {"upload": {"state": "uncertain"}}
             elif unsafe == "reply":
                 turn["reply_delivery_state"] = "uncertain"
-            await queue.accept(receipt(2, mode="slack"))
-            await queue.accept(receipt(3, mode="slack"))
+            await queue.accept(receipt(2, mode=mode))
+            await queue.accept(receipt(3, mode=mode))
             release.set()
             await entered.wait()
             await asyncio.sleep(.02)
@@ -91,8 +93,8 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
             assert bool(row.get("blocked")) is bool(unsafe)
             expected = [uid(1)] if unsafe else [uid(1), uid(2), uid(3)]
             assert [event.message_id for event in value.inputs] == expected
-            await queue.accept(receipt(2, mode="slack"))
-            await queue.accept(receipt(3, mode="slack"))
+            await queue.accept(receipt(2, mode=mode))
+            await queue.accept(receipt(3, mode=mode))
             await settle(queue)
             assert [event.message_id for event in value.inputs] == expected
             assert "worker_completion" not in turn  # Exit is NOT delivery reconciliation.
