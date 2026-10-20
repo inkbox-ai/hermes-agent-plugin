@@ -28,6 +28,7 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
             process_registry=NS(snapshot_running_ids=lambda task_id: set())))
         queue = value.queue
         queue.max_burst_sources = 1  # Keep successor receipts separate in both channels.
+        completion_timeout = queue.completion_timeout
         if detached:
             queue.completion_timeout = .06
         owner = queue._host_owner()
@@ -44,6 +45,8 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
 
         async def handle(event):
             if event.message_id != uid(1):
+                if detached:
+                    await asyncio.sleep(.1)  # Successors may outlive the forced detach deadline.
                 return await original(event)
             event._gateway_accepted = True
             value.inputs.append(event)
@@ -84,6 +87,7 @@ def test_stop_recovers_only_exact_exited_worker(factory, tmp_path, monkeypatch, 
             if detached:
                 await settle(queue)  # The queue has dropped its active event.
                 assert not queue.active and turn["state"] == "cancelled"
+                queue.completion_timeout = completion_timeout
             worker.worker_done.set()
             future.set_result(None)
             await asyncio.sleep(.02)
