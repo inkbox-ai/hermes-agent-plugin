@@ -65,7 +65,8 @@ class NativeTurns(CompanionReceiver):
             for turn in row["turns"]:
                 # A new process holds the exclusive owner lock. Do not replay
                 # an ambiguous model/tool/send attempt, but retain its evidence.
-                uncertain_effect = (turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                uncertain_effect = (turn.get("reply_delivery_state") in {"sending", "uncertain"}
+                    or turn.get("explicit_delivery_state") in {"sending", "uncertain"}
                     or any(item.get("state") in {"sending", "uncertain"}
                            for item in turn.get("media_deliveries", {}).values()))
                 if (turn["state"] in {"running", "sending", "control_submitting"}
@@ -84,14 +85,15 @@ class NativeTurns(CompanionReceiver):
                     self._release_context(row, turn)
                 if self._settled_proof(turn):
                     turn["fenced"] = True
-                if ((uncertain_effect and not self._settled_proof(turn))
+                if ((uncertain_effect and (turn.get("stop_worker_completion") or not self._settled_proof(turn)))
                         or (turn["state"] in {"uncertain", "cancelled"} and not turn.get("fenced"))):
                     row["blocked"] = True
                     row["error"] = "Original worker or delivery ownership is uncertain; no automatic replay"
             if row.get("blocked") and not any(
                 (turn["state"] in {"running", "sending", "uncertain", "cancelled"} and not turn.get("fenced"))
-                or (not self._settled_proof(turn) and (
-                    turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                or ((turn.get("stop_worker_completion") or not self._settled_proof(turn)) and (
+                    turn.get("reply_delivery_state") in {"sending", "uncertain"}
+                    or turn.get("explicit_delivery_state") in {"sending", "uncertain"}
                     or any(item.get("state") in {"sending", "uncertain"} for item in turn.get("media_deliveries", {}).values())))
                 for turn in row["turns"]
             ):
@@ -354,6 +356,7 @@ class NativeTurns(CompanionReceiver):
                 if turn["state"] != "running" or "submitting" in row.get("controls", {}).values():
                     return  # Stop may have completed during the activity await.
                 event._inkbox_host_dispatched = True
+                event._inkbox_worker_exited = lambda original, turn=turn: self._stopped_worker_exited(row, turn, original)
                 task = asyncio.create_task(self.adapter.handle_message(event))
                 self.dispatches.add(task)
                 task.add_done_callback(self.dispatches.discard)
@@ -373,7 +376,7 @@ class NativeTurns(CompanionReceiver):
                     self._save(row)
                     await asyncio.sleep(self.retry_delay)
                     return
-                if not (turn["state"] == "cancelled" and turn.get("fenced")):
+                if turn["state"] != "cancelled":
                     turn["state"] = "uncertain"
                     row["blocked"] = True
             finally:
@@ -393,12 +396,32 @@ class NativeTurns(CompanionReceiver):
                 if turn["state"] == "uncertain" and not turn.get("fenced"):
                     row["blocked"] = True
                     row.setdefault("error", "Original native outcome is uncertain; verify worker ownership before continuing")
+                if turn.get("stop_worker_completion"):
+                    self._clear_fenced_block(row)
                 if not self.closed:
                     self._save(row)
                 if turn["state"] != "pending":
                     await self._notify(row, turn, "completed" if turn["state"] == "done" else "cancelled" if turn["state"] == "cancelled" or self.closed else "failed")
             if row.get("blocked"):
                 return
+
+    def _stopped_worker_exited(self, row, turn, event):
+        # Bound to the original event before host dispatch, not reconstructed
+        # from a source ID or the (possibly removed/replaced) session slot.
+        if (self.closed or self.rows.get(row["key"]) is not row or turn["state"] != "cancelled"
+                or str(event.message_id) != turn["id"] or not isinstance(event.raw_message, dict)
+                or event.raw_message.get("_inkbox_native_key") != row["key"]
+                or event.raw_message.get("_inkbox_native_turn") != turn["id"]):
+            return
+        from .host_fencing import stopped_worker_proof
+        proof = stopped_worker_proof(self._host_owner(), event)
+        if proof is None:
+            return
+        turn["stop_worker_completion"] = proof
+        turn["fenced"] = True
+        self._save(row)
+        self._clear_fenced_block(row)
+        self._kick(row)
 
     def _clear_fenced_block(self, row):
         # A retained stop fence can outlive the worker's failure finalizer.
@@ -412,8 +435,9 @@ class NativeTurns(CompanionReceiver):
                     or (turn["state"] == "answer_ready" and turn.get("preflight_failure")
                         and not turn["preflight_failure"].get("retryable"))
                     or turn["state"] in {"uncertain", "cancelled"} and not turn.get("fenced")
-                    or (not self._settled_proof(turn) and (
-                        turn.get("explicit_delivery_state") in {"sending", "uncertain"}
+                    or ((turn.get("stop_worker_completion") or not self._settled_proof(turn)) and (
+                        turn.get("reply_delivery_state") in {"sending", "uncertain"}
+                        or turn.get("explicit_delivery_state") in {"sending", "uncertain"}
                         or any(item.get("state") in {"sending", "uncertain"}
                                for item in turn.get("media_deliveries", {}).values())))):
                 return False
@@ -710,6 +734,7 @@ class NativeTurns(CompanionReceiver):
         final = turn.get("rendered", {}).get("text_content", turn.get("answer")) == content
         previous_state = turn["state"]
         turn["state"] = "sending"
+        turn["reply_delivery_state"] = "sending"
         self._save(row)
         try:
             if route["mode"] == "slack":
@@ -725,6 +750,7 @@ class NativeTurns(CompanionReceiver):
             task.add_done_callback(self.outbound.discard)
             result = await asyncio.shield(task)
             message_id = str(result.id)
+            turn["reply_delivery_state"] = "sent"
             accepted = {"content": content, "message_id": message_id, "final": final}
             if route["mode"] == "imessage":
                 accepted["ancestry"] = self._outbound_ancestry(result)
@@ -740,11 +766,13 @@ class NativeTurns(CompanionReceiver):
                 self._record_outbound(row, turn, result)
             return SendResult(success=True, message_id=message_id)
         except ReplyPreflightError as exc:
+            turn.pop("reply_delivery_state", None)
             if turn["state"] == "sending":
                 turn["state"] = previous_state
             return self.preflight_failed(row, turn, exc)
         except Exception as exc:
             turn["state"] = "uncertain"
+            turn["reply_delivery_state"] = "uncertain"
             self._save(row)
             return SendResult(success=False, error=f"Native reply outcome is uncertain ({type(exc).__name__}); no plain resend", raw_response={"inkbox_no_retry": True})
 
@@ -822,6 +850,8 @@ class NativeTurns(CompanionReceiver):
             await self._notify(row, active, "cancelled")
         row["controls"][control_id] = "consumed"
         self._save(row)
+        if stopping and original is not None:
+            self._stopped_worker_exited(row, active, original)
         if stopping and fenced:
             self._clear_fenced_block(row)
         self._kick(row)

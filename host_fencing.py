@@ -97,9 +97,45 @@ def observe_native_workers(owner):
             from .imessage_state import observe_host_turn
             observe_host_turn(str(context.session_id), str(event.message_id or ""))
             event._inkbox_native_worker = (worker, context.session_key, context.run_generation, str(event.message_id))
+            event._inkbox_native_worker_owner = owner
+            callback = getattr(event, "_inkbox_worker_exited", None)
+            if callable(callback):
+                worker.executor_task.add_done_callback(lambda _: callback(event))
         return worker
     observed._inkbox_observer = True
     owner._run_agent_start_turn_worker = observed
+
+
+def stopped_worker_proof(owner, event):
+    """Prove exact executor exit, not current-generation output or send success.
+
+    Stop removes the live slot and invalidates the run generation. Neither is
+    evidence of exit. The creation-bound handle survives both; require its real
+    finalizer AND its uncancelled executor future. Never reap a stale session's
+    children here: that could kill a successor's processes.
+    """
+    receipt = getattr(event, "_inkbox_native_worker", None)
+    if receipt is None or getattr(event, "_inkbox_native_worker_owner", None) is not owner:
+        return None
+    worker, key, generation, source_id = receipt
+    future = getattr(worker, "executor_task", None)
+    done = getattr(worker, "worker_done", None)
+    if (str(event.message_id) != source_id or not key or not isinstance(generation, int)
+            or future is None or not future.done() or future.cancelled()
+            or done is None or not done.is_set()):
+        return None
+    task_id = getattr(worker, "task_id", None)
+    baseline = getattr(worker, "process_baseline", None)
+    if task_id is None or baseline is None:
+        return None
+    try:
+        from tools.process_registry import process_registry
+        if process_registry.snapshot_running_ids(task_id) - set(baseline):
+            return None
+    except ImportError:
+        return None
+    return {"kind": "stopped_native_worker_finalizer", "source_id": source_id,
+            "session_key": key, "generation": generation}
 
 
 def completed_worker_proof(owner, event):
