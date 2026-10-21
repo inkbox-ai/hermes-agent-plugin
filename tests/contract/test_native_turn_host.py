@@ -20,7 +20,7 @@ from gateway.run_turn import GatewayTurnMixin
 from gateway.run import GatewayRunner
 from gateway.session_state import SessionState
 from gateway.turn_context import TurnContext
-from gateway.session import SessionStore, build_session_key
+from gateway.session import SessionContext, SessionStore, build_session_key
 from inkbox_plugin.adapter import InkboxAdapter
 from inkbox_plugin.native_turns import NativeTurns
 from inkbox_plugin.slack_activity import SlackActivity
@@ -201,6 +201,7 @@ def test_reconstructed_source_binds_real_native_worker_and_rejects_stale_tool(tm
         bind_context(session_id, {"turn_id": uid(2), "conversation_id": uid(30)})
         def tool(expected, stale):
             assert get_session_env("HERMES_SESSION_MESSAGE_ID") == expected
+            assert get_session_env("HERMES_SESSION_ID") == session_id
             if stale:
                 with pytest.raises(RuntimeError, match="different native"):
                     active_context(session_id)
@@ -208,7 +209,9 @@ def test_reconstructed_source_binds_real_native_worker_and_rejects_stale_tool(tm
                 assert active_context(session_id)["turn_id"] == expected
         try:
             for event, stale in ((old, True), (current, False)):
-                tokens = GatewayRunner._set_session_env(runner, NS(source=event.source, session_key="native-context"))
+                context = SessionContext(source=event.source, connected_platforms=[], home_channels={},
+                                         session_key="native-context", session_id=session_id)
+                tokens = GatewayRunner._set_session_env(runner, context)
                 try:
                     await runner._run_in_executor_with_context(tool, event.message_id, stale)
                 finally:
