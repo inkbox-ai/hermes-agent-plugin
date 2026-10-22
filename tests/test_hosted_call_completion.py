@@ -1020,7 +1020,7 @@ def test_hosted_completion_catch_up_ignores_invalid_snapshot(tmp_path):
 
 
 def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
-    instance = adapter_mod.InkboxAdapter.__new__(adapter_mod.InkboxAdapter)
+    instance = adapter_mod.InkboxAdapter(adapter_mod.PlatformConfig(extra={"identity": "agent-one"}))
     instance._api_key = "agent-key"
     instance._identity_handle = "agent-one"
     instance._voice_stack_invalid_value = ""

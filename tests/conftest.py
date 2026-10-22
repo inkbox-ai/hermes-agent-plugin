@@ -104,6 +104,45 @@ if not _real_host_available() and "gateway.config" not in sys.modules:
         def __init__(self, config, platform):
             self.config = config
             self.platform = platform
+            self._running = False
+            self._fatal_error_message = None
+            self._fatal_error_code = None
+            self._fatal_error_retryable = True
+            self._fatal_error_handler = None
+
+        def _write_runtime_status_safe(self, context, **kwargs):
+            pass
+
+        def _mark_connected(self):
+            self._running = True
+            self._fatal_error_message = None
+            self._fatal_error_code = None
+            self._fatal_error_retryable = True
+
+        def _mark_disconnected(self):
+            self._running = False
+
+        def _set_fatal_error(self, code, message, *, retryable):
+            self._running = False
+            self._fatal_error_code = code
+            self._fatal_error_message = message
+            self._fatal_error_retryable = retryable
+            self._write_runtime_status_safe("fatal", platform_state="fatal", error_code=code, error_message=message)
+
+        def set_fatal_error_handler(self, handler):
+            self._fatal_error_handler = handler
+
+        @property
+        def has_fatal_error(self):
+            return self._fatal_error_message is not None
+
+        @property
+        def fatal_error_retryable(self):
+            return self._fatal_error_retryable
+
+        @property
+        def fatal_error_code(self):
+            return self._fatal_error_code
 
         def build_source(self, **kwargs):
             return types.SimpleNamespace(**kwargs)
