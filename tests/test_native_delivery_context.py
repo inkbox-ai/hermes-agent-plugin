@@ -223,6 +223,12 @@ def test_auxiliary_checkpoint_failure_preserves_accepted_send_and_repairs_from_p
             # the sole effect whose recovery proof we inspect.
             identity.send_imessage.return_value = NS(id=uid(801))
         elif kind == "explicit":
+            # Keep the fixture's two-second host timeout: delivery settles on
+            # the first status read while source-validation reads stay intact.
+            source_read = identity.get_imessage.side_effect
+            identity.get_imessage.side_effect = lambda message_id: (
+                NS(id=message_id, status="delivered") if message_id == uid(800) else source_read(message_id)
+            )
             monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "true")
             monkeypatch.setattr(tools, "_client_and_identity", lambda: (None, None, identity))
             result = json.loads(tools.inkbox_send_imessage({"conversationId": uid(30), "text": "answer " + uid(1)}, session_id=turn["session_id"]))
