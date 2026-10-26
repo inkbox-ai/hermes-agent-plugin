@@ -161,7 +161,7 @@ jobs:
           SDK_REQUIREMENT="$(python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_runtime.py")"
           uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
-          uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
+          uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" --no-sources \
             --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$WHEEL" "$SDK_REQUIREMENT" \
             pytest pyyaml fastapi 'uvicorn[standard]'
           "$RUNNER_TEMP/inkbox-live-runner/bin/pytest" tests/test_ci_import_isolation.py -q

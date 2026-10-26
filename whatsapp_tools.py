@@ -52,6 +52,12 @@ def invoke(operation, args, session_id=""):
                         )
                     )
                 }
+            elif operation == "get_whatsapp_status":
+                result = {"status": method(identity, operation)()}
+                try:
+                    result["limits"] = method(identity, "get_whatsapp_limits")()
+                except Exception:
+                    result["limits"] = None
             elif operation == "send_whatsapp":
                 selector = {name: args[name] for name in ("to", "conversation_id") if name in args}
                 if len(selector) != 1 or not (str(args.get("text") or "").strip() or args.get("media_id")):
