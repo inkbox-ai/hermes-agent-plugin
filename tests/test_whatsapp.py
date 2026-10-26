@@ -307,6 +307,90 @@ def test_tools_preserve_explicit_key_and_cannot_run_after_originating_turn_ends(
         client.close()
 
 
+def test_uncertain_tool_send_allows_only_read_only_recovery_for_its_active_owner(factory, tmp_path, monkeypatch):
+    from inkbox_plugin import tools
+
+    monkeypatch.setattr("inkbox._message_requests.time.sleep", lambda _: None)
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        identity = value.adapter._reply_identity
+        monkeypatch.setattr(value.queue, "_kick", lambda _: None)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+        client.whatsapp._http.post.side_effect = httpx.ReadTimeout("response lost")
+        client.message_sends._http = Mock()
+        client.message_sends._http.get.return_value = {"message_id": uid(800)}
+        event = receipt(1, mode="whatsapp")
+        await value.queue.accept(event)
+        row = next(iter(value.queue.rows.values()))
+        turn = row["turns"][0]
+        turn["state"] = "running"
+        value.queue.active[row["chat_id"]] = turn
+        session = str(tmp_path / "lookup-session")
+        bind_context(session, {
+            **turn["route"], "turn_id": turn["id"], "identity_id": uid(100), "base_url": value.adapter._base_url,
+            "authorize_whatsapp": lambda **kw: value.queue.check_whatsapp_tool_authority(row, turn, **kw),
+            "explicit_delivery_state": lambda state: turn.update(explicit_delivery_state=state),
+        })
+        try:
+            send = {"conversation_id": uid(30), "text": "Answer", "idempotency_key": "original-key"}
+            unknown = json.loads(invoke("send_whatsapp", send, session))
+            assert unknown["idempotency_key"] == "original-key"
+            assert turn["explicit_delivery_state"] == "uncertain"
+            attempts = client.whatsapp._http.post.call_count
+            recovered = json.loads(invoke("lookup", {"idempotency_key": "original-key"}, session))
+            assert recovered == {"ok": True, "result": {"message_id": uid(800)}}
+            assert "error" in json.loads(invoke("send_whatsapp", send, session))
+            assert client.whatsapp._http.post.call_count == attempts
+            client.message_sends._http.get.assert_called_once()
+            assert client.message_sends._http.get.call_args.kwargs["headers"] == {"Idempotency-Key": "original-key"}
+            turn["state"] = "cancelled"
+            assert "error" in json.loads(invoke("lookup", {"idempotency_key": "original-key"}, session))
+            client.message_sends._http.get.assert_called_once()
+        finally:
+            clear_context(session, turn["id"])
+            value.queue.active.clear()
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+def test_preconfigured_subscription_startup_initializes_whatsapp_without_other_channels(factory):
+    async def run():
+        value = factory("imessage")
+        adapter = value.adapter
+        client = real_identity(adapter)
+        adapter._inkbox = client
+        identity = adapter._reply_identity
+        del adapter._reply_identity
+        adapter._identity_id = None
+        adapter._skip_webhook_reconcile = True
+        adapter._slack_enabled = False
+        adapter._imessage_threaded_replies = False
+        adapter._public_url = "https://agent.example"
+        adapter._webhook_path = "/webhooks/inkbox"
+        adapter._companion_max_bytes = 128_000
+        client.get_identity = Mock(return_value=identity)
+        try:
+            adapter._patch_identity_objects()
+            await adapter._start_companion()
+            assert adapter._reply_identity is identity
+            assert adapter._identity_id == uid(100)
+            assert adapter._native_turns is not None
+            client.get_identity.assert_called_once_with("sample-agent")
+            assert not client.whatsapp._http.post.called
+        finally:
+            if getattr(adapter, "_native_turns", None) is not None:
+                await adapter._native_turns.close()
+            if adapter._companion is not None:
+                await adapter._companion.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 def test_signature_is_mandatory_even_when_generic_verification_is_disabled():
     from tests.test_webhook_providers import _adapter, _FakeRequest
 

@@ -26,7 +26,7 @@ def invoke(operation, args, session_id=""):
                 guard = owner.get("authorize_whatsapp")
                 if not callable(guard):
                     raise PermissionError("The originating WhatsApp turn is unavailable")
-                guard()
+                guard(read_only=True) if operation == "lookup" else guard()
 
         authorize()
         with explicit_send(session_id, args.get("conversation_id"), args.get("to"), allow_other_destination=True) as context:

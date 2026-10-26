@@ -151,13 +151,21 @@ def factory(tmp_path, monkeypatch):
 
 
 async def idle(instance):
-    for _ in range(300):
-        if not instance.receiver.tasks:
+    async def drained():
+        while True:
+            tasks = list(instance.receiver.tasks.values())
+            if tasks:
+                await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
             await asyncio.sleep(0)
             if not instance.receiver.tasks:
                 return
-        await asyncio.sleep(0.01)
-    raise AssertionError("Companion worker did not settle")
+    # Durable checkpoints and the existing five-second read retry can outlast
+    # polling three seconds on Windows. Await real queue completion instead;
+    # individual tests still assert exact model inputs, effects and outcomes.
+    try:
+        await asyncio.wait_for(drained(), timeout=30)
+    except TimeoutError as exc:
+        raise AssertionError("Companion worker did not settle") from exc
 
 
 async def wait_inputs(instance, count):

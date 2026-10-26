@@ -500,7 +500,7 @@ class NativeTurns(CompanionReceiver):
                     def tool_state(state):
                         turn["explicit_delivery_state"] = state
                         self._save(row)
-                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "authorize_whatsapp": lambda: self.check_whatsapp_tool_authority(row, turn)})
+                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
         else:
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
             if (turn.get("preflight_failure") and turn.get("answer") is not None
@@ -627,9 +627,13 @@ class NativeTurns(CompanionReceiver):
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original native sender is no longer allowed")
 
-    def check_whatsapp_tool_authority(self, row, turn):
+    def check_whatsapp_tool_authority(self, row, turn, *, read_only=False):
         self._require_owner()
-        if row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain":
+        if read_only:
+            unavailable = self.active.get(row["chat_id"]) is not turn or turn["state"] in {"cancelled", "quarantined"}
+        else:
+            unavailable = row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain"
+        if unavailable:
             raise PermissionError("Original WhatsApp turn is no longer active")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original WhatsApp sender is no longer allowed")

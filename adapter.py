@@ -2417,6 +2417,9 @@ class InkboxAdapter(BasePlatformAdapter):
         """Recover durable Companion receipts for this configured identity."""
         import hashlib
 
+        identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(self._inkbox.get_identity, self._identity_handle)
+        self._reply_identity = identity
+        self._identity_id = str(identity.id)
         identity_key = hashlib.sha256(json.dumps([
             self._base_url, self._identity_handle, self._identity_id,
         ]).encode()).hexdigest()
@@ -2428,9 +2431,7 @@ class InkboxAdapter(BasePlatformAdapter):
             self._slack_activity = SlackActivity(self._inkbox.slack, _inkbox_state_path().parent / "inkbox_slack_activity" / (identity_key + ".json"), identity_id=self._identity_id)
             await self._slack_activity.recover()
         if self._imessage_threaded_replies:
-            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(self._inkbox.get_identity, self._identity_handle)
             require_threading(identity)
-            self._reply_identity = identity
         await self._companion.start()
         native_root = _inkbox_state_path().parent / "inkbox_native_turns" / identity_key
         if self._slack_enabled or self._imessage_threaded_replies or callable(getattr(getattr(self, "_reply_identity", None), "send_whatsapp", None)) or native_root.exists():
