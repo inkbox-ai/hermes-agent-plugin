@@ -277,7 +277,8 @@ class NativeTurns(CompanionReceiver):
             tail = row["turns"][row["turns"].index(turn) + 1:]
             for candidate in tail:
                 route, next_route = turn["route"], candidate["route"]
-                compatible = (candidate["state"] == "pending" and not candidate["event"].get("media_urls") and not next_route.get("reaction")
+                compatible = (candidate["state"] == "pending" and not candidate["event"].get("media_urls")
+                              and not next_route.get("whatsapp_media_ids") and not next_route.get("reaction")
                               and all(route.get(key) == next_route.get(key) for key in (
                                   "mode", "author", "conversation_id", "reply_to_message_id", "thread_id", "thread_root_message_id",
                               )))

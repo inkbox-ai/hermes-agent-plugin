@@ -148,6 +148,48 @@ def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_pat
     asyncio.run(run())
 
 
+def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path, monkeypatch):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._imessage_threaded_replies = False
+        admitted = asyncio.Event()
+        original_batch = value.queue._batch
+
+        async def batch_after_admission(*args):
+            await admitted.wait()
+            return await original_batch(*args)
+
+        monkeypatch.setattr(value.queue, "_batch", batch_after_admission)
+        try:
+            import inkbox_plugin.native_turns as native_module
+            received_at = native_module.time.time()
+            with monkeypatch.context() as patch:
+                patch.setattr(native_module, "time", NS(time=lambda: received_at))
+                assert (await receive(value.adapter, inbound(content="First question"))).status == 202
+                assert (await receive(value.adapter, inbound(
+                    id=uid(2), content="Attached question", media=[{**MEDIA, "url": "https://media.example/expired"}],
+                ))).status == 202
+            admitted.set()
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            assert value.inputs[0].text.endswith("\nFirst question")
+            assert value.inputs[1].text.endswith("\nAttached question")
+            assert value.inputs[0].media_urls == []
+            assert value.inputs[1].media_urls == [MEDIA["url"]]
+            turns = next(iter(value.queue.rows.values()))["turns"]
+            assert [turn["source_ids"] for turn in turns] == [[uid(1)], [uid(2)]]
+            assert turns[1]["route"]["whatsapp_media_ids"] == [uid(801)]
+            assert all(turn["state"] == "done" for turn in turns)
+            client.whatsapp._http.get.assert_called_once()
+        finally:
+            admitted.set()
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 def test_unsupported_group_wrong_identity_and_self_echo_do_not_admit(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
