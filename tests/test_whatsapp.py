@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import httpx
+import pytest
 from inkbox import Inkbox
 from inkbox_plugin.whatsapp import receive, send_media, record_status
 from inkbox_plugin.whatsapp_tools import invoke
@@ -351,6 +352,52 @@ def test_uncertain_tool_send_allows_only_read_only_recovery_for_its_active_owner
         finally:
             clear_context(session, turn["id"])
             value.queue.active.clear()
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("recipient", ["+15555550101", "+1 (555) 555-0101", "+15555550102"])
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_explicit_same_recipient_send_cannot_be_repeated_by_automatic_final(factory, tmp_path, monkeypatch, recipient, uncertain):
+    from inkbox_plugin import tools
+
+    monkeypatch.setattr("inkbox._message_requests.time.sleep", lambda _: None)
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        identity = value.adapter._reply_identity
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+        same_recipient = recipient != "+15555550102"
+        if uncertain:
+            client.whatsapp._http.post.side_effect = [httpx.ReadTimeout("response lost")] * 3 + [{"message": WIRE}]
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            invoke("send_whatsapp", {"to": recipient, "text": "Answer", "idempotency_key": "original-key"}, str(event.source.chat_id))
+            value.queue.capture_result(event, "Answer")
+            final = await value.adapter.send(event.source.chat_id, "Answer", reply_to=event.message_id)
+            await value.adapter.on_processing_complete(event, "success" if final.success else "failure")
+
+        value.adapter.handle_message = handle
+        try:
+            event = receipt(1, mode="whatsapp")
+            event.metadata["inkbox_reply_route"].update(identity_id=uid(100), base_url=value.adapter._base_url)
+            await value.queue.accept(event)
+            await settle(value.queue)
+            calls = client.whatsapp._http.post.call_args_list
+            assert len(calls) == (3 if uncertain else 1) + (0 if same_recipient else 1)
+            keys = {call.kwargs["headers"]["Idempotency-Key"] for call in calls}
+            assert len(keys) == (1 if same_recipient else 2)
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            if same_recipient:
+                assert turn["explicit_delivery_state"] == ("uncertain" if uncertain else "sent")
+            else:
+                assert not turn.get("explicit_delivery_state")
+        finally:
             await value.queue.close()
             client.close()
 

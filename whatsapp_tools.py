@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import re
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit
@@ -29,7 +30,12 @@ def invoke(operation, args, session_id=""):
                 guard(read_only=True) if operation == "lookup" else guard()
 
         authorize()
-        with explicit_send(session_id, args.get("conversation_id"), args.get("to"), allow_other_destination=True) as context:
+        conversation, recipient = args.get("conversation_id"), args.get("to")
+        canonical = re.sub(r"[\s().-]", "", recipient) if isinstance(recipient, str) else None
+        if (owner and owner.get("mode") == "whatsapp" and canonical == owner.get("author")
+                and re.fullmatch(r"\+[1-9][0-9]{6,14}", canonical or "")):
+            conversation, recipient = owner.get("conversation_id"), None
+        with explicit_send(session_id, conversation, recipient, allow_other_destination=True) as context:
             cfg, client, identity = _client_and_identity()
             authorize()
             if (
