@@ -37,6 +37,8 @@ def test_host_contract_workflows_use_authenticated_checkout():
         assert "tests/ci/build_contract_environment.py" in workflow
         assert '--host "$GITHUB_WORKSPACE/.upstream-hermes"' in workflow
         assert "PYTHONPATH: ${{ github.workspace }}/.upstream-hermes" in workflow
+        assert "HERMES_HOME: ${{ runner.temp }}/hermes-contract-home" in workflow
+        assert "HERMES_RUNTIME_DIR: ''" in workflow
         assert 'import gateway.config, gateway.platforms.base, hermes_cli.plugins' in workflow
         assert "uv pip install --editable" not in workflow
         assert "git clone --depth 1 https://github.com/NousResearch/hermes-agent" not in workflow

@@ -90,6 +90,9 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
+          # This caller-owned test environment is not PM's application store.
+          HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
+          HERMES_RUNTIME_DIR: ''
         run: |
           "$GITHUB_WORKSPACE/.venv/bin/python" -c \
             'import gateway.config, gateway.platforms.base, hermes_cli.plugins; print(hermes_cli.plugins.__file__)'
@@ -103,6 +106,8 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
+          HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
+          HERMES_RUNTIME_DIR: ''
         run: |
           mkdir -p "$RUNNER_TEMP/plugin-scan"
           git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$RUNNER_TEMP/plugin-scan"
