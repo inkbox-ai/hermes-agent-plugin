@@ -70,17 +70,29 @@ jobs:
         with:
           version: "latest"
 
-      - name: Install test deps + real Hermes host (main)
+      - name: Prepare the official Hermes PM toolchain
+        id: host-pm
+        uses: ./.upstream-hermes/.github/actions/setup-pm
+        with:
+          toolchain: python
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+
+      - name: Build test deps with the real Hermes main lock
         run: |
-          uv venv --python 3.14
-          uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' "$(bash tests/ci/candidate_sdk.sh)" \
-            'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
-          uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
+          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
+          "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
+            --host "$GITHUB_WORKSPACE/.upstream-hermes" --wheel "$WHEEL" \
+            --out "$GITHUB_WORKSPACE/.venv"
 
       - name: Contract tests vs real Hermes main
         working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
         run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" -c \
+            'import gateway.config, gateway.platforms.base, hermes_cli.plugins; print(hermes_cli.plugins.__file__)'
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest \
             --rootdir="$GITHUB_WORKSPACE" \
             --override-ini pythonpath= \
@@ -89,6 +101,8 @@ jobs:
 
       - name: Verify Hermes plugin security scan
         working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
         run: |
           mkdir -p "$RUNNER_TEMP/plugin-scan"
           git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$RUNNER_TEMP/plugin-scan"

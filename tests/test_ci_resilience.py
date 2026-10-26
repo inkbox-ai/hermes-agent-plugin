@@ -31,7 +31,14 @@ def test_host_contract_workflows_use_authenticated_checkout():
         workflow = ROOT.joinpath(".github", "workflows", name).read_text()
         assert "repository: NousResearch/hermes-agent" in workflow
         assert "path: .upstream-hermes" in workflow
-        assert 'uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"' in workflow
+        # Upstream PM must apply its authoritative lock overrides. An editable
+        # raw-pip install bypasses them and can reject the supported host graph.
+        assert "uses: ./.upstream-hermes/.github/actions/setup-pm" in workflow
+        assert "tests/ci/build_contract_environment.py" in workflow
+        assert '--host "$GITHUB_WORKSPACE/.upstream-hermes"' in workflow
+        assert "PYTHONPATH: ${{ github.workspace }}/.upstream-hermes" in workflow
+        assert 'import gateway.config, gateway.platforms.base, hermes_cli.plugins' in workflow
+        assert "uv pip install --editable" not in workflow
         assert "git clone --depth 1 https://github.com/NousResearch/hermes-agent" not in workflow
 
 
