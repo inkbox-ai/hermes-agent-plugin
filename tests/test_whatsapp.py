@@ -480,3 +480,54 @@ def test_public_quota_errors_retain_only_policy_fields_and_retry_advice():
     assert public_quota_error(error) == {"error": "whatsapp_daily_limit_exceeded", "quota": "whatsapp.texts_per_agent_identity_per_24h", "limit": 20, "used": 20, "reset_at": "2026-10-27T00:00:00Z", "retry_condition": "window_reset", "retry_after_seconds": 60}
     assert public_quota_error(InkboxAPIError(502, {"error": "upstream", "message": "private"})) == {}
     assert public_quota_error(InkboxAPIError(429, {"error": "whatsapp_send_pending", "message": "private"})) == {}
+
+
+@pytest.mark.parametrize("status,code,known", [
+    (422, "whatsapp_reply_required_for_email_addresses", True),
+    (429, "whatsapp_reply_required_for_email_addresses", False),
+    (422, "whatsapp_reply_required_for_unknown_content", False),
+])
+def test_email_policy_rejection_reuses_original_key_without_freeing_unknown_sends(factory, tmp_path, monkeypatch, status, code, known):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        monkeypatch.setattr(value.queue, "_kick", lambda _: None)
+        monkeypatch.setattr("inkbox._message_requests.time.sleep", lambda _: None)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        await value.queue.accept(receipt(1, mode="whatsapp"))
+        row = next(iter(value.queue.rows.values()))
+        turn = row["turns"][0]
+        turn["state"] = "running"
+        value.queue.active[row["chat_id"]] = turn
+        session = str(tmp_path / "email-policy")
+        bind_context(session, {**turn["route"], "identity_id": uid(100), "base_url": value.adapter._base_url,
+            "turn_id": turn["id"], "authorize_whatsapp": lambda **kw: value.queue.check_whatsapp_tool_authority(row, turn, **kw),
+            "explicit_delivery_state": lambda state: turn.update(explicit_delivery_state=state)})
+        policy = {"error": code, "quota": "whatsapp.pre_reply_email_addresses_allowed", "limit": 0,
+                  "retry_condition": "recipient_reply_or_configuration"}
+        client.whatsapp._http.post.side_effect = InkboxAPIError(status, {**policy, "message": "private-diagnostic"})
+        args = {"conversation_id": uid(30), "text": "Email sender@example.com", "idempotency_key": "original-email-key"}
+        try:
+            first = json.loads(invoke("send_whatsapp", args, session))
+            assert "private-diagnostic" not in json.dumps(first)
+            assert turn["explicit_delivery_state"] == ("rejected" if known else "uncertain")
+            if known:
+                assert {key: first[key] for key in policy} == policy
+            else:
+                assert "not accepted" not in first.get("recovery", "").lower()
+            attempts = client.whatsapp._http.post.call_count
+            client.whatsapp._http.post.side_effect = None
+            retried = json.loads(invoke("send_whatsapp", args, session))
+            assert bool(retried.get("ok")) is known
+            assert client.whatsapp._http.post.call_count == attempts + int(known)
+            assert {call.kwargs["headers"]["Idempotency-Key"] for call in client.whatsapp._http.post.call_args_list} == {"original-email-key"}
+        finally:
+            clear_context(session, turn["id"])
+            value.queue.active.clear()
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
