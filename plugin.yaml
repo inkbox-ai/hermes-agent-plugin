@@ -1,7 +1,7 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.20
+version: 0.2.21
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
@@ -130,6 +130,16 @@ provides_tools:
   - inkbox_mark_text_conversation_read
   - inkbox_imessage_triage_number
   - inkbox_send_imessage
+  - inkbox_send_whatsapp
+  - inkbox_list_whatsapp_conversations
+  - inkbox_get_whatsapp_conversation
+  - inkbox_list_whatsapp_messages
+  - inkbox_get_whatsapp_message
+  - inkbox_upload_whatsapp_media
+  - inkbox_get_whatsapp_media
+  - inkbox_mark_whatsapp_read
+  - inkbox_get_whatsapp_status
+  - inkbox_lookup_whatsapp_send
   - inkbox_list_imessage_assignments
   - inkbox_list_imessage_conversations
   - inkbox_get_imessage_conversation

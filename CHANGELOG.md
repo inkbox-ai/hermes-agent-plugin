@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.21
+
+- Add approved, dedicated one-to-one WhatsApp with signed reception, native final replies, scoped approvals, and durable duplicate/uncertain-send protection.
+- Add ten WhatsApp tools for messages, conversations, owned media, local mark-read, readiness, and send lookup. Preserve media IDs and refresh incoming attachment URLs at dispatch.
+- Require SDK 0.7.21 and exercise the exact public SDK candidate in current-feature and native-install checks while retaining historical compatibility lanes.
+
 - Add `inkbox_slack_download_file_preview` to save available Slack image previews locally for vision inspection, without requiring a public image URL.
 
 - Upload local Slack images, documents, video, and audio through source-bound native/Companion reply routes, with durable duplicate and uncertain-outcome protection. Remote image URLs remain links.

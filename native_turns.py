@@ -268,7 +268,7 @@ class NativeTurns(CompanionReceiver):
         task.add_done_callback(done)
 
     async def _batch(self, row, turn):
-        if turn["route"]["mode"] != "imessage" or turn["event"].get("media_urls") or turn["route"].get("reaction"):
+        if turn["route"]["mode"] not in {"imessage", "whatsapp"} or turn["event"].get("media_urls") or turn["route"].get("whatsapp_media_ids") or turn["route"].get("reaction"):
             return
         signal = self.changed.setdefault(row["key"], asyncio.Event())
         while True:
@@ -279,7 +279,7 @@ class NativeTurns(CompanionReceiver):
                 route, next_route = turn["route"], candidate["route"]
                 compatible = (candidate["state"] == "pending" and not candidate["event"].get("media_urls") and not next_route.get("reaction")
                               and all(route.get(key) == next_route.get(key) for key in (
-                                  "author", "conversation_id", "reply_to_message_id", "thread_id", "thread_root_message_id",
+                                  "mode", "author", "conversation_id", "reply_to_message_id", "thread_id", "thread_root_message_id",
                               )))
                 if (not compatible or candidate["first_at"] - turn["first_at"] >= self.max_burst_seconds
                         or len(turn["source_ids"]) + len(candidate["source_ids"]) > self.max_burst_sources
@@ -335,6 +335,9 @@ class NativeTurns(CompanionReceiver):
             self._prepare_delivery_context(row, turn)
             event = self._event_from_turn(row, turn)
             await self._wait_for_idle(event)
+            if turn["route"]["mode"] == "whatsapp":
+                from .whatsapp import refresh_media
+                await refresh_media(self.adapter, event, turn["route"].get("whatsapp_media_ids", []))
             if turn["state"] != "pending":
                 continue
             if row.get("blocked") or "submitting" in row.get("controls", {}).values():
@@ -487,16 +490,16 @@ class NativeTurns(CompanionReceiver):
             if store is not None:
                 session = store.get_or_create_session(event.source)
                 turn["session_id"] = str(session.session_id)
-                if turn["route"]["mode"] == "imessage":
+                if turn["route"]["mode"] in {"imessage", "whatsapp"}:
                     def record(content, message):
                         turn.setdefault("explicit_sends", []).append({"content": content, "message_id": str(message.id),
-                            "ancestry": self._outbound_ancestry(message)})
+                            "ancestry": {} if turn["route"]["mode"] == "whatsapp" else self._outbound_ancestry(message)})
                         self._save(row)
                         self._record_outbound(row, turn, message)
                     def tool_state(state):
                         turn["explicit_delivery_state"] = state
                         self._save(row)
-                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state})
+                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "authorize_whatsapp": lambda: self.check_whatsapp_tool_authority(row, turn)})
         else:
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
             if (turn.get("preflight_failure") and turn.get("answer") is not None
@@ -582,7 +585,7 @@ class NativeTurns(CompanionReceiver):
 
     def media_owner(self, chat_id, metadata=None):
         route = reply_route.get() or (metadata or {}).get("inkbox_reply_route") or {}
-        if route.get("chat_id") != chat_id or route.get("mode") not in {"imessage", "slack"}:
+        if route.get("chat_id") != chat_id or route.get("mode") not in {"imessage", "slack", "whatsapp"}:
             return None
         source_id = route.get("message_id")
         for row in self.rows.values():
@@ -614,7 +617,7 @@ class NativeTurns(CompanionReceiver):
 
     def check_media_authority(self, row, turn, *, admitted_send=False):
         self._require_owner()
-        if not getattr(self.adapter, "_imessage_threaded_replies", False):
+        if turn["route"]["mode"] == "imessage" and not getattr(self.adapter, "_imessage_threaded_replies", False):
             raise RuntimeError("Native iMessage replies are disabled")
         if (turn["state"] in {"uncertain", "cancelled", "quarantined"}
                 or (turn["state"] == "sending" and not admitted_send)
@@ -622,6 +625,21 @@ class NativeTurns(CompanionReceiver):
             raise RuntimeError("Original native turn cannot send media")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original native sender is no longer allowed")
+
+    def check_whatsapp_tool_authority(self, row, turn):
+        self._require_owner()
+        if row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain":
+            raise PermissionError("Original WhatsApp turn is no longer active")
+        if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
+            raise PermissionError("Original WhatsApp sender is no longer allowed")
+
+    def checked_whatsapp_send(self, row, turn, identity, payload):
+        from .whatsapp import method
+        try:
+            self.check_media_authority(row, turn, admitted_send=True)
+        except Exception:
+            raise ReplyPreflightError("Original WhatsApp ownership changed; no send attempted") from None
+        return method(identity, "send_whatsapp")(**payload)
 
     def checked_imessage_send(self, row, turn, identity, payload):
         # The executor may start after a Stop/revocation queued on the loop.
@@ -701,6 +719,8 @@ class NativeTurns(CompanionReceiver):
             return SendResult(success=False, error="Original native turn is no longer sendable; no automatic retry", raw_response={"inkbox_no_retry": True})
         if any(item.get("state") in {"sending", "uncertain"} for item in turn.get("media_deliveries", {}).values()):
             return SendResult(success=False, error="Original media delivery is uncertain", raw_response={"inkbox_no_retry": True})
+        if route["mode"] == "whatsapp" and len(content) > 4000:
+            return SendResult(success=False, error="WhatsApp messages must be at most 4000 characters", raw_response={"inkbox_no_retry": True})
         if route["mode"] == "slack" and len(content) > 12000:
             return SendResult(success=False, error="Slack messages must be at most 12000 characters", raw_response={"inkbox_no_retry": True})
         if turn.get("sent"):
@@ -724,6 +744,12 @@ class NativeTurns(CompanionReceiver):
                 await asyncio.to_thread(validate_connection, self.adapter._inkbox.slack, str(self.adapter._identity_id), route)
             except Exception as exc:
                 return SendResult(success=False, error=f"Original Slack connection is unavailable ({type(exc).__name__})", raw_response={"inkbox_no_retry": True})
+        elif route["mode"] == "whatsapp":
+            try:
+                self.check_media_authority(row, turn)
+            except Exception as exc:
+                return self.preflight_failed(row, turn, exc)
+            reply_options = {}
         else:
             try:
                 reply_options = await self.preflight_reply(row, turn, self.adapter._reply_identity)
@@ -744,7 +770,10 @@ class NativeTurns(CompanionReceiver):
                     "conversation_id": route["conversation_id"], "text": content, **reply_options,
                     "idempotency_key": "hermes:" + digest(json.dumps([turn["id"], route["conversation_id"], route.get("imessage_reply_target"), content])) ,
                 }
-                method, args, kwargs = self.checked_imessage_send, (row, turn, self.adapter._reply_identity, payload), {}
+                if route["mode"] == "whatsapp":
+                    turn["reply_idempotency_key"] = payload["idempotency_key"]
+                    self._save(row)
+                method, args, kwargs = (self.checked_whatsapp_send if route["mode"] == "whatsapp" else self.checked_imessage_send), (row, turn, self.adapter._reply_identity, payload), {}
             task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
             self.outbound.add(task)
             task.add_done_callback(self.outbound.discard)
@@ -762,7 +791,7 @@ class NativeTurns(CompanionReceiver):
             if turn["state"] == "sending":
                 turn["state"] = "done" if final else previous_state
             self._save(row)
-            if route["mode"] == "imessage":
+            if route["mode"] in {"imessage", "whatsapp"}:
                 self._record_outbound(row, turn, result)
             return SendResult(success=True, message_id=message_id)
         except ReplyPreflightError as exc:
@@ -782,6 +811,9 @@ class NativeTurns(CompanionReceiver):
             return False
         incoming = event.metadata["inkbox_reply_route"]
         route = active["route"]
+        if "whatsapp" in {incoming.get("mode"), route.get("mode")} and any(
+                incoming.get(key) != route.get(key) for key in ("mode", "conversation_id", "author")):
+            return False
         if incoming.get("author") != route.get("author") or (route["mode"] == "slack" and any(
             incoming.get(key) != route.get(key) for key in ("connection_id", "conversation_id", "thread_ts")
         )):
@@ -950,7 +982,12 @@ class NativeTurns(CompanionReceiver):
             self.delivery_status[message_id] = {**prior, "conversation_id": route["conversation_id"],
                 "chat_id": row["chat_id"], "source_id": turn["id"],
                 "reply_target": route.get("imessage_reply_target"),
-                "ancestry": self._outbound_ancestry(message)}
+                "ancestry": {} if route["mode"] == "whatsapp" else self._outbound_ancestry(message)}
+            if route["mode"] == "whatsapp":
+                from .whatsapp import field
+                self.delivery_status[message_id].update(mode="whatsapp", status=prior.get("status") or field(message, "status"),
+                    delivery_state=prior.get("delivery_state") or field(message, "delivery_state"),
+                    updated_at=prior.get("updated_at") or str(field(message, "updated_at") or ""))
             self._save_auxiliary_delivery_status()
 
     @staticmethod
@@ -970,7 +1007,7 @@ class NativeTurns(CompanionReceiver):
     def _restore_delivery_records(self, row):
         from types import SimpleNamespace
         for turn in row["turns"]:
-            if turn["route"]["mode"] != "imessage":
+            if turn["route"]["mode"] not in {"imessage", "whatsapp"}:
                 continue
             if turn.get("answer") is not None:
                 # The answer checkpoint is the consumption proof if a crash

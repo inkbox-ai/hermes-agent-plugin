@@ -78,6 +78,8 @@ jobs:
             --source "$GITHUB_WORKSPACE" --runtime-home "$HERMES_HOME" --temp-root "$RUNNER_TEMP")"
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$PLUGIN_SOURCE" "$HERMES_HOME/plugins/inkbox"
+          WHEEL="$(bash "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh")"
+          export UV_FIND_LINKS="$(dirname "$WHEEL")"
           hermes plugins enable inkbox
           python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
@@ -86,7 +88,7 @@ jobs:
           # PM owns gateway dependencies; helpers/tests get a separate environment.
           uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
           uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
-            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$SDK_REQUIREMENT" \
+            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$WHEEL" "$SDK_REQUIREMENT" \
             pytest pyyaml fastapi 'uvicorn[standard]'
 
       - name: Configure AUT identity + model (${{ matrix.mode }})

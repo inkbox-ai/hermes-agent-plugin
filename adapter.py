@@ -2433,7 +2433,7 @@ class InkboxAdapter(BasePlatformAdapter):
             self._reply_identity = identity
         await self._companion.start()
         native_root = _inkbox_state_path().parent / "inkbox_native_turns" / identity_key
-        if self._slack_enabled or self._imessage_threaded_replies or native_root.exists():
+        if self._slack_enabled or self._imessage_threaded_replies or callable(getattr(getattr(self, "_reply_identity", None), "send_whatsapp", None)) or native_root.exists():
             self._native_turns = NativeTurns(self, native_root)
             await self._native_turns.start()
 
@@ -2868,6 +2868,14 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
+            from .whatsapp import EVENTS as WHATSAPP_EVENTS, unsupported
+            try:
+                _reconcile_imessage_subscription(self._inkbox, self._identity_id, desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url, desired_events=WHATSAPP_EVENTS)
+            except Exception as exc:
+                if not unsupported(exc):
+                    raise
+                logger.warning("WhatsApp notifications unavailable; other channels remain active")
             if getattr(identity, "imessage_enabled", False):
                 _reconcile_imessage_subscription(
                     self._inkbox,
@@ -3040,6 +3048,11 @@ class InkboxAdapter(BasePlatformAdapter):
             return await receiver.send_slack_media(row, turn, payload, link=link_text is not None)
         except Exception as exc:
             return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
+
+    def _is_whatsapp_media_route(self, chat_id, metadata):
+        origin = reply_route.get() or {}
+        route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
+        return route.get("mode") == "whatsapp" or (not route.get("mode") and getattr(self, "_last_inbound_modality", {}).get(str(chat_id)) == "whatsapp")
 
     def _is_imessage_media_route(
         self,
@@ -3314,6 +3327,8 @@ class InkboxAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            return SendResult(success=False, error="WhatsApp attachments require a local file or owned media ID", raw_response={"inkbox_no_retry": True})
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3343,6 +3358,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, image_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3368,6 +3386,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, file_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3392,6 +3413,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, video_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3416,6 +3440,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, audio_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3618,6 +3645,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if not mode:
             mode = "sms" if str(chat_id).startswith("+") else "email"
 
+        if mode == "whatsapp":
+            return SendResult(success=False, error="WhatsApp reply requires its original native conversation", raw_response={"inkbox_no_retry": True})
         if mode == "sms" and len(content or "") > SMS_MAX_LENGTH:
             failure = _sms_too_long_failure(content)
             await self._maybe_wake_on_send_rejection(
@@ -4112,6 +4141,11 @@ class InkboxAdapter(BasePlatformAdapter):
         # the request — an unknown/unverifiable third party.
         source = provider.name if provider is not None else None
 
+        if str(envelope.get("event_type") or "").startswith("whatsapp."):
+            if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
+                return web.Response(status=401, text="WhatsApp requires an authenticated Inkbox webhook")
+            if envelope.get("companion") is not None:
+                return web.Response(status=400, text="Unsupported WhatsApp event")
         if str(envelope.get("event_type") or "").startswith("slack."):
             if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
                 return web.Response(status=401, text="Slack requires an authenticated Inkbox webhook")
@@ -4166,7 +4200,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="duplicate")
 
         try:
-            if source == "inkbox" and self._is_known_inkbox_event(event_type, envelope):
+            if source == "inkbox" and (str(event_type or "").startswith("whatsapp.") or self._is_known_inkbox_event(event_type, envelope)):
                 # An Inkbox-signed request carrying a known Inkbox event shape —
                 # pick the handler. Mail / text / iMessage arrive wrapped in
                 # ``{event_type, data:{...}}``; the incoming-call webhook is a
@@ -4199,6 +4233,13 @@ class InkboxAdapter(BasePlatformAdapter):
                         if source is not None
                         else None,
                     )
+                elif event_type == "whatsapp.received":
+                    from .whatsapp import receive
+                    response = await receive(self, envelope)
+                elif event_type and event_type.startswith("whatsapp."):
+                    from .whatsapp import record_status
+                    record_status(self, envelope)
+                    response = web.Response(status=200, text="WhatsApp delivery status recorded")
                 elif event_type == "imessage.received":
                     response = await self._on_imessage_received(envelope)
                 elif event_type == "imessage.reaction_received":
@@ -9685,7 +9726,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if not isinstance(envelope, dict) or envelope.get("companion") or "_inkbox_companion_turn" in envelope:
             return True
         channel = {"message.received": "email", "text.received": "sms", "imessage.received": "imessage",
-                   "imessage.reaction_received": "imessage"}.get(envelope.get("event_type"))
+                   "imessage.reaction_received": "imessage", "whatsapp.received": "whatsapp"}.get(envelope.get("event_type"))
         if channel is None or (event.metadata or {}).get("inkbox_prepared"):
             return True
         data = envelope.get("data") or {}
@@ -9713,7 +9754,7 @@ class InkboxAdapter(BasePlatformAdapter):
         answer = self._conversation_prompt_reply(event.source, text) if pending and asked and not reaction else None
         wrong_approval = pending and not asked and approval_reply(text) is not None
         native = getattr(self, "_native_turns", None)
-        retry_control = channel == "imessage" and native is not None and str(event.message_id) in native.unconfirmed_controls
+        retry_control = channel in {"imessage", "whatsapp"} and native is not None and str(event.message_id) in native.unconfirmed_controls
         quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
                 and not mentions(text, self._identity_handle) and not command and answer is None))
         if quiet:

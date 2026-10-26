@@ -32,7 +32,7 @@ jobs:
       - name: Install test deps + real Hermes host (main)
         run: |
           uv venv --python 3.14
-          uv pip install --no-sources -r pyproject.toml --extra test
+          uv pip install --no-sources -r pyproject.toml --extra test "$(bash tests/ci/candidate_sdk.sh)"
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
       - name: Complete offline suite vs real Hermes main

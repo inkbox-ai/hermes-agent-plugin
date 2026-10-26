@@ -472,7 +472,7 @@ def _public_http_media_url(value: str) -> bool:
     return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
-def _safe_local_media_path(value: str) -> Path:
+def _safe_local_media_path(value: str, *, max_bytes: int = IMESSAGE_MEDIA_MAX_BYTES, channel: str = "iMessage") -> Path:
     """Resolve a local attachment through Hermes' media-delivery guard."""
     candidate = Path(str(value).strip()).expanduser()
     if not candidate.is_absolute():
@@ -493,10 +493,8 @@ def _safe_local_media_path(value: str) -> Path:
 
     resolved = Path(safe_path)
     size = resolved.stat().st_size
-    if size > IMESSAGE_MEDIA_MAX_BYTES:
-        raise ValueError(
-            f"iMessage media is {size} bytes; maximum is {IMESSAGE_MEDIA_MAX_BYTES} bytes (10 MiB)."
-        )
+    if size > max_bytes:
+        raise ValueError(f"{channel} media is {size} bytes; maximum is {max_bytes} bytes.")
     return resolved
 
 
@@ -2251,6 +2249,8 @@ A2A_GET_SENT_TASK_SCHEMA = {
 
 
 def register_tools(ctx) -> None:
+    from .whatsapp_tools import register as register_whatsapp
+    register_whatsapp(ctx, _configured)
     from .extended_tools import register
     register(ctx, _configured)
     ctx.register_tool("inkbox_whoami", "inkbox", WHOAMI_SCHEMA, inkbox_whoami, check_fn=_configured)

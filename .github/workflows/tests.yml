@@ -39,7 +39,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }}
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.11,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' "$(bash tests/ci/candidate_sdk.sh)" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
 
       - name: Lint
@@ -74,7 +74,7 @@ jobs:
         run: |
           uv venv --python 3.14
           uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' 'inkbox>=0.7.11,<1.0.0' \
+            'audioop-lts>=0.2.1; python_version >= "3.13"' "$(bash tests/ci/candidate_sdk.sh)" \
             'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
           uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
 
@@ -118,8 +118,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.1.0
-      - name: Install test dependencies
-        run: uv sync --extra test --frozen --python 3.12
+      - name: Prepare and install the real SDK candidate
+        shell: bash
+        run: |
+          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
+          uv lock --find-links "$(dirname "$WHEEL")" --python 3.12
+          uv sync --extra test --frozen --python 3.12
       - name: Run native Windows unit tests
         run: uv run --frozen python -m pytest -v
 
@@ -149,6 +153,8 @@ jobs:
             --source "$GITHUB_WORKSPACE" --runtime-home "$HERMES_HOME" --temp-root "$RUNNER_TEMP")"
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$PLUGIN_SOURCE" "$HERMES_HOME/plugins/inkbox"
+          WHEEL="$(bash "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh")"
+          export UV_FIND_LINKS="$(dirname "$WHEEL")"
           hermes plugins enable inkbox
           python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
@@ -156,7 +162,7 @@ jobs:
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_runtime.py")"
           uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
           uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
-            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$SDK_REQUIREMENT" \
+            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$WHEEL" "$SDK_REQUIREMENT" \
             pytest pyyaml fastapi 'uvicorn[standard]'
           "$RUNNER_TEMP/inkbox-live-runner/bin/pytest" tests/test_ci_import_isolation.py -q
           "$RUNNER_TEMP/inkbox-live-runner/bin/python" \
