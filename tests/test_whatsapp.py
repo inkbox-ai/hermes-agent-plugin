@@ -486,6 +486,7 @@ def test_public_quota_errors_retain_only_policy_fields_and_retry_advice():
     (422, "whatsapp_reply_required_for_email_addresses", True),
     (429, "whatsapp_reply_required_for_email_addresses", False),
     (422, "whatsapp_reply_required_for_unknown_content", False),
+    (402, "whatsapp_cycle_limit_exceeded", False),
 ])
 def test_email_policy_rejection_reuses_original_key_without_freeing_unknown_sends(factory, tmp_path, monkeypatch, status, code, known):
     from inkbox import InkboxAPIError
