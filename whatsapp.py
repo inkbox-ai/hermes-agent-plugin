@@ -282,3 +282,30 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
             error=f"WhatsApp media unavailable or unconfirmed ({type(exc).__name__}); do not resend",
             raw_response={"inkbox_no_retry": True},
         )
+
+
+def public_quota_error(exc):
+    """Keep only the public WhatsApp policy envelope, never arbitrary error bodies."""
+    import re
+    detail = getattr(exc, "detail", None)
+    if getattr(exc, "status_code", None) not in {402, 403, 413, 422, 429}:
+        return {}
+    if not isinstance(detail, dict) or not re.fullmatch(r"whatsapp_[a-z0-9_]{1,120}", str(detail.get("error", ""))):
+        return {}
+    result = {"error": detail["error"]}
+    quota = detail.get("quota")
+    if isinstance(quota, str) and re.fullmatch(r"whatsapp\.[a-z0-9_.]{1,120}", quota):
+        result["quota"] = quota
+    for key in ("limit", "used"):
+        if isinstance(detail.get(key), int) and not isinstance(detail[key], bool):
+            result[key] = detail[key]
+    condition = detail.get("retry_condition")
+    if isinstance(condition, str):
+        result["retry_condition"] = condition[:1000]
+    reset = detail.get("reset_at")
+    if isinstance(reset, str) and re.fullmatch(r"[0-9T:.+Z-]{20,40}", reset):
+        result["reset_at"] = reset
+    retry = getattr(exc, "retry_after_seconds", None)
+    if isinstance(retry, int) and not isinstance(retry, bool) and retry >= 0:
+        result["retry_after_seconds"] = retry
+    return result

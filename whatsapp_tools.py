@@ -8,7 +8,7 @@ import mimetypes
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit
-from .whatsapp import MAX_MEDIA_BYTES, method
+from .whatsapp import MAX_MEDIA_BYTES, method, public_quota_error
 
 
 def invoke(operation, args, session_id=""):
@@ -83,7 +83,7 @@ def invoke(operation, args, session_id=""):
                 except Exception as exc:
                     exc.whatsapp_media_id = args.get("media_id")
                     if callback:
-                        callback("uncertain")
+                        callback("rejected" if public_quota_error(exc) else "uncertain")
                     raise
                 if callback:
                     callback("sent")
@@ -113,12 +113,14 @@ def invoke(operation, args, session_id=""):
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             result["status_code"] = status
+        policy = public_quota_error(exc)
+        result.update(policy)
         key = getattr(exc, "idempotency_key", None)
         if key:
             result.update(
                 idempotency_key=key,
                 media_id=getattr(exc, "whatsapp_media_id", None),
-                recovery="Use inkbox_lookup_whatsapp_send; do not send or upload a new copy.",
+                recovery=("Request not accepted. Follow the retry condition, then reuse the original key and owned media ID." if policy else "Use inkbox_lookup_whatsapp_send; do not send or upload a new copy."),
             )
         return json.dumps(result)
     finally:
