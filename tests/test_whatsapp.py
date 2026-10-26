@@ -359,7 +359,7 @@ def test_uncertain_tool_send_allows_only_read_only_recovery_for_its_active_owner
 
 
 @pytest.mark.parametrize("recipient", ["+15555550101", "+1 (555) 555-0101", "+15555550102"])
-@pytest.mark.parametrize("uncertain", [False, True])
+@pytest.mark.parametrize("uncertain", [False, True, "unknown_403", "unknown_422", "unknown_429"])
 def test_explicit_same_recipient_send_cannot_be_repeated_by_automatic_final(factory, tmp_path, monkeypatch, recipient, uncertain):
     from inkbox_plugin import tools
 
@@ -371,8 +371,12 @@ def test_explicit_same_recipient_send_cannot_be_repeated_by_automatic_final(fact
         identity = value.adapter._reply_identity
         monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
         same_recipient = recipient != "+15555550102"
+        attempts = 3 if uncertain is True or uncertain == "unknown_429" else 1
         if uncertain:
-            client.whatsapp._http.post.side_effect = [httpx.ReadTimeout("response lost")] * 3 + [{"message": WIRE}]
+            from inkbox import InkboxAPIError
+            error = (InkboxAPIError(int(uncertain.rsplit("_", 1)[1]), {"error": "whatsapp_send_pending"})
+                     if isinstance(uncertain, str) else httpx.ReadTimeout("response lost"))
+            client.whatsapp._http.post.side_effect = [error] * attempts + [{"message": WIRE}]
 
         async def handle(event):
             event._gateway_accepted = True
@@ -389,7 +393,7 @@ def test_explicit_same_recipient_send_cannot_be_repeated_by_automatic_final(fact
             await value.queue.accept(event)
             await settle(value.queue)
             calls = client.whatsapp._http.post.call_args_list
-            assert len(calls) == (3 if uncertain else 1) + (0 if same_recipient else 1)
+            assert len(calls) == attempts + (0 if same_recipient else 1)
             keys = {call.kwargs["headers"]["Idempotency-Key"] for call in calls}
             assert len(keys) == (1 if same_recipient else 2)
             turn = next(iter(value.queue.rows.values()))["turns"][0]
@@ -472,6 +476,7 @@ def test_control_scope_is_exact_channel_conversation_and_author(factory, tmp_pat
 def test_public_quota_errors_retain_only_policy_fields_and_retry_advice():
     from inkbox import InkboxAPIError
     from inkbox_plugin.whatsapp import public_quota_error
-    error = InkboxAPIError(429, {"error": "whatsapp_rate_limit", "quota": "whatsapp.texts_per_agent_identity_per_24h", "limit": 20, "used": 20, "reset_at": "2026-10-27T00:00:00Z", "retry_condition": "Wait until reset", "message": "untrusted provider body", "credentials": "private"}, retry_after="60")
-    assert public_quota_error(error) == {"error": "whatsapp_rate_limit", "quota": "whatsapp.texts_per_agent_identity_per_24h", "limit": 20, "used": 20, "reset_at": "2026-10-27T00:00:00Z", "retry_condition": "Wait until reset", "retry_after_seconds": 60}
+    error = InkboxAPIError(429, {"error": "whatsapp_daily_limit_exceeded", "quota": "whatsapp.texts_per_agent_identity_per_24h", "limit": 20, "used": 20, "reset_at": "2026-10-27T00:00:00Z", "retry_condition": "window_reset", "message": "untrusted provider body", "credentials": "private"}, retry_after="60")
+    assert public_quota_error(error) == {"error": "whatsapp_daily_limit_exceeded", "quota": "whatsapp.texts_per_agent_identity_per_24h", "limit": 20, "used": 20, "reset_at": "2026-10-27T00:00:00Z", "retry_condition": "window_reset", "retry_after_seconds": 60}
     assert public_quota_error(InkboxAPIError(502, {"error": "upstream", "message": "private"})) == {}
+    assert public_quota_error(InkboxAPIError(429, {"error": "whatsapp_send_pending", "message": "private"})) == {}
