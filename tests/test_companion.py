@@ -814,3 +814,18 @@ def test_missing_or_null_companion_uses_ordinary_request_dedup(factory, monkeypa
         instance.adapter._on_mail_received.assert_awaited_once()
         assert not instance.receiver.rows
     asyncio.run(run())
+
+
+def test_checkpoint_unicode_and_legacy_windows_encoding(tmp_path, monkeypatch):
+    from inkbox_plugin import companion
+    payload = {"text": "Reaction ❓ — café", "key": "unicode"}
+    receiver = CompanionReceiver(types.SimpleNamespace(_identity_id=uid(100)), tmp_path)
+    monkeypatch.setattr(receiver, "_require_owner", lambda: None)
+    target = tmp_path / "unicode.json"
+    receiver._save_checkpoint(target, payload)
+    assert json.loads(target.read_bytes().decode("utf-8")) == payload
+    assert companion.read_checkpoint(target) == payload
+    monkeypatch.setattr(companion, "_WINDOWS", True)
+    monkeypatch.setattr(companion.locale, "getpreferredencoding", lambda _do_setlocale: "cp1252")
+    target.write_bytes('{"text": "café"}'.encode("cp1252"))
+    assert companion.read_checkpoint(target) == {"text": "café"}

@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import logging
+import locale
 import os
 import re
 import threading
@@ -31,6 +32,18 @@ FAILURE_CHANNELS = {
 MODES = {"mail": "email", "phone": "sms", "imessage": "imessage", "slack": "slack"}
 DEFAULT_MAX_BYTES = 128_000
 _WINDOWS = os.name == "nt"
+
+
+def read_checkpoint(path: Path) -> dict[str, Any]:
+    """Read UTF-8 state, retaining compatibility with older Windows checkpoints."""
+    payload = path.read_bytes()
+    try:
+        content = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        if not _WINDOWS:
+            raise
+        content = payload.decode(locale.getpreferredencoding(False))
+    return json.loads(content)
 
 
 class IncompatibleCompanionSDK(RuntimeError):
@@ -188,7 +201,7 @@ class CompanionReceiver:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as stream:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(value, stream, ensure_ascii=False)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -207,7 +220,7 @@ class CompanionReceiver:
         self._acquire()
         if self.root.exists():
             for path in self.root.glob("*.json"):
-                row = json.loads(path.read_text())
+                row = read_checkpoint(path)
                 if row["key"] != path.stem:
                     raise ValueError("Invalid Companion checkpoint")
                 self.rows[row["key"]] = row

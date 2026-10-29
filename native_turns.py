@@ -12,12 +12,12 @@ from gateway.platforms.base import MessageEvent, MessageType, SendResult
 logger = logging.getLogger(__name__)
 
 try:
-    from .companion import CompanionReceiver, digest
+    from .companion import CompanionReceiver, digest, read_checkpoint
     from .conversation import approval_reply, conversation_control, reply_route
     from .imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
     from .slack import send_reply
 except ImportError:  # pragma: no cover - direct local import
-    from companion import CompanionReceiver, digest
+    from companion import CompanionReceiver, digest, read_checkpoint
     from conversation import approval_reply, conversation_control, reply_route
     from imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
     from slack import send_reply
@@ -50,12 +50,12 @@ class NativeTurns(CompanionReceiver):
         self._acquire()
         status_path = self.root / "delivery-status"
         if status_path.exists():
-            saved = json.loads(status_path.read_text())
+            saved = read_checkpoint(status_path)
             if saved.get("version") != 1 or not isinstance(saved.get("messages"), dict):
                 raise ValueError("Invalid native delivery status checkpoint")
             self.delivery_status = saved["messages"]
         for path in self.root.glob("*.json"):
-            row = json.loads(path.read_text())
+            row = read_checkpoint(path)
             if row.get("key") != path.stem:
                 raise ValueError("Invalid native turn checkpoint")
             self.rows[row["key"]] = row
@@ -193,7 +193,7 @@ class NativeTurns(CompanionReceiver):
             # After atomic replacement, retain the row and its context owner;
             # a duplicate must retry the durable checkpoint before ACK/kick.
             try:
-                saved = json.loads((self.root / (key + ".json")).read_text())
+                saved = read_checkpoint(self.root / (key + ".json"))
                 published = any(item == turn for item in saved.get("turns", []))
             except FileNotFoundError:
                 published = False
@@ -227,7 +227,7 @@ class NativeTurns(CompanionReceiver):
             self._save(row)
         except BaseException:
             try:
-                saved = json.loads((self.root / (row["key"] + ".json")).read_text())
+                saved = read_checkpoint(self.root / (row["key"] + ".json"))
                 published = saved.get("controls", {}).get(source_id) == "submitting"
                 if control_turn is not None:
                     published = published and any(item == control_turn for item in saved.get("turns", []))

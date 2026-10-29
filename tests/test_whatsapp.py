@@ -685,7 +685,7 @@ def test_reaction_tools_keep_stable_keys_and_exact_receipts_and_allow_read_only_
 def test_shared_group_quote_matrix_uses_real_sdk_and_rejects_before_io(factory, monkeypatch):
     from pathlib import Path
     from inkbox_plugin import tools
-    fixture = json.loads((Path(__file__).parent / "fixtures" / "whatsapp-v2.json").read_text())
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "whatsapp-v2.json").read_text(encoding="utf-8"))
     value = factory("imessage")
     client = real_identity(value.adapter)
     identity = value.adapter._reply_identity
