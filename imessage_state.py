@@ -135,6 +135,13 @@ def validate_target(context: dict | None, conversation_id: str | None, to: Any) 
 
 
 @contextmanager
+def turn_lock():
+    """Serialize attempt admission with delivery updates on the shared turn."""
+    with _LOCK:
+        yield
+
+
+@contextmanager
 def explicit_send(session_id: str, conversation_id: str | None, to: Any, *, allow_other_destination=False):
     with _LOCK:
         owner = active_context(session_id)

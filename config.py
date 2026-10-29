@@ -226,6 +226,8 @@ def object_summary(obj: Any) -> Any:
         "sms_status",
         "sms_error_code",
         "imessage_enabled",
+        "whatsapp_enabled",
+        "whatsapp_number",
         "incoming_call_action",
         "client_websocket_url",
         "public_host",
