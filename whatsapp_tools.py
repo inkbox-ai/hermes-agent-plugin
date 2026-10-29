@@ -9,7 +9,7 @@ import mimetypes
 import re
 import uuid
 
-from .imessage_state import active_context, explicit_send, record_explicit
+from .imessage_state import active_context, explicit_send, record_explicit, turn_lock
 from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, field, method, public_quota_error
 
 
@@ -157,43 +157,94 @@ def invoke(operation, args, session_id=""):
                     "hermes-wa-tool:"
                     + hashlib.sha256(json.dumps([str(identity.id), source, payload], sort_keys=True).encode()).hexdigest()
                 )
-                for prior in attempts.values():
-                    if prior["state"] in {"sending", "uncertain"}:
-                        raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
-                    if (prior["key"] == key or (prior["state"] == "rejected"
-                            and _same_destination(_destination(prior["payload"], owner), _destination(payload, owner), identity, owner))):
-                        if prior["payload"] != payload or prior["key"] != key:
-                            raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
-                authorize()
-                callback = (
-                    (attempt_owner or {}).get("explicit_delivery_state")
-                )
-                attempt = {"payload": payload, "key": key, "state": "sending"}
-                record_attempt = (attempt_owner or {}).get("record_whatsapp_attempt")
-                if attempt_owner is not None:
-                    attempt_owner["whatsapp_send_attempt"] = attempt
-                    attempt_owner["whatsapp_send_attempts"] = attempts
-                    attempts[key] = attempt
-                if record_attempt:
-                    record_attempt(attempt)
-                if callback:
-                    callback("sending")
+                recover = "Recover the exact original WhatsApp request and key; do not send a replacement"
+
+                def snapshot_attempts():
+                    if attempt_owner is None:
+                        return {}
+                    found = copy.deepcopy(attempt_owner.get("whatsapp_send_attempts", {}))
+                    saved = attempt_owner.get("whatsapp_send_attempt")
+                    if saved:
+                        found.setdefault(saved["key"], copy.deepcopy(saved))
+                    return found
+
+                def conflicts(seen):
+                    for prior in seen.values():
+                        if prior["state"] in {"sending", "uncertain"}:
+                            raise ValueError(recover)
+                        if prior["key"] == key:
+                            if prior["payload"] != payload:
+                                raise ValueError(recover)
+                            continue
+                        if prior["state"] != "rejected":
+                            continue
+                        same = _same_destination(
+                            _destination(prior["payload"], owner), _destination(payload, owner), identity, owner)
+                        if same:
+                            raise ValueError(recover)
+
+                def changed(seen, known):
+                    pending = []
+                    for item in seen.values():
+                        if known.get(item["key"]) == item:
+                            continue
+                        if item["state"] in {"sending", "uncertain"}:
+                            raise ValueError(recover)
+                        if item["key"] == key and item["payload"] != payload:
+                            raise ValueError(recover)
+                        if item["key"] != key and item["state"] == "rejected":
+                            pending.append(item)
+                    return pending
+
+                # The destination read can overlap another admission. Publish the map re-read
+                # after it, and resolve a new alias only after releasing the turn lock.
+                conflicts(attempts)
+                baseline = attempts
+                while True:
+                    with turn_lock():
+                        current = snapshot_attempts()
+                        pending = changed(current, baseline)
+                    if pending:
+                        conflicts({item["key"]: item for item in pending})
+                        baseline = current
+                        continue
+                    authorize()
+                    with turn_lock():
+                        current = snapshot_attempts()
+                        pending = changed(current, baseline)
+                        if not pending:
+                            callback = (attempt_owner or {}).get("explicit_delivery_state")
+                            attempt = {"payload": payload, "key": key, "state": "sending"}
+                            record_attempt = (attempt_owner or {}).get("record_whatsapp_attempt")
+                            if attempt_owner is not None:
+                                current[key] = attempt
+                                attempt_owner["whatsapp_send_attempts"] = current
+                                attempt_owner["whatsapp_send_attempt"] = attempt
+                            if record_attempt:
+                                record_attempt(attempt)
+                            if callback:
+                                callback("sending")
+                            break
+                    conflicts({item["key"]: item for item in pending})
+                    baseline = current
                 try:
                     result = method(identity, operation)(**payload, idempotency_key=key)
                 except Exception as exc:
                     exc.whatsapp_media_id = args.get("media_id")
                     exc.idempotency_key = key
-                    attempt["state"] = "rejected" if public_quota_error(exc) else "uncertain"
+                    with turn_lock():
+                        attempt["state"] = "rejected" if public_quota_error(exc) else "uncertain"
+                        if record_attempt:
+                            record_attempt(attempt)
+                        if callback:
+                            callback(attempt["state"] if context or attempt["state"] == "uncertain" else None)
+                    raise
+                with turn_lock():
+                    attempt["state"] = "sent"
                     if record_attempt:
                         record_attempt(attempt)
                     if callback:
-                        callback(attempt["state"] if context or attempt["state"] == "uncertain" else None)
-                    raise
-                attempt["state"] = "sent"
-                if record_attempt:
-                    record_attempt(attempt)
-                if callback:
-                    callback("sent")
+                        callback("sent")
                 if context and context.get("mode") == "whatsapp":
                     record_explicit(context, str(args.get("text") or ""), result)
                 result = {"message": result, "idempotency_key": key, "media_id": args.get("media_id")}

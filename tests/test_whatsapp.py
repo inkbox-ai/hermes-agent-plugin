@@ -2305,6 +2305,123 @@ def test_rejected_alias_requires_owned_direct_conversation_evidence(factory, tmp
         client.close()
 
 
+def test_lookup_overlap_cannot_drop_or_release_unresolved_source_reply(factory, tmp_path, monkeypatch):
+    """A destination lookup must not publish a stale attempt map over a source reply.
+
+    The source reply can checkpoint and become uncertain while that lookup is
+    still in flight. Its completion, or a later cleared delivery flag, must not
+    authorize another automatic source send.
+    """
+    import threading
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        value.queue.completion_timeout = 30
+        client = real_identity(value.adapter)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+            NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        lookup_entered, lookup_release = threading.Event(), threading.Event()
+        post_source_entered, post_source_release = threading.Event(), threading.Event()
+        post_outreach_entered, post_outreach_release = threading.Event(), threading.Event()
+        quinn = uid(99)
+
+        def get(path, **kwargs):
+            if str(path).endswith("/" + quinn):
+                if not lookup_entered.is_set():
+                    lookup_entered.set()
+                    assert lookup_release.wait(5), "destination lookup was not released"
+                return conversation_wire(quinn, remote_number="+15555550199")
+            raise AssertionError(path)
+
+        def post(_path, **kwargs):
+            text = kwargs["json"]["text"]
+            if text == "Source reply":
+                post_source_entered.set()
+                assert post_source_release.wait(5), "source POST was not released"
+                return {"message": {"id": "unreadable"}}
+            if text == "Independent outreach":
+                post_outreach_entered.set()
+                assert post_outreach_release.wait(5), "outreach POST was not released"
+                return {"message": WIRE}
+            raise AssertionError(text)
+
+        client.whatsapp._http.get.side_effect = get
+        outcome = {}
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            client.whatsapp._http.post.side_effect = InkboxAPIError(403, {"error": "whatsapp_contact_not_allowed"})
+            rejected = json.loads(invoke("send_whatsapp", {
+                "to": "+15555550102", "text": "For Pat", "idempotency_key": "outreach-p"}, session))
+            assert "error" in rejected and client.whatsapp._http.get.call_count == 0
+            client.whatsapp._http.post.side_effect = post
+            results = {}
+
+            def send(name, payload):
+                results[name] = json.loads(invoke("send_whatsapp", payload, session))
+
+            outreach = threading.Thread(target=send, args=("outreach", {
+                "conversation_id": quinn, "text": "Independent outreach", "idempotency_key": "outreach-q"}))
+            source = threading.Thread(target=send, args=("source", {"text": "Source reply"}))
+            outreach.start()
+            assert lookup_entered.wait(5), "outreach did not reach destination lookup"
+            source.start()
+            assert post_source_entered.wait(5), "source reply did not checkpoint before lookup resumed"
+            lookup_release.set()
+            outreach.join(5)
+            if outreach.is_alive():
+                assert post_outreach_entered.wait(1), "outreach stalled after destination lookup"
+                post_source_release.set()
+                source.join(5)
+                post_outreach_release.set()
+                outreach.join(5)
+            else:
+                post_source_release.set()
+                source.join(5)
+            assert not outreach.is_alive() and not source.is_alive()
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            outcome["journal"] = json.loads(json.dumps(turn["whatsapp_send_attempts"]))
+            outcome["context"] = json.loads(json.dumps(active_context(session)["whatsapp_send_attempts"]))
+            outcome["results"] = results
+            # A later accepted outreach must not replace an unresolved source attempt.
+            active_context(session)["explicit_delivery_state"]("sent")
+            outcome["after_outreach_success"] = turn["explicit_delivery_state"]
+            value.queue.capture_result(event, "Source final")
+            outcome["before_final"] = client.whatsapp._http.post.call_count
+            # Clearing the scalar still leaves the unresolved attempt in the journal.
+            turn["explicit_delivery_state"] = "sent"
+            final = await value.adapter.send(event.source.chat_id, "Source final", reply_to=event.message_id)
+            outcome["final"] = final
+            outcome["after_final"] = client.whatsapp._http.post.call_count
+            await value.adapter.on_processing_complete(event, "success" if final.success else "failure")
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound())
+            await settle(value.queue)
+            journal = outcome["journal"]
+            context = outcome["context"]
+            source_attempt = next(item for item in journal.values() if item["payload"]["text"] == "Source reply")
+            assert source_attempt["state"] == "uncertain"
+            assert context[source_attempt["key"]]["state"] == "uncertain"
+            assert outcome["after_outreach_success"] == "uncertain"
+            assert journal["outreach-p"]["state"] == "rejected"
+            assert "error" in outcome["results"]["source"]
+            assert outcome["final"].success is False
+            assert outcome["after_final"] == outcome["before_final"]
+            assert all(call.kwargs["json"].get("text") != "Source final" for call in client.whatsapp._http.post.call_args_list)
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 def test_rejected_group_does_not_alias_distinct_group_or_participants(factory, tmp_path, monkeypatch):
     from inkbox import InkboxAPIError
     from inkbox_plugin import tools

@@ -14,13 +14,35 @@ logger = logging.getLogger(__name__)
 try:
     from .companion import CompanionReceiver, digest, read_checkpoint
     from .conversation import approval_reply, conversation_control, reply_route
-    from .imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
+    from .imessage_state import bind_context, clear_context, turn_lock, validate_reply_target, ReplyPreflightError
     from .slack import send_reply
 except ImportError:  # pragma: no cover - direct local import
     from companion import CompanionReceiver, digest, read_checkpoint
     from conversation import approval_reply, conversation_control, reply_route
-    from imessage_state import bind_context, clear_context, validate_reply_target, ReplyPreflightError
+    from imessage_state import bind_context, clear_context, turn_lock, validate_reply_target, ReplyPreflightError
     from slack import send_reply
+
+
+def _whatsapp_attempt_rows(turn):
+    rows = [item for item in (turn.get("whatsapp_send_attempts") or {}).values() if isinstance(item, dict)]
+    singular = turn.get("whatsapp_send_attempt")
+    if isinstance(singular, dict) and all(item.get("key") != singular.get("key") for item in rows):
+        rows.append(singular)
+    return rows
+
+
+def _fenced_whatsapp_delivery(turn, state):
+    """Keep a rejected or still-unresolved attempt ahead of a later outreach result."""
+    rows = _whatsapp_attempt_rows(turn)
+    if state == "uncertain" or any(item.get("state") == "uncertain" for item in rows):
+        return "uncertain"
+    if state == "sending" or any(item.get("state") == "sending" for item in rows):
+        return "sending"
+    from .whatsapp_tools import _destination
+    source = _destination({"conversation_id": turn["route"]["conversation_id"]}, turn["route"])
+    if any(item.get("state") == "rejected" and _destination(item.get("payload"), turn["route"]) == source for item in rows):
+        return "rejected"
+    return state
 
 
 class NativeTurns(CompanionReceiver):
@@ -518,12 +540,8 @@ class NativeTurns(CompanionReceiver):
                         self._record_outbound(row, turn, message)
                     def tool_state(state):
                         if turn["route"]["mode"] == "whatsapp" and state not in {"sending", "uncertain"}:
-                            from .whatsapp_tools import _destination
-                            source = _destination({"conversation_id": turn["route"]["conversation_id"]}, turn["route"])
-                            # Independent outreach cannot clear a rejected source reply.
-                            if any(item["state"] == "rejected" and _destination(item["payload"], turn["route"]) == source
-                                   for item in turn.get("whatsapp_send_attempts", {}).values()):
-                                state = "rejected"
+                            # Independent outreach cannot clear an unresolved send or a rejected source reply.
+                            state = _fenced_whatsapp_delivery(turn, state)
                         turn["explicit_delivery_state"] = state
                         self._save(row)
                     def tool_request(attempt):
@@ -673,7 +691,11 @@ class NativeTurns(CompanionReceiver):
         if read_only:
             unavailable = self.active.get(row["chat_id"]) is not turn or turn["state"] in {"cancelled", "quarantined"}
         else:
-            unavailable = row.get("blocked") or turn["state"] in {"done", "uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain"
+            with turn_lock():
+                unresolved_attempt = any(
+                    item.get("state") in {"sending", "uncertain"} for item in _whatsapp_attempt_rows(turn))
+            unavailable = (row.get("blocked") or turn["state"] in {"done", "uncertain", "sending", "cancelled", "quarantined"}
+                           or turn.get("explicit_delivery_state") == "uncertain" or unresolved_attempt)
         if unavailable:
             raise PermissionError("Original WhatsApp turn is no longer active")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
@@ -768,7 +790,13 @@ class NativeTurns(CompanionReceiver):
     async def _send(self, row, turn, content):
         self._require_owner()
         route = turn["route"]
-        if turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") in {"sending", "uncertain"}:
+        unresolved_attempt = False
+        if route["mode"] == "whatsapp":
+            with turn_lock():
+                unresolved_attempt = any(
+                    item.get("state") in {"sending", "uncertain"} for item in _whatsapp_attempt_rows(turn))
+        if (turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"}
+                or turn.get("explicit_delivery_state") in {"sending", "uncertain"} or unresolved_attempt):
             return SendResult(success=False, error="Original native turn is no longer sendable; no automatic retry", raw_response={"inkbox_no_retry": True})
         if any(item.get("state") in {"sending", "uncertain"} for item in turn.get("media_deliveries", {}).values()):
             return SendResult(success=False, error="Original media delivery is uncertain", raw_response={"inkbox_no_retry": True})
