@@ -228,7 +228,7 @@ def register(ctx, check_fn):
         (
             "inkbox_list_whatsapp_conversations",
             "List WhatsApp conversations with local unread counts.",
-            {**pagination, "include_groups": {"type": "boolean", "description": "Default true; false reads only direct conversations"}},
+            {**pagination, "include_groups": {"type": "boolean", "description": "Default false; true also includes group conversations"}},
             [],
             "list_whatsapp_conversations",
         ),
