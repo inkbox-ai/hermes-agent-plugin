@@ -137,6 +137,7 @@ class CompanionReceiver:
         if max_bytes < 1:
             raise ValueError("Companion context limit must be positive")
         self.adapter = adapter
+        self.namespace_identity_id = adapter._identity_id
         self.root = root
         self.max_bytes = max_bytes
         self.rows: dict[str, dict] = {}
@@ -331,7 +332,7 @@ class CompanionReceiver:
         if str(conversation) != meta["conversation_id"]:
             raise ValueError("Companion message does not match the conversation")
         key = digest(json.dumps([
-            getattr(self.adapter, "_base_url", ""), self.adapter._identity_handle, self.adapter._identity_id,
+            getattr(self.adapter, "_base_url", ""), self.adapter._identity_handle, self.namespace_identity_id,
             meta["channel"], meta["scope_id"], meta["conversation_id"], meta.get("activation_id", "ordinary"),
         ]))
         row = self.rows.get(key)

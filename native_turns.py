@@ -169,7 +169,7 @@ class NativeTurns(CompanionReceiver):
                 self._checkpoint_control(event, row, source_id, control_turn, source_id)
                 if text.casefold() in {"/stop", "/cancel", "/clear", "/new"}:
                     for pending in row["turns"]:
-                        if pending["state"] == "pending":
+                        if pending["state"] == "pending" and self._same_control_scope(route, pending["route"]):
                             pending.update(state="cancelled", fenced=True)
                     self._checkpoint_control(event, row, source_id, control_turn, source_id)
                     for pending in row["turns"]:
@@ -345,6 +345,12 @@ class NativeTurns(CompanionReceiver):
                 continue
             if row.get("blocked") or "submitting" in row.get("controls", {}).values():
                 return
+            while self.active.get(row["chat_id"]) is not None and not self.closed:
+                await asyncio.sleep(.01)
+            if turn["state"] != "pending" or self.closed:
+                continue
+            if row.get("blocked") or "submitting" in row.get("controls", {}).values():
+                return
             self._require_owner()
             turn["state"] = "running"
             self._save(row)
@@ -391,7 +397,8 @@ class NativeTurns(CompanionReceiver):
                 await asyncio.gather(monitor, return_exceptions=True)
                 self.monitors.pop(turn["id"], None)
                 self.events.pop(turn["id"], None)
-                self.active.pop(row["chat_id"], None)
+                if self.active.get(row["chat_id"]) is turn:
+                    self.active.pop(row["chat_id"], None)
                 self.completions.pop(turn["id"], None)
                 if turn.get("session_id") and not clear_context(turn["session_id"], turn["id"]):
                     row["blocked"] = True
@@ -814,11 +821,19 @@ class NativeTurns(CompanionReceiver):
             self._save(row)
             return SendResult(success=False, error=f"Native reply outcome is uncertain ({type(exc).__name__}); no plain resend", raw_response={"inkbox_no_retry": True})
 
+    @staticmethod
+    def _same_control_scope(incoming, target):
+        if "whatsapp" not in {incoming.get("mode"), target.get("mode")}:
+            return True
+        return all(incoming.get(key) == target.get(key) for key in ("mode", "conversation_id", "author"))
+
     async def control(self, event, row):
         active = self.active.get(row["chat_id"])
         if not active:
             return False
         incoming = event.metadata["inkbox_reply_route"]
+        if incoming.get("mode") == "whatsapp" and incoming.get("reaction"):
+            return False
         route = active["route"]
         if "whatsapp" in {incoming.get("mode"), route.get("mode")} and any(
                 incoming.get(key) != route.get(key) for key in ("mode", "conversation_id", "author")):
@@ -863,7 +878,7 @@ class NativeTurns(CompanionReceiver):
                 # Snapshot cancellation before awaits: later receipts belong to
                 # the successor and wait until this control finishes forwarding.
                 for turn in row["turns"]:
-                    if turn["state"] == "pending":
+                    if turn["state"] == "pending" and self._same_control_scope(incoming, turn["route"]):
                         turn.update(state="cancelled", fenced=True)
                         self._release_context(row, turn)
                 self._save(row)

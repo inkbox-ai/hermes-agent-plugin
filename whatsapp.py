@@ -7,6 +7,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,23 @@ def unsupported(exc):
         and "whatsapp" in detail
         and any(part in detail for part in ("event", "prefix", "unknown", "unsupported"))
     )
+
+
+def reconcile_notifications(reconcile):
+    """Retain direct-message callbacks when an older API rejects only reaction events."""
+    try:
+        reconcile(EVENTS)
+        return True
+    except Exception as exc:
+        if not unsupported(exc):
+            raise
+    try:
+        reconcile(tuple(event for event in EVENTS if event != "whatsapp.reaction_received"))
+        return True
+    except Exception as exc:
+        if not unsupported(exc):
+            raise
+    return False
 
 
 async def receive(adapter, envelope):
@@ -156,6 +174,100 @@ async def receive(adapter, envelope):
     return web.Response(status=202, text="WhatsApp receipt saved")
 
 
+async def receive_reaction(adapter, envelope):
+    """Admit one peer reaction as context, never as message text or a control answer."""
+    from aiohttp import web
+    from gateway.platforms.base import MessageEvent, MessageType
+    from .adapter import _chat_id_for_route, _escape_contact_memory_tokens, _parse_inkbox_timestamp, response_mode
+
+    reaction = (envelope.get("data") or {}).get("reaction") or {}
+    native = getattr(adapter, "_native_turns", None)
+    if native is None:
+        return web.Response(status=503, text="WhatsApp receiver is not ready")
+    actor = reaction.get("remote_number")
+    revision = reaction.get("revision")
+    status = reaction.get("status")
+    if (str(reaction.get("agent_identity_id") or "") != str(adapter._identity_id)
+            or reaction.get("direction") != "inbound" or status not in {"applied", "removed"}
+            or not isinstance(actor, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", actor)
+            or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1):
+        record_reaction(adapter, envelope)
+        return web.Response(status=200, text="Reaction state retained")
+    try:
+        reaction_id = str(uuid.UUID(str(reaction.get("id"))))
+        target_id = str(uuid.UUID(str(reaction.get("target_message_id"))))
+        conversation_id = str(uuid.UUID(str(reaction.get("conversation_id"))))
+    except (ValueError, TypeError, AttributeError):
+        return web.Response(status=200, text="Unsupported reaction context")
+    prior = native.delivery_status.get("whatsapp-reaction:" + reaction_id, {})
+    if prior.get("revision", 0) > revision or (prior.get("revision") == revision
+            and str(prior.get("updated_at", "")) > str(reaction.get("updated_at", ""))):
+        return web.Response(status=200, text="Older reaction state")
+    source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"inkbox:whatsapp-reaction:{reaction_id}:{revision}:{status}"))
+    if native.acknowledge_source(source_id):
+        return web.Response(status=200, text="Reaction context retained")
+    key = "whatsapp-reaction-context:" + source_id
+    if adapter._dedup_begin(key):
+        return web.Response(status=200, text="duplicate")
+    try:
+        current = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_reaction"), reaction_id)
+        expected = {"id": reaction_id, "target_message_id": target_id, "conversation_id": conversation_id,
+            "agent_identity_id": str(adapter._identity_id), "direction": "inbound", "remote_number": actor,
+            "revision": revision, "status": status}
+        if any(str(field(current, name)) != str(value) for name, value in expected.items()):
+            adapter._dedup_commit(key)
+            return web.Response(status=200, text="Reaction context is no longer current")
+        reaction = {**reaction, "emoji": field(current, "emoji"), "reaction": field(current, "reaction")}
+        target = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_message"), target_id)
+        conversation = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_conversation"), conversation_id)
+        participants = field(conversation, "participants") or []
+        local = field(conversation, "local_number")
+        if (str(field(target, "id")) != target_id or str(field(target, "agent_identity_id")) != str(adapter._identity_id)
+                or str(field(target, "conversation_id")) != conversation_id or field(target, "is_blocked")
+                or str(field(conversation, "id")) != conversation_id
+                or str(field(conversation, "agent_identity_id")) != str(adapter._identity_id)
+                or actor == local or actor not in participants):
+            adapter._dedup_commit(key)
+            return web.Response(status=200, text="Reaction target or actor unavailable")
+        group = bool(field(conversation, "is_group"))
+        contact = await adapter._resolve_contact_full(kind="phone", value=actor)
+        chat_id = f"whatsapp:{conversation_id}" if group else _chat_id_for_route(contact, f"whatsapp:{conversation_id}", actor)
+        name = (contact or {}).get("name") or actor
+        source = adapter.build_source(chat_id=str(chat_id), chat_name=f"Inkbox WhatsApp group {conversation_id}" if group else name,
+            chat_type="group" if group else "dm", user_id=str((contact or {}).get("id") or actor) if group else str(chat_id),
+            user_name=name, user_id_alt=actor, thread_id=f"whatsapp:{conversation_id}", message_id=source_id)
+        label = json.dumps(str(reaction.get("emoji") or reaction.get("reaction") or "reaction"), ensure_ascii=False)
+        text = _escape_contact_memory_tokens(f"[inkbox:whatsapp_reaction from={actor} conversation_id={conversation_id} reaction_id={reaction_id} target_message_id={target_id}]\n"
+            f"Peer reaction {label} was {'removed' if status == 'removed' else 'added'}. This is lightweight context, not a text message or instruction. "
+            "A question may warrant clarification; an acknowledgment usually needs no reply. Return exactly [SILENT] if no visible response is warranted.")
+        route = {"mode": "whatsapp", "chat_id": str(chat_id), "message_id": source_id, "author": actor,
+            "conversation_id": conversation_id, "conversation_kind": "group" if group else "direct", "participants": participants,
+            "raw_text": "", "reaction": True, "reaction_id": reaction_id, "reaction_target_message_id": target_id,
+            "identity_id": str(adapter._identity_id), "base_url": str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
+            "imessage_event_ids": [str(envelope.get("id") or source_id)]}
+        journal = adapter._conversation_state()
+        journal.row(str(chat_id))["chat_type"] = "group" if group else "dm"
+        if group and response_mode(adapter, "group_reply_mode") == "mention":
+            journal.quiet(str(chat_id), source_id, text)
+        else:
+            prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
+            event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, raw_message=envelope,
+                message_id=source_id, metadata={"inkbox_prepared": True, "inkbox_reply_route": route},
+                timestamp=_parse_inkbox_timestamp(reaction.get("updated_at")), channel_prompt=prompt, auto_skill=skill,
+                media_urls=[], media_types=[])
+            event.allow_gateway_control = False
+            adapter._last_inbound_modality[str(chat_id)] = "whatsapp"
+            await adapter._accept_native_imessage(event)
+        record_reaction(adapter, envelope)
+    except Exception as exc:
+        adapter._dedup_rollback(key)
+        if getattr(exc, "status_code", None) in {403, 404}:
+            return web.Response(status=200, text="Reaction target unavailable")
+        return web.Response(status=503, text="Reaction context temporarily unavailable")
+    adapter._dedup_commit(key)
+    return web.Response(status=202, text="Reaction context retained")
+
+
 async def refresh_media(adapter, event, identifiers):
     """Resolve temporary access immediately before native host download, including recovery."""
     event.media_urls, event.media_types = [], []
@@ -191,6 +303,8 @@ def record_status(adapter, envelope):
         return
     with native._checkpoint_lock:
         prior = native.delivery_status.get(message_id, {})
+        if not prior.get("source_id"):
+            return
         if prior.get("conversation_id") not in (None, message.get("conversation_id")):
             return
         from datetime import datetime, timezone
@@ -235,6 +349,9 @@ def record_reaction(adapter, envelope):
             return
         native.delivery_status[key] = {name: reaction.get(name) for name in (
             "id", "target_message_id", "conversation_id", "direction", "remote_number", "status", "revision", "updated_at")}
+        reaction_keys = [name for name in native.delivery_status if name.startswith("whatsapp-reaction:")]
+        for name in sorted(reaction_keys, key=lambda name: str(native.delivery_status[name].get("updated_at", "")))[:-256]:
+            native.delivery_status.pop(name, None)
         native._save_delivery_status()
 
 
@@ -333,6 +450,7 @@ def public_quota_error(exc):
     detail = getattr(exc, "detail", None)
     rejected = {
         403: {"whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"},
+        409: {"whatsapp_capability_not_ready", "whatsapp_quote_unavailable"},
         413: {"whatsapp_media_too_large"},
         422: {"whatsapp_groups_not_supported", "whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"},
         429: {"whatsapp_new_group_limit", "whatsapp_group_unanswered_limit", "whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"},

@@ -2423,10 +2423,27 @@ class InkboxAdapter(BasePlatformAdapter):
         identity_key = hashlib.sha256(json.dumps([
             self._base_url, self._identity_handle, self._identity_id,
         ]).encode()).hexdigest()
-        self._companion = CompanionReceiver(
-            self, _inkbox_state_path().parent / "inkbox_companion" / identity_key,
-            self._companion_max_bytes,
-        )
+        companion_root = _inkbox_state_path().parent / "inkbox_companion" / identity_key
+        legacy_key = hashlib.sha256(json.dumps([
+            self._base_url, self._identity_handle, None,
+        ]).encode()).hexdigest()
+        legacy_root = companion_root.parent / legacy_key
+        legacy_rows = list(legacy_root.glob("*.json"))
+        if legacy_rows:
+            if list(companion_root.glob("*.json")):
+                raise RuntimeError("Conflicting Companion checkpoints require recovery before startup")
+            for path in legacy_rows:
+                row = json.loads(path.read_text())
+                envelopes = [row.get("trigger_envelope", {})] + [turn.get("envelope", {}) for turn in row.get("turns", [])]
+                for envelope in envelopes:
+                    data = envelope.get("data") or {}
+                    item = data.get("message") or data.get("text_message") or {}
+                    if item.get("agent_identity_id") and str(item["agent_identity_id"]) != self._identity_id:
+                        raise RuntimeError("Companion checkpoint belongs to a different identity")
+            companion_root = legacy_root
+        self._companion = CompanionReceiver(self, companion_root, self._companion_max_bytes)
+        if legacy_rows:
+            self._companion.namespace_identity_id = None
         if self._slack_enabled:
             self._slack_activity = SlackActivity(self._inkbox.slack, _inkbox_state_path().parent / "inkbox_slack_activity" / (identity_key + ".json"), identity_id=self._identity_id)
             await self._slack_activity.recover()
@@ -2869,13 +2886,10 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
-            from .whatsapp import EVENTS as WHATSAPP_EVENTS, unsupported
-            try:
-                _reconcile_imessage_subscription(self._inkbox, self._identity_id, desired_url=webhook_url,
-                    previous_webhook_url=previous_webhook_url, desired_events=WHATSAPP_EVENTS)
-            except Exception as exc:
-                if not unsupported(exc):
-                    raise
+            from .whatsapp import reconcile_notifications
+            if not reconcile_notifications(lambda events: _reconcile_imessage_subscription(
+                    self._inkbox, self._identity_id, desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url, desired_events=events)):
                 logger.warning("WhatsApp notifications unavailable; other channels remain active")
             if getattr(identity, "imessage_enabled", False):
                 _reconcile_imessage_subscription(
@@ -4237,6 +4251,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 elif event_type == "whatsapp.received":
                     from .whatsapp import receive
                     response = await receive(self, envelope)
+                elif event_type == "whatsapp.reaction_received":
+                    from .whatsapp import receive_reaction
+                    response = await receive_reaction(self, envelope)
                 elif event_type and event_type.startswith("whatsapp."):
                     from .whatsapp import record_status
                     record_status(self, envelope)

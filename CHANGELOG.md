@@ -1,16 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.21
 
 - Add WhatsApp groups with isolated native conversation sessions and actual-author permission/Stop fences. Ordinary native final replies remain plain; explicit quoted tools preserve admitted source metadata without changing old durable payloads.
-- Add chronological quote-chain reads and whole-message named/custom reaction tools with explicit stable mutation keys and versioned receipt/removal semantics. Reaction events never wake duplicate model work.
+- Add chronological quote-chain reads and whole-message named/custom reaction tools with explicit stable mutation keys and versioned receipt/removal semantics. Authorized peer reactions admit lightweight context once per revision; self echoes and inaccessible or unresolved targets never wake model work.
 - Raise the current WhatsApp SDK floor to 0.7.24 and share the SDK's group/reply request fixture matrix. Existing iMessage, Slack, media and native turn lifecycles remain in place.
-
-## 0.2.21
 
 - Add approved, dedicated one-to-one WhatsApp with signed reception, native final replies, scoped approvals, and durable duplicate/uncertain-send protection.
 - Add ten WhatsApp tools for messages, conversations, owned media, local mark-read, readiness, and send lookup. Preserve media IDs and refresh incoming attachment URLs at dispatch.
-- Require SDK 0.7.21 and exercise the exact public SDK candidate in current-feature and native-install checks while retaining historical compatibility lanes.
+- Require SDK 0.7.24 and exercise the exact public SDK candidate in current-feature and native-install checks while retaining historical compatibility lanes.
 
 - Add `inkbox_slack_download_file_preview` to save available Slack image previews locally for vision inspection, without requiring a public image URL.
 

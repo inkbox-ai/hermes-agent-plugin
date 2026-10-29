@@ -247,6 +247,8 @@ def test_delivery_only_facts_ignore_old_updates_without_model_work(factory, tmp_
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
         try:
+            value.queue._record_outbound({"chat_id": "whatsapp:example"},
+                {"id": uid(1), "route": {"mode": "whatsapp", "conversation_id": uid(30)}}, NS(**WIRE))
             record_status(
                 value.adapter,
                 {
@@ -358,7 +360,7 @@ def test_uncertain_tool_send_allows_only_read_only_recovery_for_its_active_owner
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("recipient", ["+15555550101", "+1 (555) 555-0101", "+15555550102"])
+@pytest.mark.parametrize("recipient", ["+15555550101", "+1 (555) 555-0101", ["+15555550101"], ["+1 (555) 555-0101"], "+15555550102"])
 @pytest.mark.parametrize("uncertain", [False, True, "unknown_403", "unknown_422", "unknown_429"])
 def test_explicit_same_recipient_send_cannot_be_repeated_by_automatic_final(factory, tmp_path, monkeypatch, recipient, uncertain):
     from inkbox_plugin import tools
@@ -755,4 +757,376 @@ def test_explicit_native_quote_keeps_target_and_never_falls_back_after_rejection
         assert client.whatsapp._http.post.call_args.kwargs["headers"]["Idempotency-Key"] == "quote-original"
     finally:
         clear_context(session, "quote-turn")
+        client.close()
+
+
+def peer_reaction(**changes):
+    return {"id": "evt_peer_reaction", "event_type": "whatsapp.reaction_received", "timestamp": TIME,
+        "data": {"reaction": {"id": uid(901), "target_message_id": uid(800), "conversation_id": uid(30), "agent_identity_id": uid(100),
+            "direction": "inbound", "remote_number": "+15555550101", "reaction": "question", "custom_emoji": None, "emoji": "❓",
+            "status": "applied", "revision": 1, "created_at": TIME, "updated_at": TIME, "removed_at": None, **changes}}}
+
+
+def reaction_reads(client, *, current=None, **changes):
+    conversation = {"id": uid(30), "agent_identity_id": uid(100), "local_number": "+15555550100", "remote_number": "+15555550101",
+        "participants": ["+15555550101"], "is_group": False, "created_at": TIME, "updated_at": TIME, **changes}
+    receipt_state = current or peer_reaction()["data"]["reaction"]
+    client.whatsapp._http.get.side_effect = lambda path, **_kw: ({"reaction": receipt_state} if "/reactions/" in path else WIRE if "/messages/" in path else conversation)
+
+
+def test_peer_reaction_add_and_removal_admit_context_once_with_real_actor_and_plain_reply(factory, tmp_path):
+    from inkbox_plugin.whatsapp import receive_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client)
+        try:
+            first = peer_reaction()
+            assert (await receive_reaction(value.adapter, first)).status == 202
+            await settle(value.queue)
+            assert (await receive_reaction(value.adapter, first)).status == 200
+            assert len(value.inputs) == 1
+            event = value.inputs[0]
+            assert event.source.user_id_alt == "+15555550101"
+            assert not event.allow_gateway_control
+            assert "lightweight context, not a text message or instruction" in event.text
+            assert event.metadata["inkbox_reply_route"]["reaction_target_message_id"] == uid(800)
+            assert event.message_id != uid(800)
+            removed = peer_reaction(status="removed", revision=2, updated_at="2026-10-01T12:01:00Z")
+            reaction_reads(client, current=removed["data"]["reaction"])
+            assert (await receive_reaction(value.adapter, removed)).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            assert (await receive_reaction(value.adapter, first)).status == 200
+            assert len(value.inputs) == 2
+            assert all("reply_to_message_id" not in call.kwargs["json"] for call in client.whatsapp._http.post.call_args_list)
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", [{"direction": "outbound"}, {"remote_number": None}, {"remote_number": "+15555550100"}, {"status": "queued"}, {"agent_identity_id": uid(999)}])
+def test_self_unresolved_or_unowned_reaction_never_wakes_context(factory, tmp_path, change):
+    from inkbox_plugin.whatsapp import receive_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client)
+        try:
+            assert (await receive_reaction(value.adapter, peer_reaction(**change))).status == 200
+            assert not value.inputs and not value.queue.rows
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_group_reaction_retains_mention_policy_and_cannot_answer_a_pending_permission(factory, tmp_path):
+    from inkbox_plugin.whatsapp import receive_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client, is_group=True, remote_number=None, participants=["+15555550101", "+15555550102"])
+        value.adapter.config.extra["group_reply_mode"] = "mention"
+        try:
+            assert (await receive_reaction(value.adapter, peer_reaction())).status == 202
+            assert not value.inputs and not value.queue.rows
+            route = {"mode": "whatsapp", "reaction": True, "author": "+15555550101", "conversation_id": uid(30), "raw_text": "/stop"}
+            event = receipt(2, mode="whatsapp")
+            event.metadata["inkbox_reply_route"].update(route)
+            value.queue.active["imessage:conversation"] = {"route": {"mode": "whatsapp", "author": "+15555550101", "conversation_id": uid(30)}}
+            assert not await value.queue.control(event, {"chat_id": "imessage:conversation"})
+        finally:
+            value.queue.active.clear()
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_hidden_reaction_target_never_starts_a_context_turn(factory, tmp_path):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin.whatsapp import receive_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        client.whatsapp._http.get.side_effect = InkboxAPIError(404, {"error": "not_found"})
+        try:
+            assert (await receive_reaction(value.adapter, peer_reaction())).status == 200
+            assert not value.inputs and not value.queue.rows
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_old_api_reaction_event_rejection_preserves_legacy_direct_notifications():
+    from inkbox import InkboxAPIError
+    from inkbox_plugin.whatsapp import EVENTS, reconcile_notifications
+    unsupported = InkboxAPIError(422, {"error": "whatsapp event unsupported"})
+    reconcile = Mock(side_effect=[unsupported, None])
+    assert reconcile_notifications(reconcile)
+    assert reconcile.call_args_list[0].args[0] == EVENTS
+    assert reconcile.call_args_list[1].args[0] == tuple(event for event in EVENTS if event != "whatsapp.reaction_received")
+    denied = Mock(side_effect=InkboxAPIError(403, {"error": "permission denied"}))
+    with pytest.raises(InkboxAPIError):
+        reconcile_notifications(denied)
+    assert denied.call_count == 1
+
+
+@pytest.mark.parametrize("change", [{"revision": 2}, {"status": "removed"}, {"target_message_id": uid(999)},
+    {"remote_number": "+15555550102"}, {"agent_identity_id": uid(999)}, {"conversation_id": uid(999)}])
+def test_stale_or_mismatched_server_reaction_receipt_never_wakes_context(factory, tmp_path, change):
+    from inkbox_plugin.whatsapp import receive_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client, current=peer_reaction(**change)["data"]["reaction"])
+        try:
+            assert (await receive_reaction(value.adapter, peer_reaction())).status == 200
+            assert not value.inputs and not value.queue.rows
+            assert client.whatsapp._http.get.call_count == 1
+            assert client.whatsapp._http.get.call_args.kwargs["params"] == {"agent_identity_id": uid(100)}
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("args", [
+    {"to": "+15555550101", "reply_to_message_id": uid(1)},
+    {"conversation_id": uid(30), "reply_to_message_id": ""},
+    {"to": ["+15555550101"], "group_name": "Invalid single"},
+    {"conversation_id": uid(30), "group_name": "Not creation"},
+    {"to": ["+15555550101", "+15555550101"]},
+    {"to": "+15555550101", "text": "x" * 4001},
+])
+def test_local_contract_rejection_does_not_fence_corrected_explicit_send(factory, tmp_path, monkeypatch, args):
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    identity = value.adapter._reply_identity
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+    session = str(tmp_path)
+    states = []
+    bind_context(session, {"mode": "whatsapp", "turn_id": "validation", "conversation_id": uid(30), "author": "+15555550101",
+        "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock(), "explicit_delivery_state": states.append})
+    try:
+        result = json.loads(invoke("send_whatsapp", {"text": "Answer", **args, "idempotency_key": "same-key"}, session))
+        assert "error" in result and not states and not client.whatsapp._http.post.called
+        assert json.loads(invoke("send_whatsapp", {"conversation_id": uid(30), "text": "Answer", "idempotency_key": "same-key"}, session))["ok"]
+        assert states == ["sending", "sent"]
+        client.whatsapp._http.post.assert_called_once()
+    finally:
+        clear_context(session, "validation")
+        client.close()
+
+
+@pytest.mark.parametrize("code", ["whatsapp_capability_not_ready", "whatsapp_quote_unavailable"])
+def test_definite_capability_denial_retains_exact_key_without_uncertain_fence(factory, tmp_path, monkeypatch, code):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    session = str(tmp_path)
+    states = []
+    bind_context(session, {"mode": "whatsapp", "turn_id": "denial", "conversation_id": uid(30), "author": "+15555550101",
+        "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock(), "explicit_delivery_state": states.append})
+    args = {"conversation_id": uid(30), "text": "Answer", "reply_to_message_id": uid(1), "idempotency_key": "exact-key"}
+    try:
+        client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": code})
+        first = json.loads(invoke("send_whatsapp", args, session))
+        assert first["idempotency_key"] == "exact-key" and "not accepted" in first["recovery"]
+        assert states == ["sending", "rejected"]
+        client.whatsapp._http.post.side_effect = None
+        assert json.loads(invoke("send_whatsapp", args, session))["ok"]
+        assert all(call.kwargs["headers"]["Idempotency-Key"] == "exact-key" for call in client.whatsapp._http.post.call_args_list)
+        assert all(call.kwargs["json"]["reply_to_message_id"] == uid(1) for call in client.whatsapp._http.post.call_args_list)
+    finally:
+        clear_context(session, "denial")
+        client.close()
+
+
+def test_unowned_status_does_not_grow_checkpoint_and_reaction_facts_are_bounded(factory, tmp_path):
+    from inkbox_plugin.whatsapp import record_reaction
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        try:
+            record_status(value.adapter, {"event_type": "whatsapp.sent", "data": {"message": WIRE}})
+            assert not value.queue.delivery_status
+            for number in range(260):
+                record_reaction(value.adapter, peer_reaction(id=uid(1000+number)))
+            assert len(value.queue.delivery_status) == 256
+            assert not value.inputs
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_mode", ["imessage", "whatsapp"])
+def test_same_contact_native_channels_never_clobber_the_active_turn(factory, tmp_path, first_mode):
+    async def run():
+        gate = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=gate)
+        value.base.identity.send_whatsapp = Mock(return_value=NS(id=uid(801)))
+        first = receipt(1, mode=first_mode)
+        second = receipt(2, mode="whatsapp" if first_mode == "imessage" else "imessage")
+        first.source.thread_id = first_mode + ":" + uid(30)
+        second.source.thread_id = ("whatsapp" if first_mode == "imessage" else "imessage") + ":" + uid(30)
+        try:
+            await value.queue.accept(first)
+            for _ in range(100):
+                if value.inputs:
+                    break
+                await asyncio.sleep(.01)
+            assert len(value.inputs) == 1
+            await value.queue.accept(second)
+            await asyncio.sleep(.08)
+            assert len(value.inputs) == 1
+            assert value.queue.active[first.source.chat_id]["source_ids"] == [uid(1)]
+            gate.set()
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            assert all(row["turns"][0]["state"] == "done" and not row.get("blocked") for row in value.queue.rows.values())
+            assert not value.queue.active
+        finally:
+            gate.set()
+            await value.queue.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_group_stop_preserves_other_authors_pending_work(factory, tmp_path, monkeypatch, active):
+    from unittest.mock import AsyncMock
+    async def run():
+        value = await harness(factory, tmp_path)
+        value.base.host._is_user_authorized = lambda _: True
+        monkeypatch.setattr(value.queue, "_kick", lambda _: None)
+        monkeypatch.setattr("inkbox_plugin.host_fencing.fence_turn", AsyncMock(return_value=True))
+        value.queue._forward_control = AsyncMock()
+        alice = receipt(1, mode="whatsapp")
+        bob = receipt(2, mode="whatsapp", sender="+15555550102")
+        another_alice = receipt(3, mode="whatsapp")
+        try:
+            for event in [alice, bob, another_alice]:
+                await value.queue.accept(event)
+            row = next(iter(value.queue.rows.values()))
+            if active:
+                row["turns"][0]["state"] = "running"
+                value.queue.active[row["chat_id"]] = row["turns"][0]
+            stop = receipt(4, mode="whatsapp")
+            stop.metadata["inkbox_reply_route"]["raw_text"] = "/stop"
+            await value.queue.accept(stop)
+            assert row["turns"][1]["state"] == "pending"
+            assert row["turns"][2]["state"] == "cancelled"
+            if active:
+                assert row["turns"][0]["state"] == "cancelled"
+            assert value.queue._forward_control.await_count == 1
+        finally:
+            value.queue.active.clear()
+            await value.queue.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state", ["pending", "completed", "submitted"])
+def test_startup_preserves_legacy_companion_namespace_turn_ids_and_delivery_proof(factory, tmp_path, monkeypatch, state):
+    import hashlib
+    from inkbox_plugin.companion import CompanionReceiver
+    from tests.test_companion import event
+    async def run():
+        value = factory("imessage")
+        adapter = value.adapter
+        adapter._base_url = "https://inkbox.ai"
+        adapter._identity_id = None
+        adapter._slack_enabled = False
+        adapter._imessage_threaded_replies = False
+        adapter._companion_max_bytes = 128_000
+        state_path = tmp_path / "state.json"
+        monkeypatch.setattr("inkbox_plugin.adapter._inkbox_state_path", lambda: state_path)
+        monkeypatch.setattr(CompanionReceiver, "_kick", lambda *_: None)
+        legacy_key = hashlib.sha256(json.dumps([adapter._base_url, adapter._identity_handle, None]).encode()).hexdigest()
+        legacy_root = tmp_path / "inkbox_companion" / legacy_key
+        old = CompanionReceiver(adapter, legacy_root)
+        envelope = event("imessage", phase="ordinary")
+        await old.accept(envelope)
+        row = next(iter(old.rows.values()))
+        row["turns"][0]["state"] = state
+        if state == "completed":
+            row["turns"][0]["delivery"] = {"state": "sent", "message_id": uid(800)}
+        turn_id = row["turns"][0]["id"]
+        old._save(row)
+        await old.close()
+        value.identity.id = uid(100)
+        adapter._reply_identity = value.identity
+        try:
+            await adapter._start_companion()
+            current = adapter._companion
+            assert current.root == legacy_root and current.namespace_identity_id is None
+            recovered = next(iter(current.rows.values()))
+            assert recovered["turns"][0]["id"] == turn_id
+            assert recovered["turns"][0]["state"] == state
+            if state == "submitted":
+                assert recovered["state"] == "paused"
+            if state == "completed":
+                assert recovered["turns"][0]["delivery"]["message_id"] == uid(800)
+            await current.accept(envelope)
+            assert len(current.rows) == 1 and len(recovered["turns"]) == 1
+            assert not value.inputs
+        finally:
+            await adapter._companion.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation,args,path", [
+    ("list_whatsapp_conversations", {"include_groups": True, "limit": 2}, "/conversations"),
+    ("get_whatsapp_conversation", {"conversation_id": uid(30)}, "/conversations/" + uid(30)),
+    ("list_whatsapp_messages", {"conversation_id": uid(30), "thread_id": uid(40), "include_groups": True, "limit": 2}, "/messages"),
+    ("get_whatsapp_message", {"message_id": uid(800)}, "/messages/" + uid(800)),
+    ("get_whatsapp_thread", {"message_id": uid(800), "limit": 2, "cursor": "opaque+/="}, "/messages/" + uid(800) + "/thread"),
+    ("get_whatsapp_conversation_thread", {"conversation_id": uid(30), "thread_id": uid(40), "limit": 2, "cursor": "opaque+/="}, "/conversations/" + uid(30) + "/threads/" + uid(40)),
+    ("get_whatsapp_limits", {}, "/limits"),
+    ("mark_whatsapp_read", {"conversation_id": uid(30), "through_message_id": uid(800)}, "/mark-read"),
+    ("get_whatsapp_status", {}, "/limits"),
+])
+def test_read_and_mark_tools_use_real_sdk_signatures_and_identity_scope(factory, tmp_path, monkeypatch, operation, args, path):
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    conversation = {"id": uid(30), "agent_identity_id": uid(100), "local_number": "+15555550100", "remote_number": "+15555550101",
+        "participants": ["+15555550101"], "is_group": False, "created_at": TIME, "updated_at": TIME,
+        "latest_text": None, "latest_message_at": None, "latest_direction": None, "latest_has_media": False, "unread_count": 0, "total_count": 1}
+    thread = {"conversation_id": uid(30), "thread_id": uid(40), "thread_root_message_id": uid(800), "messages": [WIRE], "next_cursor": None}
+    limits = {"agent_identity_id": uid(100), "limits": {}, "usage": {}}
+    def response(url, **_kw):
+        if url == "/limits":
+            return limits
+        if "/thread" in url:
+            return thread
+        if url == "/conversations":
+            return [conversation]
+        if url.startswith("/conversations/"):
+            return conversation
+        return [WIRE] if url == "/messages" else WIRE
+    client.whatsapp._http.get.side_effect = response
+    client.whatsapp._http.post.return_value = {"conversation_id": uid(30), "updated_count": 1}
+    client._ids_resource._http.get.return_value = {"whatsapp": {"enabled": True, "number": "+15555550100", "status": "ready"}}
+    try:
+        result = json.loads(invoke(operation, args))
+        assert result["ok"], result
+        if operation == "get_whatsapp_status":
+            assert result["result"]["status"]["status"] == "ready"
+        call = client.whatsapp._http.post.call_args if operation == "mark_whatsapp_read" else client.whatsapp._http.get.call_args
+        assert call.args[0] == path
+        assert call.kwargs["params"]["agent_identity_id"] == uid(100)
+        if "cursor" in args:
+            assert call.kwargs["params"]["cursor"] == "opaque+/="
+        if "include_groups" in args:
+            assert call.kwargs["params"]["include_groups"] is True
+        if operation == "mark_whatsapp_read":
+            assert call.kwargs["json"] == args
+    finally:
         client.close()

@@ -31,7 +31,8 @@ def invoke(operation, args, session_id=""):
 
         authorize()
         conversation, recipient = args.get("conversation_id"), args.get("to")
-        canonical = re.sub(r"[\s().-]", "", recipient) if isinstance(recipient, str) else None
+        direct_recipient = recipient[0] if isinstance(recipient, list) and len(recipient) == 1 else recipient
+        canonical = re.sub(r"[\s().-]", "", direct_recipient) if isinstance(direct_recipient, str) else None
         if (owner and owner.get("mode") == "whatsapp" and owner.get("conversation_kind") != "group" and canonical == owner.get("author")
                 and re.fullmatch(r"\+[1-9][0-9]{6,14}", canonical or "")):
             conversation, recipient = owner.get("conversation_id"), None
@@ -78,6 +79,22 @@ def invoke(operation, args, session_id=""):
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
                     **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
+                # Prove the public request shape before recording a send attempt.
+                recipients = [payload["to"]] if isinstance(payload.get("to"), str) else payload.get("to")
+                if recipients is not None and (not isinstance(recipients, list) or not 1 <= len(recipients) <= 8
+                        or any(not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone) for phone in recipients)
+                        or len(set(recipients)) != len(recipients)):
+                    raise ValueError("Provide 1–8 unique E.164 recipients")
+                if "reply_to_message_id" in payload:
+                    if "conversation_id" not in payload:
+                        raise ValueError("Quoted replies require conversation_id")
+                    uuid.UUID(str(payload["reply_to_message_id"]))
+                name = payload.get("group_name")
+                if name is not None and (not isinstance(payload.get("to"), list) or len(payload["to"]) < 2
+                        or not isinstance(name, str) or not name.strip() or len(name) > 100):
+                    raise ValueError("A group name requires 2–8 recipients and 1–100 characters")
+                if "text" in payload and (not isinstance(payload["text"], str) or len(payload["text"]) > 4000):
+                    raise ValueError("WhatsApp text must be at most 4000 characters")
                 source = (owner or {}).get("turn_id") or uuid.uuid4().hex
                 key = args.get("idempotency_key") or (
                     "hermes-wa-tool:"
@@ -93,6 +110,7 @@ def invoke(operation, args, session_id=""):
                     result = method(identity, operation)(**payload, idempotency_key=key)
                 except Exception as exc:
                     exc.whatsapp_media_id = args.get("media_id")
+                    exc.idempotency_key = key
                     if callback:
                         callback("rejected" if public_quota_error(exc) else "uncertain")
                     raise

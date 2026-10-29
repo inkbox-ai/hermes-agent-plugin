@@ -24,7 +24,7 @@ package = false
 
 # Temporary public SDK candidate until the normal 0.7.24 release is published.
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "e406508e0645531cf893fc52c2c4c3a48a980644", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "65201706464e488abf345f3890215d53805cd644", subdirectory = "sdk/python" }
 
 [tool.ruff]
 line-length = 125
