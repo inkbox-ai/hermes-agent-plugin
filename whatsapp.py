@@ -8,6 +8,7 @@ import json
 import mimetypes
 import re
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -253,20 +254,38 @@ async def receive_reaction(adapter, envelope):
             "whatsapp_auto_reply_target": target_id,
             "identity_id": str(adapter._identity_id), "base_url": str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
             "imessage_event_ids": [str(envelope.get("id") or source_id)]}
-        journal = adapter._conversation_state()
-        journal.row(str(chat_id))["chat_type"] = "group" if group else "dm"
-        if group and response_mode(adapter, "group_reply_mode") == "mention":
-            journal.quiet(str(chat_id), source_id, text)
-        else:
-            prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
-            event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, raw_message=envelope,
-                message_id=source_id, metadata={"inkbox_prepared": True, "inkbox_reply_route": route},
-                timestamp=_parse_inkbox_timestamp(reaction.get("updated_at")), channel_prompt=prompt, auto_skill=skill,
-                media_urls=[], media_types=[])
-            event.allow_gateway_control = False
-            adapter._last_inbound_modality[str(chat_id)] = "whatsapp"
-            await adapter._accept_native_imessage(event)
-        record_reaction(adapter, envelope)
+        # Resolve independently, then serialize the final read through admission.
+        # Weak values retain locks only while handlers hold or wait for them.
+        locks = getattr(adapter, "_whatsapp_reaction_admission_locks", None)
+        if locks is None:
+            locks = adapter._whatsapp_reaction_admission_locks = weakref.WeakValueDictionary()
+        scope = (str(adapter._identity_id), conversation_id, target_id, actor)
+        lock = locks.setdefault(scope, asyncio.Lock())
+        async with lock:
+            current = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_reaction"), reaction_id)
+            prior = native.delivery_status.get("whatsapp-reaction:" + reaction_id, {})
+            if (any(str(field(current, name)) != str(value) for name, value in expected.items())
+                    or prior.get("revision", 0) > revision or (prior.get("revision") == revision
+                    and str(prior.get("updated_at", "")) > str(reaction.get("updated_at", "")))):
+                adapter._dedup_commit(key)
+                return web.Response(status=200, text="Reaction context is no longer current")
+            journal = adapter._conversation_state()
+            journal.row(str(chat_id))["chat_type"] = "group" if group else "dm"
+            if group and response_mode(adapter, "group_reply_mode") == "mention":
+                journal.quiet(str(chat_id), source_id, text)
+            else:
+                prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
+                event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, raw_message=envelope,
+                    message_id=source_id, metadata={"inkbox_prepared": True, "inkbox_reply_route": route},
+                    timestamp=_parse_inkbox_timestamp(reaction.get("updated_at")), channel_prompt=prompt, auto_skill=skill,
+                    media_urls=[], media_types=[])
+                event.allow_gateway_control = False
+                adapter._last_inbound_modality[str(chat_id)] = "whatsapp"
+                await adapter._accept_native_imessage(event)
+            record_reaction(adapter, envelope)
+    except asyncio.CancelledError:
+        adapter._dedup_rollback(key)
+        raise
     except Exception as exc:
         adapter._dedup_rollback(key)
         if getattr(exc, "status_code", None) in {403, 404}:

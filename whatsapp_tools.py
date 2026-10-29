@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import mimetypes
@@ -10,6 +11,17 @@ import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit
 from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, method, public_quota_error
+
+
+def _destination(payload, owner):
+    if "conversation_id" in payload:
+        return ("conversation", str(payload["conversation_id"]))
+    recipients = payload.get("to")
+    recipients = [recipients] if isinstance(recipients, str) else recipients
+    phones = tuple(sorted(re.sub(r"[\s().-]", "", phone) for phone in recipients or []))
+    if owner and owner.get("conversation_kind") != "group" and phones == (owner.get("author"),):
+        return ("conversation", str(owner.get("conversation_id")))
+    return ("recipients", phones)
 
 
 def invoke(operation, args, session_id=""):
@@ -85,9 +97,12 @@ def invoke(operation, args, session_id=""):
                 }
                 attempt_owner = owner if owner and owner.get("mode") == "whatsapp" else context
                 prior = (attempt_owner or {}).get("whatsapp_send_attempt")
-                if (prior and args.get("idempotency_key") == prior["key"]
-                        and "reply_to_message_id" not in payload and "reply_to_message_id" in prior["payload"]):
-                    payload["reply_to_message_id"] = prior["payload"]["reply_to_message_id"]
+                attempts = copy.deepcopy((attempt_owner or {}).get("whatsapp_send_attempts", {}))
+                if prior:
+                    attempts.setdefault(prior["key"], copy.deepcopy(prior))
+                original = attempts.get(args.get("idempotency_key"))
+                if (original and "reply_to_message_id" not in payload and "reply_to_message_id" in original["payload"]):
+                    payload["reply_to_message_id"] = original["payload"]["reply_to_message_id"]
                 # Caller-supplied keys may recover older plain requests.
                 if (context and context.get("mode") == "whatsapp" and "conversation_id" in payload
                         and "reply_to_message_id" not in payload and not args.get("idempotency_key")):
@@ -115,9 +130,13 @@ def invoke(operation, args, session_id=""):
                     "hermes-wa-tool:"
                     + hashlib.sha256(json.dumps([str(identity.id), source, payload], sort_keys=True).encode()).hexdigest()
                 )
-                if prior and (prior["key"] == key or prior["state"] in {"sending", "uncertain", "rejected"}):
-                    if prior["state"] in {"sending", "uncertain"} or prior["payload"] != payload or prior["key"] != key:
+                for prior in attempts.values():
+                    if prior["state"] in {"sending", "uncertain"}:
                         raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
+                    if (prior["key"] == key or (prior["state"] == "rejected"
+                            and _destination(prior["payload"], owner) == _destination(payload, owner))):
+                        if prior["payload"] != payload or prior["key"] != key:
+                            raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
                 authorize()
                 callback = (
                     (attempt_owner or {}).get("explicit_delivery_state")
@@ -126,6 +145,8 @@ def invoke(operation, args, session_id=""):
                 record_attempt = (attempt_owner or {}).get("record_whatsapp_attempt")
                 if attempt_owner is not None:
                     attempt_owner["whatsapp_send_attempt"] = attempt
+                    attempt_owner["whatsapp_send_attempts"] = attempts
+                    attempts[key] = attempt
                 if record_attempt:
                     record_attempt(attempt)
                 if callback:

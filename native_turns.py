@@ -517,12 +517,24 @@ class NativeTurns(CompanionReceiver):
                         self._save(row)
                         self._record_outbound(row, turn, message)
                     def tool_state(state):
+                        if turn["route"]["mode"] == "whatsapp" and state not in {"sending", "uncertain"}:
+                            from .whatsapp_tools import _destination
+                            source = _destination({"conversation_id": turn["route"]["conversation_id"]}, turn["route"])
+                            # Independent outreach cannot clear a rejected source reply.
+                            if any(item["state"] == "rejected" and _destination(item["payload"], turn["route"]) == source
+                                   for item in turn.get("whatsapp_send_attempts", {}).values()):
+                                state = "rejected"
                         turn["explicit_delivery_state"] = state
                         self._save(row)
                     def tool_request(attempt):
+                        attempts = turn.setdefault("whatsapp_send_attempts", {})
+                        prior = turn.get("whatsapp_send_attempt")
+                        if prior:
+                            attempts.setdefault(prior["key"], copy.deepcopy(prior))
+                        attempts[attempt["key"]] = copy.deepcopy(attempt)
                         turn["whatsapp_send_attempt"] = copy.deepcopy(attempt)
                         self._save(row)
-                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
+                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "whatsapp_send_attempts": copy.deepcopy(turn.get("whatsapp_send_attempts", {})), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
         else:
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
             if (turn.get("preflight_failure") and turn.get("answer") is not None

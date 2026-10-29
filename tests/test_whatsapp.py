@@ -774,6 +774,239 @@ def reaction_reads(client, *, current=None, **changes):
     client.whatsapp._http.get.side_effect = lambda path, **_kw: ({"reaction": receipt_state} if "/reactions/" in path else WIRE if "/messages/" in path else conversation)
 
 
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("stale_read", [False, True])
+def test_suspended_reaction_cannot_follow_newer_removal(factory, tmp_path, monkeypatch, quiet, stale_read):
+    from inkbox_plugin.whatsapp import receive_reaction
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        from inkbox_plugin.conversation import ConversationState
+        value.adapter._conversation_journal = ConversationState(tmp_path / "conversations")
+        options = {"is_group": True} if quiet else {}
+        if quiet:
+            value.adapter.config.extra["group_reply_mode"] = "mention"
+        first = peer_reaction()
+        removed = peer_reaction(status="removed", revision=2, updated_at="2026-10-01T12:01:00Z")
+        reaction_reads(client, **options)
+        paused, resume = asyncio.Event(), asyncio.Event()
+        resolve = value.adapter._resolve_contact_full
+
+        async def paused_contact(**kwargs):
+            if asyncio.current_task() is older:
+                paused.set()
+                await resume.wait()
+            return await resolve(**kwargs)
+
+        monkeypatch.setattr(value.adapter, "_resolve_contact_full", paused_contact)
+        older = asyncio.create_task(receive_reaction(value.adapter, first))
+        try:
+            # The applied receipt passed its read; contact lookup is the async gap.
+            await asyncio.wait_for(paused.wait(), 2)
+            reaction_reads(client, current=removed["data"]["reaction"], **options)
+            assert (await receive_reaction(value.adapter, removed)).status == 202
+            await settle(value.queue)
+            if stale_read:
+                reaction_reads(client, current=first["data"]["reaction"], **options)
+            resume.set()
+            assert (await asyncio.wait_for(older, 2)).status == 200
+            await settle(value.queue)
+            for replay in (first, removed):
+                assert (await receive_reaction(value.adapter, replay)).status == 200
+            if quiet:
+                texts = [item["text"] for item in value.adapter._conversation_state().row(f"whatsapp:{uid(30)}")["quiet"]]
+                assert not value.inputs and not value.queue.rows
+            else:
+                texts = [event.text for event in value.inputs]
+                assert all(not row.get("blocked") for row in value.queue.rows.values())
+            assert len(texts) == 1 and "was removed" in texts[0]
+            assert value.queue.delivery_status[f"whatsapp-reaction:{uid(901)}"]["revision"] == 2
+
+            # A later genuine add still works after stale and duplicate receipts.
+            latest = peer_reaction(revision=3, updated_at="2026-10-01T12:02:00Z")
+            reaction_reads(client, current=latest["data"]["reaction"], **options)
+            assert (await receive_reaction(value.adapter, latest)).status == 202
+            await settle(value.queue)
+            texts = ([item["text"] for item in value.adapter._conversation_state().row(f"whatsapp:{uid(30)}")["quiet"]]
+                if quiet else [event.text for event in value.inputs])
+            assert len(texts) == 2 and "was added" in texts[-1]
+
+            # Restart without process-local dedup: retained revisions still fence replay.
+            from inkbox_plugin.native_turns import NativeTurns
+            await value.queue.close()
+            value.adapter._seen_request_ids.clear()
+            value.queue = value.adapter._native_turns = NativeTurns(value.adapter, tmp_path / "native")
+            await value.queue.start()
+            reads = client.whatsapp._http.get.call_count
+            for replay in (first, removed):
+                assert (await receive_reaction(value.adapter, replay)).status == 200
+            await settle(value.queue)
+            assert client.whatsapp._http.get.call_count == reads
+            assert len(value.inputs) == (0 if quiet else 2)
+        finally:
+            resume.set()
+            await asyncio.gather(older, return_exceptions=True)
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+def test_reaction_final_read_observes_removal_without_callback(factory, tmp_path, monkeypatch):
+    from inkbox_plugin.whatsapp import receive_reaction
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client)
+        removed = peer_reaction(status="removed", revision=2, updated_at="2026-10-01T12:01:00Z")
+        resolve = value.adapter._resolve_contact_full
+
+        async def removal_during_contact_read(**kwargs):
+            result = await resolve(**kwargs)
+            reaction_reads(client, current=removed["data"]["reaction"])
+            return result
+
+        monkeypatch.setattr(value.adapter, "_resolve_contact_full", removal_during_contact_read)
+        try:
+            assert (await receive_reaction(value.adapter, peer_reaction())).status == 200
+            assert not value.inputs and not value.queue.rows and not value.queue.delivery_status
+            assert (await receive_reaction(value.adapter, removed)).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 1 and "was removed" in value.inputs[0].text
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("independent", ["actor", "target"])
+def test_reaction_admission_serializes_only_matching_actor_target(factory, tmp_path, monkeypatch, independent):
+    from inkbox_plugin.whatsapp import receive_reaction
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        first = peer_reaction()
+        removed = peer_reaction(status="removed", revision=2, updated_at="2026-10-01T12:01:00Z")
+        other = peer_reaction(id=uid(902), **({"remote_number": "+15555550102"} if independent == "actor"
+            else {"target_message_id": uid(801)}))
+        reaction_reads(client, is_group=True, participants=["+15555550101", "+15555550102"])
+        read = client.whatsapp._http.get.side_effect
+        current = removed["data"]["reaction"]
+
+        def reads(path, **kwargs):
+            if "/reactions/" in path:
+                return {"reaction": other["data"]["reaction"] if path.endswith(uid(902)) else current}
+            if "/messages/" in path:
+                return {**WIRE, "id": path.rsplit("/", 1)[-1]}
+            return read(path, **kwargs)
+
+        client.whatsapp._http.get.side_effect = reads
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        entered, resume, resolved = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        accept = value.adapter._accept_native_imessage
+        resolve = value.adapter._resolve_contact_full
+
+        async def paused_admission(event):
+            if event.raw_message is removed:
+                entered.set()
+                await resume.wait()
+            return await accept(event)
+
+        async def contact(**kwargs):
+            result = await resolve(**kwargs)
+            resolved.set()
+            return result
+
+        monkeypatch.setattr(value.adapter, "_accept_native_imessage", paused_admission)
+        newer = asyncio.create_task(receive_reaction(value.adapter, removed))
+        older = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            # Even a lagging receipt read must not bypass an in-flight admission.
+            current = first["data"]["reaction"]
+            monkeypatch.setattr(value.adapter, "_resolve_contact_full", contact)
+            older = asyncio.create_task(receive_reaction(value.adapter, first))
+            await asyncio.wait_for(resolved.wait(), 2)
+            assert (await asyncio.wait_for(receive_reaction(value.adapter, other), 2)).status == 202
+            assert not older.done()
+            resume.set()
+            assert (await asyncio.wait_for(newer, 2)).status == 202
+            assert (await asyncio.wait_for(older, 2)).status == 200
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            related = [event for event in value.inputs if event.metadata["inkbox_reply_route"]["reaction_id"] == uid(901)]
+            assert len(related) == 1 and "was removed" in related[0].text
+            assert not value.adapter._whatsapp_reaction_admission_locks
+        finally:
+            resume.set()
+            await asyncio.gather(*[task for task in (newer, older) if task is not None], return_exceptions=True)
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["read", "cancel"])
+def test_reaction_admission_failure_releases_reservation_for_replay(factory, tmp_path, monkeypatch, failure):
+    from inkbox_plugin.whatsapp import receive_reaction
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        reaction_reads(client)
+        read = client.whatsapp._http.get.side_effect
+        reaction_read_count = 0
+
+        def failing_final_read(path, **kwargs):
+            nonlocal reaction_read_count
+            if "/reactions/" in path:
+                reaction_read_count += 1
+                if reaction_read_count == 2:
+                    raise TimeoutError("receipt read unavailable")
+            return read(path, **kwargs)
+
+        entered, resume = asyncio.Event(), asyncio.Event()
+        accept = value.adapter._accept_native_imessage
+
+        async def paused_admission(event):
+            entered.set()
+            await resume.wait()
+            return await accept(event)
+
+        task = None
+        try:
+            if failure == "read":
+                client.whatsapp._http.get.side_effect = failing_final_read
+                assert (await receive_reaction(value.adapter, peer_reaction())).status == 503
+                client.whatsapp._http.get.side_effect = read
+            else:
+                monkeypatch.setattr(value.adapter, "_accept_native_imessage", paused_admission)
+                task = asyncio.create_task(receive_reaction(value.adapter, peer_reaction()))
+                await asyncio.wait_for(entered.wait(), 2)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                monkeypatch.setattr(value.adapter, "_accept_native_imessage", accept)
+            assert not value.inputs and not value.queue.rows
+            assert (await asyncio.wait_for(receive_reaction(value.adapter, peer_reaction()), 2)).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 1
+            assert (await receive_reaction(value.adapter, peer_reaction())).status == 200
+            assert all(not row.get("blocked") for row in value.queue.rows.values())
+        finally:
+            resume.set()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 def test_peer_reaction_add_and_removal_quote_only_verified_real_target(factory, tmp_path):
     from inkbox_plugin.whatsapp import receive_reaction
     async def run():
@@ -1654,3 +1887,197 @@ def test_whatsapp_preflight_rejection_does_not_block_other_group_author(factory,
             await value.queue.close()
             client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+@pytest.mark.parametrize("destination", [
+    {"to": "+15555550102"},
+    {"to": ["+15555550102", "+15555550104"], "group_name": "Team"},
+    {"conversation_id": uid(99), "reply_to_message_id": uid(98)},
+])
+def test_rejected_outreach_allows_independent_destination_and_retains_intent(factory, tmp_path, monkeypatch, destination, uncertain):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.native_turns import NativeTurns
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        original = {**destination, "text": "For Bob", "idempotency_key": "outreach-b"}
+        independent = {"to": "+15555550103", "text": "For Carol", "idempotency_key": "outreach-c"}
+        saved = {}
+        completed = []
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            # An unknown error is deliberately not proof of non-acceptance.
+            client.whatsapp._http.post.side_effect = InkboxAPIError(403, {
+                "error": "unknown" if uncertain else "whatsapp_contact_not_allowed"})
+            assert "error" in json.loads(invoke("send_whatsapp", original, session))
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            saved.update(json.loads(json.dumps(turn["whatsapp_send_attempt"])))
+            client.whatsapp._http.post.side_effect = None
+            result = json.loads(invoke("send_whatsapp", independent, session))
+            assert ("error" in result) if uncertain else result["ok"]
+            count = client.whatsapp._http.post.call_count
+            # Intervening outreach must not erase the original intent or key.
+            replacements = [
+                {**original, "text": "Changed"},
+                {**original, "idempotency_key": "replacement-key"},
+                {**independent, "idempotency_key": "outreach-b"},
+            ]
+            if "to" in destination:
+                phones = destination["to"]
+                alias = list(reversed(phones)) if isinstance(phones, list) else ["+1 (555) 555-0102"]
+                replacements.append({**original, "to": alias, "idempotency_key": "alias-key"})
+            for replacement in replacements:
+                assert "error" in json.loads(invoke("send_whatsapp", replacement, session))
+                assert client.whatsapp._http.post.call_count == count
+            value.queue.capture_result(event, "Source final")
+            final = await value.adapter.send(event.source.chat_id, "Source final", reply_to=event.message_id)
+            assert final.success is not uncertain
+            await value.adapter.on_processing_complete(event, "success" if final.success else "failure")
+            completed.append(True)
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound())
+            await settle(value.queue)
+            assert completed == [True]
+            calls = client.whatsapp._http.post.call_args_list
+            assert [c.kwargs["headers"]["Idempotency-Key"] for c in calls[:2]] == (
+                ["outreach-b"] if uncertain else ["outreach-b", "outreach-c"])
+            assert len(calls) == (1 if uncertain else 3)
+            if not uncertain:
+                assert calls[-1].kwargs["json"] == {
+                    "conversation_id": uid(30), "text": "Source final", "reply_to_message_id": uid(1)}
+            row = next(iter(value.queue.rows.values()))
+            if not uncertain:
+                assert row["turns"][0]["whatsapp_send_attempts"]["outreach-b"] == saved
+            await value.queue.close()
+            value.queue = NativeTurns(value.adapter, tmp_path / "native")
+            value.adapter._native_turns = value.queue
+            await value.queue.start()
+            await settle(value.queue)
+            recovered = next(iter(value.queue.rows.values()))
+            if uncertain:
+                assert recovered["turns"][0]["whatsapp_send_attempt"] == saved
+                assert recovered.get("blocked")
+            else:
+                assert recovered["turns"][0]["whatsapp_send_attempts"]["outreach-b"] == saved
+                assert recovered["turns"][0]["state"] == "done" and not recovered.get("blocked")
+            assert client.whatsapp._http.post.call_count == len(calls)
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source_destination", [False, True])
+@pytest.mark.parametrize("recover", [False, True])
+def test_rejected_request_recovery_after_outreach_and_context_rebind(factory, tmp_path, monkeypatch, source_destination, recover):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        destination = uid(30) if source_destination else uid(99)
+        original = {"conversation_id": destination, "text": "Original", "reply_to_message_id": uid(2)}
+        completed = []
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": "whatsapp_quote_unavailable"})
+            rejected = json.loads(invoke("send_whatsapp", original, session))
+            key = rejected["idempotency_key"]
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            saved = json.loads(json.dumps(turn["whatsapp_send_attempt"]))
+            # Older checkpoints contain only the last attempt. Bind that shape
+            # before independent outreach, then bind the new journal afterward.
+            turn.pop("whatsapp_send_attempts", None)
+            assert clear_context(session, event.message_id)
+            await value.adapter.on_processing_start(event)
+            client.whatsapp._http.post.side_effect = None
+            assert json.loads(invoke("send_whatsapp", {
+                "to": "+15555550103", "text": "For Carol", "idempotency_key": "outreach-c"}, session))["ok"]
+            assert turn["whatsapp_send_attempts"][key] == saved
+            assert clear_context(session, event.message_id)
+            await value.adapter.on_processing_start(event)
+            assert active_context(session)["whatsapp_send_attempts"][key] == saved
+            for changes in [{"text": "Changed"}, {"idempotency_key": "replacement-key"}]:
+                assert "error" in json.loads(invoke("send_whatsapp", {**original, "idempotency_key": key, **changes}, session))
+            assert client.whatsapp._http.post.call_count == 2
+            if recover:
+                # Omitting the quote during exact-key recovery restores the
+                # original target, not the active source or the intervening send.
+                assert json.loads(invoke("send_whatsapp", {
+                    "conversation_id": destination, "text": "Original", "idempotency_key": key}, session))["ok"]
+                assert client.whatsapp._http.post.call_args == client.whatsapp._http.post.call_args_list[0]
+                assert turn["whatsapp_send_attempts"][key] == {**saved, "state": "sent"}
+            else:
+                assert turn["whatsapp_send_attempts"][key] == saved
+            value.queue.capture_result(event, "Source final")
+            final = await value.adapter.send(event.source.chat_id, "Source final", reply_to=event.message_id)
+            assert final.success
+            if source_destination and not recover:
+                assert final.raw_response["inkbox_suppressed"]
+            await value.adapter.on_processing_complete(event, "success")
+            completed.append(True)
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound())
+            await settle(value.queue)
+            assert completed == [True]
+            assert client.whatsapp._http.post.call_count == 2 + int(recover) + int(not source_destination or recover)
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_inflight_independent_outreach_remains_turnwide_fence(factory, tmp_path, monkeypatch, uncertain):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": uid(1), "conversation_id": uid(30),
+        "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
+    original = {"to": "+15555550102", "text": "For Bob", "idempotency_key": "outreach-b"}
+    independent = {"to": "+15555550103", "text": "For Carol", "idempotency_key": "outreach-c"}
+    observed = []
+
+    def sending(*args, **kwargs):
+        # The nested invocation observes the first request before it settles.
+        assert "error" in json.loads(invoke("send_whatsapp", independent, session))
+        assert client.whatsapp._http.post.call_count == 1
+        observed.append(True)
+        raise InkboxAPIError(403, {"error": "unknown" if uncertain else "whatsapp_contact_not_allowed"})
+
+    try:
+        client.whatsapp._http.post.side_effect = sending
+        assert "error" in json.loads(invoke("send_whatsapp", original, session))
+        assert observed == [True]
+        client.whatsapp._http.post.side_effect = None
+        result = json.loads(invoke("send_whatsapp", independent, session))
+        assert ("error" in result) if uncertain else result["ok"]
+        if uncertain:
+            assert "error" in json.loads(invoke("send_whatsapp", original, session))
+        assert client.whatsapp._http.post.call_count == (1 if uncertain else 2)
+    finally:
+        clear_context(session, uid(1))
+        client.close()
