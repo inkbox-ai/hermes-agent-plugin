@@ -9,7 +9,7 @@ import re
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit
-from .whatsapp import MAX_MEDIA_BYTES, method, public_quota_error
+from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, method, public_quota_error
 
 
 def invoke(operation, args, session_id=""):
@@ -30,6 +30,10 @@ def invoke(operation, args, session_id=""):
                 guard(read_only=True) if operation == "lookup" or operation.startswith(("get_", "list_")) else guard()
 
         authorize()
+        args = dict(args)
+        if (operation == "send_whatsapp" and owner and owner.get("mode") == "whatsapp"
+                and "conversation_id" not in args and "to" not in args):
+            args["conversation_id"] = owner["conversation_id"]
         conversation, recipient = args.get("conversation_id"), args.get("to")
         direct_recipient = recipient[0] if isinstance(recipient, list) and len(recipient) == 1 else recipient
         canonical = re.sub(r"[\s().-]", "", direct_recipient) if isinstance(direct_recipient, str) else None
@@ -79,6 +83,14 @@ def invoke(operation, args, session_id=""):
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
                     **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
+                prior = (context or {}).get("whatsapp_send_attempt")
+                if (prior and args.get("idempotency_key") == prior["key"]
+                        and "reply_to_message_id" not in payload and "reply_to_message_id" in prior["payload"]):
+                    payload["reply_to_message_id"] = prior["payload"]["reply_to_message_id"]
+                # Caller-supplied keys may recover older plain requests.
+                if (context and context.get("mode") == "whatsapp" and "conversation_id" in payload
+                        and "reply_to_message_id" not in payload and not args.get("idempotency_key")):
+                    payload.update(auto_reply_kwargs(context))
                 # Prove the public request shape before recording a send attempt.
                 recipients = [payload["to"]] if isinstance(payload.get("to"), str) else payload.get("to")
                 if recipients is not None and (not isinstance(recipients, list) or not 1 <= len(recipients) <= 8
@@ -100,10 +112,19 @@ def invoke(operation, args, session_id=""):
                     "hermes-wa-tool:"
                     + hashlib.sha256(json.dumps([str(identity.id), source, payload], sort_keys=True).encode()).hexdigest()
                 )
+                if prior and (prior["key"] == key or prior["state"] in {"sending", "uncertain", "rejected"}):
+                    if prior["state"] in {"sending", "uncertain"} or prior["payload"] != payload or prior["key"] != key:
+                        raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
                 authorize()
                 callback = (
                     (owner or {}).get("explicit_delivery_state") if context and context.get("mode") == "whatsapp" else None
                 )
+                attempt = {"payload": payload, "key": key, "state": "sending"}
+                record_attempt = context.get("record_whatsapp_attempt") if context and context.get("mode") == "whatsapp" else None
+                if context and context.get("mode") == "whatsapp":
+                    context["whatsapp_send_attempt"] = attempt
+                if record_attempt:
+                    record_attempt(attempt)
                 if callback:
                     callback("sending")
                 try:
@@ -111,9 +132,15 @@ def invoke(operation, args, session_id=""):
                 except Exception as exc:
                     exc.whatsapp_media_id = args.get("media_id")
                     exc.idempotency_key = key
+                    attempt["state"] = "rejected" if public_quota_error(exc) else "uncertain"
+                    if record_attempt:
+                        record_attempt(attempt)
                     if callback:
-                        callback("rejected" if public_quota_error(exc) else "uncertain")
+                        callback(attempt["state"])
                     raise
+                attempt["state"] = "sent"
+                if record_attempt:
+                    record_attempt(attempt)
                 if callback:
                     callback("sent")
                 if context and context.get("mode") == "whatsapp":
@@ -185,10 +212,10 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested direct or group WhatsApp text and one owned media ID. Quote only within the selected conversation; never silently fall back. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty.",
+            "Send requested direct or group WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty.",
             {
                 "to": {"description": "One E.164 recipient or 2–8 distinct E.164 recipients for a group", "oneOf": [string("E.164 recipient"), {"type": "array", "items": string("E.164 recipient"), "minItems": 1, "maxItems": 8, "uniqueItems": True}]},
-                "reply_to_message_id": string("Authorized message UUID to quote; requires conversation_id"),
+                "reply_to_message_id": string("Optional authorized message UUID to quote; otherwise the active source is used. Requires a conversation."),
                 "group_name": {**string("Creation-only name with 2–8 recipients; never renames an existing group"), "minLength": 1, "maxLength": 100},
                 "conversation_id": string("Existing conversation, mutually exclusive with to"),
                 "text": {**string("Message text"), "maxLength": 4000},

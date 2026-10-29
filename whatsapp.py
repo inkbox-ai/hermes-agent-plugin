@@ -33,6 +33,12 @@ def method(identity, name):
     return result
 
 
+def auto_reply_kwargs(route):
+    """Only new admissions carry an automatic target; legacy requests stay plain."""
+    target = route.get("whatsapp_auto_reply_target")
+    return {"reply_to_message_id": target} if target else {}
+
+
 def unsupported(exc):
     detail = str(getattr(exc, "detail", exc)).lower()
     return (
@@ -135,7 +141,7 @@ async def receive(adapter, envelope):
         prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
         prompt = (
             (prompt or "")
-            + "\nYour normal final reply is delivered here automatically. Do not also send it with a tool. Keep text under 4,000 characters. Ordinary final replies remain plain. A quoted reply is an explicit tool action requiring an authorized message in this conversation. Groups share one conversation session with author-scoped permissions. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
+            + "\nYour normal final reply is delivered here automatically. Do not also send it with a tool. Keep text under 4,000 characters. Final replies automatically quote the source message. Same-conversation tools inherit that source unless selecting another authorized message. Groups share one conversation session with author-scoped permissions. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
         )
         event = MessageEvent(
             text=text,
@@ -162,6 +168,7 @@ async def receive(adapter, envelope):
                 conversation_kind="group" if group else "direct",
                 participants=participants,
                 whatsapp_reply_target=message_id,
+                whatsapp_auto_reply_target=message_id,
                 reply_to_message_id=message.get("reply_to_message_id"),
                 thread_id=message.get("thread_id"),
                 thread_root_message_id=message.get("thread_root_message_id"),
@@ -243,6 +250,7 @@ async def receive_reaction(adapter, envelope):
         route = {"mode": "whatsapp", "chat_id": str(chat_id), "message_id": source_id, "author": actor,
             "conversation_id": conversation_id, "conversation_kind": "group" if group else "direct", "participants": participants,
             "raw_text": "", "reaction": True, "reaction_id": reaction_id, "reaction_target_message_id": target_id,
+            "whatsapp_auto_reply_target": target_id,
             "identity_id": str(adapter._identity_id), "base_url": str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
             "imessage_event_ids": [str(envelope.get("id") or source_id)]}
         journal = adapter._conversation_state()
@@ -386,7 +394,7 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
                 error="WhatsApp media outcome is uncertain; use send lookup",
                 raw_response={"inkbox_no_retry": True},
             )
-        delivery = deliveries.setdefault(fingerprint, {"state": "uploading"})
+        delivery = deliveries.setdefault(fingerprint, {"state": "uploading", "reply_options": auto_reply_kwargs(turn["route"])})
         native._save(row)
         identity = adapter._reply_identity
         if not delivery.get("media_id"):
@@ -421,6 +429,7 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
                 conversation_id=turn["route"]["conversation_id"],
                 text=caption,
                 media_ids=[delivery["media_id"]],
+                **delivery.get("reply_options", {}),
                 idempotency_key=key,
             )
 

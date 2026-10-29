@@ -2,7 +2,7 @@
 
 ## 0.2.21
 
-- Add WhatsApp groups with isolated native conversation sessions and actual-author permission/Stop fences. Ordinary native final replies remain plain; explicit quoted tools preserve admitted source metadata without changing old durable payloads.
+- Add WhatsApp groups with isolated native conversation sessions and actual-author permission/Stop fences. New native final replies and same-conversation tools quote their original source without changing old durable payloads or recovery keys.
 - Add chronological quote-chain reads and whole-message named/custom reaction tools with explicit stable mutation keys and versioned receipt/removal semantics. Authorized peer reactions admit lightweight context once per revision; self echoes and inaccessible or unresolved targets never wake model work.
 - Raise the current WhatsApp SDK floor to 0.7.24 and share the SDK's group/reply request fixture matrix. Existing iMessage, Slack, media and native turn lifecycles remain in place.
 

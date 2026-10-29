@@ -509,7 +509,10 @@ class NativeTurns(CompanionReceiver):
                     def tool_state(state):
                         turn["explicit_delivery_state"] = state
                         self._save(row)
-                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
+                    def tool_request(attempt):
+                        turn["whatsapp_send_attempt"] = copy.deepcopy(attempt)
+                        self._save(row)
+                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
         else:
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
             if (turn.get("preflight_failure") and turn.get("answer") is not None
@@ -633,6 +636,13 @@ class NativeTurns(CompanionReceiver):
                 or (turn["state"] == "sending" and not admitted_send)
                 or turn.get("explicit_delivery_state") in {"sending", "uncertain"}):
             raise RuntimeError("Original native turn cannot send media")
+        if turn["route"]["mode"] == "whatsapp":
+            route = turn["route"]
+            if turn.get("explicit_delivery_state") == "rejected":
+                raise PermissionError("Original WhatsApp tool request was rejected; no replacement reply")
+            if ((route.get("identity_id") and str(self.adapter._reply_identity.id) != route["identity_id"])
+                    or (route.get("base_url") and str(self.adapter._base_url or "https://inkbox.ai").rstrip("/") != route["base_url"])):
+                raise PermissionError("Original WhatsApp identity has changed")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original native sender is no longer allowed")
 
@@ -763,9 +773,10 @@ class NativeTurns(CompanionReceiver):
                 self.check_media_authority(row, turn)
             except Exception as exc:
                 return self.preflight_failed(row, turn, exc)
-            # Ordinary replies preserve the public plain-send contract. A native
-            # quote is an explicit tool action, never inferred from SDK presence.
-            reply_options = {}
+            from .whatsapp import auto_reply_kwargs
+            # A saved key without saved options belongs to the legacy plain request.
+            reply_options = turn.setdefault("whatsapp_reply_options",
+                {} if turn.get("reply_idempotency_key") else auto_reply_kwargs(route))
         else:
             try:
                 reply_options = await self.preflight_reply(row, turn, self.adapter._reply_identity)
@@ -784,7 +795,7 @@ class NativeTurns(CompanionReceiver):
             else:
                 payload = {
                     "conversation_id": route["conversation_id"], "text": content, **reply_options,
-                    "idempotency_key": "hermes:" + digest(json.dumps([turn["id"], route["conversation_id"], route.get("imessage_reply_target"), content])) ,
+                    "idempotency_key": "hermes:" + digest(json.dumps([turn["id"], route["conversation_id"], reply_options.get("reply_to_message_id", route.get("imessage_reply_target")), content])) ,
                 }
                 if route["mode"] == "whatsapp":
                     turn["reply_idempotency_key"] = payload["idempotency_key"]
