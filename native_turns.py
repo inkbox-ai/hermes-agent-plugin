@@ -756,8 +756,9 @@ class NativeTurns(CompanionReceiver):
                 self.check_media_authority(row, turn)
             except Exception as exc:
                 return self.preflight_failed(row, turn, exc)
-            reply_options = ({"reply_to_message_id": route["whatsapp_reply_target"]}
-                             if route.get("whatsapp_reply_target") else {})
+            # Ordinary replies preserve the public plain-send contract. A native
+            # quote is an explicit tool action, never inferred from SDK presence.
+            reply_options = {}
         else:
             try:
                 reply_options = await self.preflight_reply(row, turn, self.adapter._reply_identity)

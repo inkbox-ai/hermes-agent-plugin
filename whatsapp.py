@@ -117,7 +117,7 @@ async def receive(adapter, envelope):
         prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
         prompt = (
             (prompt or "")
-            + "\nYour normal final reply is delivered here automatically. Do not also send it with a tool. Keep text under 4,000 characters. Native replies quote their admitted message. Groups share one conversation session with author-scoped permissions. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
+            + "\nYour normal final reply is delivered here automatically. Do not also send it with a tool. Keep text under 4,000 characters. Ordinary final replies remain plain. A quoted reply is an explicit tool action requiring an authorized message in this conversation. Groups share one conversation session with author-scoped permissions. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
         )
         event = MessageEvent(
             text=text,
@@ -305,7 +305,6 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
                 text=caption,
                 media_ids=[delivery["media_id"]],
                 idempotency_key=key,
-                **({"reply_to_message_id": turn["route"]["whatsapp_reply_target"]} if turn["route"].get("whatsapp_reply_target") else {}),
             )
 
         task = asyncio.create_task(asyncio.to_thread(checked))

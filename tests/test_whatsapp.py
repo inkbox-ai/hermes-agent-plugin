@@ -534,7 +534,7 @@ def test_email_policy_rejection_reuses_original_key_without_freeing_unknown_send
     asyncio.run(run())
 
 
-def test_group_receipts_isolate_conversations_and_authority_and_quote_the_actual_source(factory, tmp_path):
+def test_group_receipts_isolate_conversations_and_authority_and_retain_the_actual_source(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
@@ -552,7 +552,8 @@ def test_group_receipts_isolate_conversations_and_authority_and_quote_the_actual
             assert all(event.source.thread_id == event.source.chat_id for event in value.inputs)
             assert all(row["turns"][0]["route"]["conversation_kind"] == "group" for row in value.queue.rows.values())
             calls = client.whatsapp._http.post.call_args_list
-            assert {call.kwargs["json"]["reply_to_message_id"] for call in calls} == {uid(1), uid(2)}
+            assert all("reply_to_message_id" not in call.kwargs["json"] for call in calls)
+            assert {row["turns"][0]["route"]["whatsapp_reply_target"] for row in value.queue.rows.values()} == {uid(1), uid(2)}
             assert {call.kwargs["json"]["conversation_id"] for call in calls} == {uid(31), uid(32)}
             assert all("plain_reply_fallback" not in call.kwargs["json"] for call in calls)
             assert all(call.kwargs["is_group"] is True for call in value.adapter._contact_memories.call_args_list)
@@ -581,7 +582,7 @@ def test_group_without_resolved_remote_author_never_enters_native_permissions(fa
     asyncio.run(run())
 
 
-def test_new_native_quotes_keep_batch_latest_source_without_moving_the_host_session(factory, tmp_path, monkeypatch):
+def test_plain_native_replies_keep_batch_latest_source_metadata_without_moving_the_host_session(factory, tmp_path, monkeypatch):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
@@ -592,14 +593,18 @@ def test_new_native_quotes_keep_batch_latest_source_without_moving_the_host_sess
             return await original_batch(*args)
         monkeypatch.setattr(value.queue, "_batch", wait_batch)
         try:
-            assert (await receive(value.adapter, inbound(id=uid(1), content="First question"))).status == 202
-            assert (await receive(value.adapter, inbound(id=uid(2), content="Follow-up question"))).status == 202
+            import inkbox_plugin.native_turns as native_module
+            received_at = native_module.time.time()
+            with monkeypatch.context() as patch:
+                patch.setattr(native_module, "time", NS(time=lambda: received_at))
+                assert (await receive(value.adapter, inbound(id=uid(1), content="First question"))).status == 202
+                assert (await receive(value.adapter, inbound(id=uid(2), content="Follow-up question"))).status == 202
             admitted.set()
             await settle(value.queue)
             assert len(value.inputs) == 1
             route = next(iter(value.queue.rows.values()))["turns"][0]["route"]
             assert route["whatsapp_reply_target"] == uid(2)
-            assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(2)
+            assert "reply_to_message_id" not in client.whatsapp._http.post.call_args.kwargs["json"]
             assert value.inputs[0].source.thread_id == f"whatsapp:{uid(30)}"
         finally:
             admitted.set()
@@ -710,3 +715,44 @@ def test_whatsapp_registration_exposes_group_quote_thread_and_reaction_contracts
     reaction = tools["inkbox_send_whatsapp_reaction"]["parameters"]
     assert "idempotency_key" in reaction["required"] and "part_index" not in reaction["properties"]
     assert reaction["properties"]["reaction"]["enum"] == ["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"]
+
+
+def test_ordinary_dm_on_old_backend_never_infers_native_quote_capability(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        def plain_only(_path, **kwargs):
+            assert "reply_to_message_id" not in kwargs["json"]
+            assert "plain_reply_fallback" not in kwargs["json"]
+            return {"message": WIRE}
+        client.whatsapp._http.post.side_effect = plain_only
+        try:
+            assert (await receive(value.adapter, inbound(reply_to_message_id=uid(3), thread_id=uid(3), thread_root_message_id=uid(3)))).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 1 and client.whatsapp._http.post.call_count == 1
+            assert next(iter(value.queue.rows.values()))["turns"][0]["state"] == "done"
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_explicit_native_quote_keeps_target_and_never_falls_back_after_rejection(factory, tmp_path, monkeypatch):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    identity = value.adapter._reply_identity
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+    client.whatsapp._http.post.side_effect = InkboxAPIError(422, {"error": "whatsapp_quoted_replies_not_supported"})
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": "quote-turn", "conversation_id": uid(30), "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
+    try:
+        result = json.loads(invoke("send_whatsapp", {"conversation_id": uid(30), "reply_to_message_id": uid(1), "text": "Quoted", "idempotency_key": "quote-original"}, session))
+        assert result["status_code"] == 422
+        assert client.whatsapp._http.post.call_count == 1
+        assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(1)
+        assert client.whatsapp._http.post.call_args.kwargs["headers"]["Idempotency-Key"] == "quote-original"
+    finally:
+        clear_context(session, "quote-turn")
+        client.close()
