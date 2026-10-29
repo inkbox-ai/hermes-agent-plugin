@@ -83,7 +83,8 @@ def invoke(operation, args, session_id=""):
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
                     **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
-                prior = (context or {}).get("whatsapp_send_attempt")
+                attempt_owner = owner if owner and owner.get("mode") == "whatsapp" else context
+                prior = (attempt_owner or {}).get("whatsapp_send_attempt")
                 if (prior and args.get("idempotency_key") == prior["key"]
                         and "reply_to_message_id" not in payload and "reply_to_message_id" in prior["payload"]):
                     payload["reply_to_message_id"] = prior["payload"]["reply_to_message_id"]
@@ -107,7 +108,9 @@ def invoke(operation, args, session_id=""):
                     raise ValueError("A group name requires 2–8 recipients and 1–100 characters")
                 if "text" in payload and (not isinstance(payload["text"], str) or len(payload["text"]) > 4000):
                     raise ValueError("WhatsApp text must be at most 4000 characters")
-                source = (owner or {}).get("turn_id") or uuid.uuid4().hex
+                source = (owner or {}).get("turn_id")
+                if not source and not args.get("idempotency_key"):
+                    raise ValueError("WhatsApp sends outside an active turn require an explicit stable idempotency_key")
                 key = args.get("idempotency_key") or (
                     "hermes-wa-tool:"
                     + hashlib.sha256(json.dumps([str(identity.id), source, payload], sort_keys=True).encode()).hexdigest()
@@ -117,12 +120,12 @@ def invoke(operation, args, session_id=""):
                         raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
                 authorize()
                 callback = (
-                    (owner or {}).get("explicit_delivery_state") if context and context.get("mode") == "whatsapp" else None
+                    (attempt_owner or {}).get("explicit_delivery_state")
                 )
                 attempt = {"payload": payload, "key": key, "state": "sending"}
-                record_attempt = context.get("record_whatsapp_attempt") if context and context.get("mode") == "whatsapp" else None
-                if context and context.get("mode") == "whatsapp":
-                    context["whatsapp_send_attempt"] = attempt
+                record_attempt = (attempt_owner or {}).get("record_whatsapp_attempt")
+                if attempt_owner is not None:
+                    attempt_owner["whatsapp_send_attempt"] = attempt
                 if record_attempt:
                     record_attempt(attempt)
                 if callback:
@@ -136,7 +139,7 @@ def invoke(operation, args, session_id=""):
                     if record_attempt:
                         record_attempt(attempt)
                     if callback:
-                        callback(attempt["state"])
+                        callback(attempt["state"] if context or attempt["state"] == "uncertain" else None)
                     raise
                 attempt["state"] = "sent"
                 if record_attempt:
@@ -175,6 +178,8 @@ def invoke(operation, args, session_id=""):
             return json.dumps({"ok": True, "result": _json_safe(result)}, ensure_ascii=False)
     except Exception as exc:
         result = {"error": "WhatsApp operation unavailable. Check access and the originating turn."}
+        if str(exc) == "WhatsApp sends outside an active turn require an explicit stable idempotency_key":
+            result["error"] = str(exc)
         if "WhatsApp requires Inkbox SDK" in str(exc):
             result["error"] = "WhatsApp requires Inkbox SDK 0.7.24 or newer"
         status = getattr(exc, "status_code", None)
@@ -212,7 +217,7 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested direct or group WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty.",
+            "Send requested direct or group WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
             {
                 "to": {"description": "One E.164 recipient or 2–8 distinct E.164 recipients for a group", "oneOf": [string("E.164 recipient"), {"type": "array", "items": string("E.164 recipient"), "minItems": 1, "maxItems": 8, "uniqueItems": True}]},
                 "reply_to_message_id": string("Optional authorized message UUID to quote; otherwise the active source is used. Requires a conversation."),

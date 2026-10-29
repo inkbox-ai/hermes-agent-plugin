@@ -158,7 +158,17 @@ class NativeTurns(CompanionReceiver):
             return
         if command:
             if self.active.get(row["chat_id"]):
-                row.setdefault("controls", {})[source_id] = "not_owner"
+                pending = [turn for turn in row["turns"] if turn["state"] == "pending"
+                           and self._same_control_scope(route, turn["route"])]
+                scoped_stop = route["mode"] == "whatsapp" and text.casefold() in {"/stop", "/cancel"}
+                if scoped_stop:
+                    for turn in pending:
+                        turn.update(state="cancelled", fenced=True)
+                row.setdefault("controls", {})[source_id] = "consumed" if scoped_stop else "not_owner"
+                self._save(row)
+                if scoped_stop:
+                    for turn in pending:
+                        self._release_context(row, turn)
                 self.unconfirmed_controls.pop(source_id, None)
             else:
                 control_turn = next((turn for turn in row["turns"] if turn["id"] == source_id), None)
@@ -651,7 +661,7 @@ class NativeTurns(CompanionReceiver):
         if read_only:
             unavailable = self.active.get(row["chat_id"]) is not turn or turn["state"] in {"cancelled", "quarantined"}
         else:
-            unavailable = row.get("blocked") or turn["state"] in {"uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain"
+            unavailable = row.get("blocked") or turn["state"] in {"done", "uncertain", "sending", "cancelled", "quarantined"} or turn.get("explicit_delivery_state") == "uncertain"
         if unavailable:
             raise PermissionError("Original WhatsApp turn is no longer active")
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
@@ -686,7 +696,14 @@ class NativeTurns(CompanionReceiver):
     def preflight_failed(self, row, turn, exc):
         transient = isinstance(exc, ReplyPreflightError) and exc.retryable
         turn["preflight_failure"] = {"retryable": transient, "error": str(exc)}
-        if not transient:
+        if not transient and turn["route"]["mode"] == "whatsapp":
+            # No effect was admitted. Settle this turn without blocking other
+            # authors in the same group or replaying an unauthorized answer.
+            turn.pop("preflight_failure", None)
+            turn["state"] = "done"
+            turn["reply_suppressed"] = "preflight_rejected"
+            turn["reply_error"] = str(exc)
+        elif not transient:
             row["blocked"] = True
             row["error"] = str(exc)
         self._save(row)
@@ -743,6 +760,17 @@ class NativeTurns(CompanionReceiver):
             return SendResult(success=False, error="Original native turn is no longer sendable; no automatic retry", raw_response={"inkbox_no_retry": True})
         if any(item.get("state") in {"sending", "uncertain"} for item in turn.get("media_deliveries", {}).values()):
             return SendResult(success=False, error="Original media delivery is uncertain", raw_response={"inkbox_no_retry": True})
+        if route["mode"] == "whatsapp" and turn.get("explicit_delivery_state") == "rejected":
+            final = turn.get("rendered", {}).get("text_content", turn.get("answer")) == content
+            if final:
+                # A definitive rejection suppresses this answer, not future turns.
+                turn["state"] = "done"
+                turn["reply_suppressed"] = "explicit_send_rejected"
+                turn.pop("preflight_failure", None)
+                self._save(row)
+                return SendResult(success=True, raw_response={"inkbox_no_retry": True, "inkbox_suppressed": True})
+            return SendResult(success=False, error="Original WhatsApp tool request was rejected; no replacement reply",
+                              raw_response={"inkbox_no_retry": True})
         if route["mode"] == "whatsapp" and len(content) > 4000:
             return SendResult(success=False, error="WhatsApp messages must be at most 4000 characters", raw_response={"inkbox_no_retry": True})
         if route["mode"] == "slack" and len(content) > 12000:
@@ -759,6 +787,8 @@ class NativeTurns(CompanionReceiver):
         event = self._event_from_turn(row, turn)
         owner = self._host_owner()
         if not owner or not owner._is_user_authorized(event.source):
+            if route["mode"] == "whatsapp":
+                return self.preflight_failed(row, turn, PermissionError("Original sender is no longer authorized"))
             return SendResult(success=False, error="Original sender is no longer authorized")
         if route["mode"] == "slack" and not self.adapter._slack_enabled:
             return SendResult(success=False, error="Slack is disabled")

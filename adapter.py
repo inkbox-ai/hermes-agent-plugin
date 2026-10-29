@@ -138,7 +138,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
-    from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from .native_turns import NativeTurns
     from .tunnel_tls import install_tunnel_tls_compatibility
     from .slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
@@ -188,7 +188,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from native_turns import NativeTurns
     from tunnel_tls import install_tunnel_tls_compatibility
     from slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
@@ -2433,7 +2433,7 @@ class InkboxAdapter(BasePlatformAdapter):
             if list(companion_root.glob("*.json")):
                 raise RuntimeError("Conflicting Companion checkpoints require recovery before startup")
             for path in legacy_rows:
-                row = json.loads(path.read_text())
+                row = read_checkpoint(path)
                 envelopes = [row.get("trigger_envelope", {})] + [turn.get("envelope", {}) for turn in row.get("turns", [])]
                 for envelope in envelopes:
                     data = envelope.get("data") or {}
