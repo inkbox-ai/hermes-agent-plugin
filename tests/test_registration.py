@@ -177,6 +177,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
         "inkbox_get_a2a_sent_task",
     }
     base_tools.update({'inkbox_get_whatsapp_status', 'inkbox_get_whatsapp_media', 'inkbox_list_whatsapp_conversations', 'inkbox_get_whatsapp_message', 'inkbox_upload_whatsapp_media', 'inkbox_lookup_whatsapp_send', 'inkbox_mark_whatsapp_read', 'inkbox_send_whatsapp', 'inkbox_get_whatsapp_conversation', 'inkbox_list_whatsapp_messages'})
+    base_tools.update({'inkbox_get_whatsapp_thread', 'inkbox_send_whatsapp_reaction', 'inkbox_remove_whatsapp_reaction', 'inkbox_get_whatsapp_conversation_thread', 'inkbox_get_whatsapp_reaction'})
     optional = {"inkbox_slack_list_connections", "inkbox_slack_list_conversations", "inkbox_slack_list_messages",
                 "inkbox_slack_search", "inkbox_slack_send_message", "inkbox_slack_get_action",
                 "inkbox_slack_upload_file", "inkbox_slack_get_operation", "inkbox_slack_download_file_preview",

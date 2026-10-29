@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
   "audioop-lts>=0.2.1; python_version >= '3.13'",
-  "inkbox>=0.7.21,<1.0.0",
+  "inkbox>=0.7.24,<1.0.0",
   "segno>=1.5",
 ]
 
@@ -22,9 +22,9 @@ test = [
 # package — keep uv from trying to build/install the project itself.
 package = false
 
-# Temporary public SDK candidate until the normal 0.7.21 release is published.
+# Temporary public SDK candidate until the normal 0.7.24 release is published.
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "5bf65d4dfa6d8cfe65ec13a39ffa89a66ecb6b97", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "48ed20948b4710d579352e96b1a88c8d3b188258", subdirectory = "sdk/python" }
 
 [tool.ruff]
 line-length = 125

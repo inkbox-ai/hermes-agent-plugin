@@ -191,12 +191,12 @@ def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path,
     asyncio.run(run())
 
 
-def test_unsupported_group_wrong_identity_and_self_echo_do_not_admit(factory, tmp_path):
+def test_unresolved_group_wrong_identity_and_self_echo_do_not_admit(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
         try:
-            for changes in ({"is_group": True}, {"agent_identity_id": uid(999)}, {"sender_number": "+15555550100"}):
+            for changes in ({"is_group": True, "participants": []}, {"agent_identity_id": uid(999)}, {"sender_number": "+15555550100"}):
                 assert (await receive(value.adapter, inbound(**changes))).status == 200
             assert value.inputs == [] and value.queue.rows == {}
         finally:
@@ -532,3 +532,181 @@ def test_email_policy_rejection_reuses_original_key_without_freeing_unknown_send
             client.close()
 
     asyncio.run(run())
+
+
+def test_group_receipts_isolate_conversations_and_authority_and_quote_the_actual_source(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        try:
+            for number, conversation in ((1, uid(31)), (2, uid(32))):
+                response = await receive(value.adapter, inbound(id=uid(number), conversation_id=conversation,
+                    is_group=True, remote_number=None, participants=["+15555550101", "+15555550102"],
+                    content="@sample-agent please review this"))
+                assert response.status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            assert len(value.queue.rows) == 2
+            assert {event.source.chat_id for event in value.inputs} == {f"whatsapp:{uid(31)}", f"whatsapp:{uid(32)}"}
+            assert all(event.source.chat_type == "group" and event.source.user_id_alt == "+15555550101" for event in value.inputs)
+            assert all(event.source.thread_id == event.source.chat_id for event in value.inputs)
+            assert all(row["turns"][0]["route"]["conversation_kind"] == "group" for row in value.queue.rows.values())
+            calls = client.whatsapp._http.post.call_args_list
+            assert {call.kwargs["json"]["reply_to_message_id"] for call in calls} == {uid(1), uid(2)}
+            assert {call.kwargs["json"]["conversation_id"] for call in calls} == {uid(31), uid(32)}
+            assert all("plain_reply_fallback" not in call.kwargs["json"] for call in calls)
+            assert all(call.kwargs["is_group"] is True for call in value.adapter._contact_memories.call_args_list)
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("changes", [
+    {"participants": []}, {"participants": ["+15555550102", "+15555550103"]},
+    {"participants": ["+15555550101", "+15555550101"]},
+    {"participants": ["+15555550100", "+15555550101"]}, {"sender_number": "opaque-author"},
+])
+def test_group_without_resolved_remote_author_never_enters_native_permissions(factory, tmp_path, changes):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        try:
+            assert (await receive(value.adapter, inbound(is_group=True, remote_number=None,
+                **changes))).status == 200
+            assert not value.inputs and not value.queue.rows
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_new_native_quotes_keep_batch_latest_source_without_moving_the_host_session(factory, tmp_path, monkeypatch):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        admitted = asyncio.Event()
+        original_batch = value.queue._batch
+        async def wait_batch(*args):
+            await admitted.wait()
+            return await original_batch(*args)
+        monkeypatch.setattr(value.queue, "_batch", wait_batch)
+        try:
+            assert (await receive(value.adapter, inbound(id=uid(1), content="First question"))).status == 202
+            assert (await receive(value.adapter, inbound(id=uid(2), content="Follow-up question"))).status == 202
+            admitted.set()
+            await settle(value.queue)
+            assert len(value.inputs) == 1
+            route = next(iter(value.queue.rows.values()))["turns"][0]["route"]
+            assert route["whatsapp_reply_target"] == uid(2)
+            assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(2)
+            assert value.inputs[0].source.thread_id == f"whatsapp:{uid(30)}"
+        finally:
+            admitted.set()
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_versioned_reaction_events_never_wake_model_and_cannot_regress_removal(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        item = {"id": uid(901), "target_message_id": uid(800), "conversation_id": uid(30),
+            "agent_identity_id": uid(100), "direction": "inbound", "remote_number": None,
+            "status": "removed", "revision": 2, "updated_at": "2026-10-01T12:02:00Z"}
+        try:
+            record_status(value.adapter, {"event_type": "whatsapp.reaction_received", "data": {"reaction": item}})
+            record_status(value.adapter, {"event_type": "whatsapp.reaction_received", "data": {"reaction": {**item,
+                "status": "applied", "revision": 1, "updated_at": TIME}}})
+            saved = value.queue.delivery_status[f"whatsapp-reaction:{uid(901)}"]
+            assert saved["status"] == "removed" and saved["remote_number"] is None
+            assert not value.inputs and not client.whatsapp._http.post.called
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_group_explicit_direct_send_to_author_never_retargets_to_the_group(factory, tmp_path, monkeypatch):
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    identity = value.adapter._reply_identity
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": "group-turn", "conversation_kind": "group", "conversation_id": uid(30),
+        "author": "+15555550101", "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
+    try:
+        result = json.loads(invoke("send_whatsapp", {"to": "+15555550101", "text": "Private answer", "idempotency_key": "private-key"}, session))
+        assert result["ok"]
+        assert client.whatsapp._http.post.call_args.kwargs["json"] == {"to": "+15555550101", "text": "Private answer"}
+    finally:
+        clear_context(session, "group-turn")
+        client.close()
+
+
+def test_reaction_tools_keep_stable_keys_and_exact_receipts_and_allow_read_only_recovery(factory, tmp_path, monkeypatch):
+    from inkbox_plugin import tools
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    identity = value.adapter._reply_identity
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+    item = {"id": uid(901), "target_message_id": uid(800), "conversation_id": uid(30), "agent_identity_id": uid(100),
+        "direction": "outbound", "remote_number": "+15555550100", "reaction": "like", "custom_emoji": None,
+        "emoji": "👍", "status": "uncertain", "revision": 1, "created_at": TIME, "updated_at": TIME, "removed_at": None}
+    client.whatsapp._http.post.return_value = {"reaction": item}
+    client.whatsapp._http.get.return_value = {"reaction": item}
+    client.whatsapp._http.delete_with_response.return_value = {"reaction": {**item, "status": "superseded"}}
+    guard = Mock()
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": "reaction-turn", "conversation_id": uid(30), "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": guard})
+    try:
+        result = json.loads(invoke("send_whatsapp_reaction", {"message_id": uid(800), "reaction": "like", "idempotency_key": "reaction-key"}, session))
+        assert result["ok"] and result["result"]["reaction"]["status"] == "uncertain"
+        assert client.whatsapp._http.post.call_args.kwargs["headers"] == {"Idempotency-Key": "reaction-key"}
+        assert json.loads(invoke("get_whatsapp_reaction", {"reaction_id": uid(901)}, session))["ok"]
+        guard.assert_called_with(read_only=True)
+        removed = json.loads(invoke("remove_whatsapp_reaction", {"reaction_id": uid(901), "idempotency_key": "remove-key"}, session))
+        assert removed["result"]["reaction"]["status"] == "superseded"
+        assert client.whatsapp._http.delete_with_response.call_args.kwargs["headers"] == {"Idempotency-Key": "remove-key"}
+    finally:
+        clear_context(session, "reaction-turn")
+        client.close()
+
+
+def test_shared_group_quote_matrix_uses_real_sdk_and_rejects_before_io(factory, monkeypatch):
+    from pathlib import Path
+    from inkbox_plugin import tools
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "whatsapp-v2.json").read_text())
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    identity = value.adapter._reply_identity
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, identity))
+    for item in fixture["send_cases"]:
+        before = client.whatsapp._http.post.call_count
+        result = json.loads(invoke("send_whatsapp", {**item["body"], "idempotency_key": item["name"]}))
+        if item["valid"]:
+            assert result["ok"], item["name"]
+            assert client.whatsapp._http.post.call_args.kwargs["json"] == item["body"]
+            assert client.whatsapp._http.post.call_args.kwargs["headers"]["Idempotency-Key"] == item["name"]
+        else:
+            assert "error" in result, item["name"]
+            assert client.whatsapp._http.post.call_count == before
+
+
+def test_whatsapp_registration_exposes_group_quote_thread_and_reaction_contracts():
+    from inkbox_plugin.whatsapp_tools import register
+    ctx = Mock()
+    register(ctx, lambda: True)
+    tools = {call.args[0]: call.args[2] for call in ctx.register_tool.call_args_list}
+    send = tools["inkbox_send_whatsapp"]["parameters"]
+    assert send["additionalProperties"] is False
+    assert send["properties"]["to"]["oneOf"][1]["maxItems"] == 8
+    assert {"reply_to_message_id", "group_name"} <= set(send["properties"])
+    assert "plain_reply_fallback" not in send["properties"]
+    assert {"inkbox_get_whatsapp_thread", "inkbox_get_whatsapp_conversation_thread", "inkbox_send_whatsapp_reaction",
+        "inkbox_get_whatsapp_reaction", "inkbox_remove_whatsapp_reaction"} <= set(tools)
+    reaction = tools["inkbox_send_whatsapp_reaction"]["parameters"]
+    assert "idempotency_key" in reaction["required"] and "part_index" not in reaction["properties"]
+    assert reaction["properties"]["reaction"]["enum"] == ["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"]

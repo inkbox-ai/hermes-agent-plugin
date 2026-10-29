@@ -9756,7 +9756,7 @@ class InkboxAdapter(BasePlatformAdapter):
         wrong_approval = pending and not asked and approval_reply(text) is not None
         native = getattr(self, "_native_turns", None)
         retry_control = channel in {"imessage", "whatsapp"} and native is not None and str(event.message_id) in native.unconfirmed_controls
-        quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
+        quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage", "whatsapp"} and response_mode(self, "group_reply_mode") == "mention"
                 and not mentions(text, self._identity_handle) and not command and answer is None))
         if quiet:
             journal.quiet(key, str(event.message_id), event.text)

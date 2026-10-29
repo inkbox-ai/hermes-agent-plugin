@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add WhatsApp groups with isolated native conversation sessions and actual-author permission/Stop fences. Native final replies quote the latest admitted source; old durable pending payloads remain unchanged.
+- Add chronological quote-chain reads and whole-message named/custom reaction tools with explicit stable mutation keys and versioned receipt/removal semantics. Reaction events never wake duplicate model work.
+- Raise the current WhatsApp SDK floor to 0.7.24 and share the SDK's group/reply request fixture matrix. Existing iMessage, Slack, media and native turn lifecycles remain in place.
+
 ## 0.2.21
 
 - Add approved, dedicated one-to-one WhatsApp with signed reception, native final replies, scoped approvals, and durable duplicate/uncertain-send protection.

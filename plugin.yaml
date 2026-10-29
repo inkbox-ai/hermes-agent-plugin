@@ -131,6 +131,11 @@ provides_tools:
   - inkbox_imessage_triage_number
   - inkbox_send_imessage
   - inkbox_send_whatsapp
+  - inkbox_get_whatsapp_thread
+  - inkbox_get_whatsapp_conversation_thread
+  - inkbox_send_whatsapp_reaction
+  - inkbox_get_whatsapp_reaction
+  - inkbox_remove_whatsapp_reaction
   - inkbox_list_whatsapp_conversations
   - inkbox_get_whatsapp_conversation
   - inkbox_list_whatsapp_messages

@@ -27,12 +27,12 @@ def invoke(operation, args, session_id=""):
                 guard = owner.get("authorize_whatsapp")
                 if not callable(guard):
                     raise PermissionError("The originating WhatsApp turn is unavailable")
-                guard(read_only=True) if operation == "lookup" else guard()
+                guard(read_only=True) if operation == "lookup" or operation.startswith(("get_", "list_")) else guard()
 
         authorize()
         conversation, recipient = args.get("conversation_id"), args.get("to")
         canonical = re.sub(r"[\s().-]", "", recipient) if isinstance(recipient, str) else None
-        if (owner and owner.get("mode") == "whatsapp" and canonical == owner.get("author")
+        if (owner and owner.get("mode") == "whatsapp" and owner.get("conversation_kind") != "group" and canonical == owner.get("author")
                 and re.fullmatch(r"\+[1-9][0-9]{6,14}", canonical or "")):
             conversation, recipient = owner.get("conversation_id"), None
         with explicit_send(session_id, conversation, recipient, allow_other_destination=True) as context:
@@ -67,11 +67,16 @@ def invoke(operation, args, session_id=""):
             elif operation == "send_whatsapp":
                 selector = {name: args[name] for name in ("to", "conversation_id") if name in args}
                 if len(selector) != 1 or not (str(args.get("text") or "").strip() or args.get("media_id")):
-                    raise ValueError("Use one recipient or conversation and text or an owned media ID")
+                    raise ValueError("Use 1–8 unique recipients or a conversation, with text or an owned media ID")
+                if isinstance(selector.get("to"), str):
+                    selector["to"] = re.sub(r"[\s().-]", "", selector["to"])
+                elif isinstance(selector.get("to"), list):
+                    selector["to"] = [re.sub(r"[\s().-]", "", phone) if isinstance(phone, str) else phone for phone in selector["to"]]
                 payload = {
                     **selector,
                     **({"text": args["text"]} if "text" in args else {}),
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
+                    **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
                 source = (owner or {}).get("turn_id") or uuid.uuid4().hex
                 key = args.get("idempotency_key") or (
@@ -96,6 +101,17 @@ def invoke(operation, args, session_id=""):
                 if context and context.get("mode") == "whatsapp":
                     record_explicit(context, str(args.get("text") or ""), result)
                 result = {"message": result, "idempotency_key": key, "media_id": args.get("media_id")}
+            elif operation in {"send_whatsapp_reaction", "remove_whatsapp_reaction"}:
+                key = args.get("idempotency_key")
+                if not isinstance(key, str) or not key.strip():
+                    raise ValueError("Reaction writes require an explicit stable idempotency key")
+                authorize()
+                try:
+                    result = method(identity, operation)(**args)
+                except Exception as exc:
+                    exc.idempotency_key = key
+                    raise
+                result = {"reaction": result, "idempotency_key": key}
             elif operation == "upload_whatsapp_media":
                 path = _safe_local_media_path(args["media_path"], max_bytes=MAX_MEDIA_BYTES, channel="WhatsApp")
                 with path.open("rb") as stream:
@@ -115,14 +131,16 @@ def invoke(operation, args, session_id=""):
     except Exception as exc:
         result = {"error": "WhatsApp operation unavailable. Check access and the originating turn."}
         if "WhatsApp requires Inkbox SDK" in str(exc):
-            result["error"] = "WhatsApp requires Inkbox SDK 0.7.21 or newer"
+            result["error"] = "WhatsApp requires Inkbox SDK 0.7.24 or newer"
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             result["status_code"] = status
         policy = public_quota_error(exc)
         result.update(policy)
         key = getattr(exc, "idempotency_key", None)
-        if key:
+        if key and operation in {"send_whatsapp_reaction", "remove_whatsapp_reaction"}:
+            result.update(idempotency_key=key, recovery="Inspect the original reaction receipt when available; retry only the exact original request and key. Never infer that an uncertain reaction was not applied.")
+        elif key:
             result.update(
                 idempotency_key=key,
                 media_id=getattr(exc, "whatsapp_media_id", None),
@@ -149,9 +167,11 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested one-to-one WhatsApp text and one owned media ID. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty.",
+            "Send requested direct or group WhatsApp text and one owned media ID. Quote only within the selected conversation; never silently fall back. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty.",
             {
-                "to": string("One E.164 recipient"),
+                "to": {"description": "One E.164 recipient or 2–8 distinct E.164 recipients for a group", "oneOf": [string("E.164 recipient"), {"type": "array", "items": string("E.164 recipient"), "minItems": 1, "maxItems": 8, "uniqueItems": True}]},
+                "reply_to_message_id": string("Authorized message UUID to quote; requires conversation_id"),
+                "group_name": {**string("Creation-only name with 2–8 recipients; never renames an existing group"), "minLength": 1, "maxLength": 100},
                 "conversation_id": string("Existing conversation, mutually exclusive with to"),
                 "text": {**string("Message text"), "maxLength": 4000},
                 "media_id": string("Owned attachment ID"),
@@ -163,7 +183,7 @@ def register(ctx, check_fn):
         (
             "inkbox_list_whatsapp_conversations",
             "List WhatsApp conversations with local unread counts.",
-            pagination,
+            {**pagination, "include_groups": {"type": "boolean", "description": "Default true; false reads only direct conversations"}},
             [],
             "list_whatsapp_conversations",
         ),
@@ -177,7 +197,7 @@ def register(ctx, check_fn):
         (
             "inkbox_list_whatsapp_messages",
             "List WhatsApp messages, newest first.",
-            {**pagination, "conversation_id": string("Conversation ID")},
+            {**pagination, "conversation_id": string("Conversation ID"), "thread_id": string("Quote-chain ID; requires conversation_id"), "include_groups": {"type": "boolean"}},
             ["conversation_id"],
             "list_whatsapp_messages",
         ),
@@ -187,6 +207,31 @@ def register(ctx, check_fn):
             {"message_id": string("Message ID")},
             ["message_id"],
             "get_whatsapp_message",
+        ),
+        (
+            "inkbox_get_whatsapp_thread", "Read an authorized chronological quote chain; preserve its opaque cursor.",
+            {"message_id": string("Visible message UUID"), "limit": pagination["limit"], "cursor": string("Opaque next cursor")},
+            ["message_id"], "get_whatsapp_thread",
+        ),
+        (
+            "inkbox_get_whatsapp_conversation_thread", "Read one conversation's authorized quote chain; never infer a hidden parent.",
+            {"conversation_id": string("Conversation UUID"), "thread_id": string("Quote-chain UUID"), "limit": pagination["limit"], "cursor": string("Opaque next cursor")},
+            ["conversation_id", "thread_id"], "get_whatsapp_conversation_thread",
+        ),
+        (
+            "inkbox_send_whatsapp_reaction", "Set a whole-message reaction. Queued and uncertain receipts are not applied reactions.",
+            {"message_id": string("Authorized target message UUID"), "reaction": {"type": "string", "enum": ["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"]},
+             "custom_emoji": {**string("Exclusive with reaction; 1–32 code points without whitespace or control characters"), "minLength": 1, "maxLength": 32}, "idempotency_key": string("Required stable key for this exact intended reaction")},
+            ["message_id", "idempotency_key"], "send_whatsapp_reaction",
+        ),
+        (
+            "inkbox_get_whatsapp_reaction", "Read a versioned reaction receipt without repeating its write.",
+            {"reaction_id": string("Reaction UUID")}, ["reaction_id"], "get_whatsapp_reaction",
+        ),
+        (
+            "inkbox_remove_whatsapp_reaction", "Remove your exact reaction version; never removes a later replacement.",
+            {"reaction_id": string("Own reaction UUID"), "idempotency_key": string("Required stable removal key")},
+            ["reaction_id", "idempotency_key"], "remove_whatsapp_reaction",
         ),
         (
             "inkbox_upload_whatsapp_media",

@@ -290,6 +290,8 @@ class NativeTurns(CompanionReceiver):
                 turn["source_ids"].extend(candidate["source_ids"])
                 for key in ("imessage_event_ids", "imessage_sources"):
                     turn["route"].setdefault(key, []).extend(next_route.get(key, []))
+                if route["mode"] == "whatsapp" and next_route.get("whatsapp_reply_target"):
+                    turn["route"]["whatsapp_reply_target"] = next_route["whatsapp_reply_target"]
                 turn["event"]["metadata"]["inkbox_reply_route"] = copy.deepcopy(turn["route"])
                 turn["last_at"] = candidate["last_at"]
                 row["turns"].remove(candidate)
@@ -754,7 +756,8 @@ class NativeTurns(CompanionReceiver):
                 self.check_media_authority(row, turn)
             except Exception as exc:
                 return self.preflight_failed(row, turn, exc)
-            reply_options = {}
+            reply_options = ({"reply_to_message_id": route["whatsapp_reply_target"]}
+                             if route.get("whatsapp_reply_target") else {})
         else:
             try:
                 reply_options = await self.preflight_reply(row, turn, self.adapter._reply_identity)
