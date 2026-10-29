@@ -2458,3 +2458,103 @@ def test_rejected_group_does_not_alias_distinct_group_or_participants(factory, t
     finally:
         clear_context(session, uid(1))
         client.close()
+
+
+@pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("uppercase", [False, True])
+@pytest.mark.parametrize("failure", [None, "rejected", "uncertain"])
+def test_source_uuid_casing_preserves_quote_and_final_fences(factory, tmp_path, monkeypatch, group, uppercase, failure):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+            NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        conversation = "abcdefab-0000-4000-8000-000000000001"
+        selector = conversation.upper() if uppercase else conversation
+        if failure:
+            client.whatsapp._http.post.side_effect = InkboxAPIError(409 if failure == "rejected" else 403,
+                {"error": "whatsapp_quote_unavailable" if failure == "rejected" else "unknown"})
+        completed = []
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            result = json.loads(invoke("send_whatsapp", {"conversation_id": selector, "text": "Answer"}, session))
+            assert ("error" in result) == bool(failure)
+            if failure:
+                for replacement in (conversation, conversation.upper()):
+                    assert "error" in json.loads(invoke("send_whatsapp", {
+                        "conversation_id": replacement, "text": "Replacement", "idempotency_key": "new-key"}, session))
+            value.queue.capture_result(event, "Answer")
+            result = await value.adapter.send(event.source.chat_id, "Answer", reply_to=event.message_id)
+            await value.adapter.on_processing_complete(event, "success" if result.success else "failure")
+            completed.append(True)
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound(conversation_id=conversation, is_group=group,
+                participants=["+15555550101", "+15555550102"] if group else ["+15555550101"],
+                remote_number=None if group else "+15555550101"))
+            await settle(value.queue)
+            assert completed == [True]
+            client.whatsapp._http.post.assert_called_once()
+            assert client.whatsapp._http.post.call_args.kwargs["json"] == {
+                "conversation_id": selector, "text": "Answer", "reply_to_message_id": uid(1)}
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            assert len(turn.get("explicit_sends", [])) == (0 if failure else 1)
+            assert turn["explicit_delivery_state"] == (failure or "sent")
+            if failure == "rejected":
+                assert turn["reply_suppressed"] == "explicit_send_rejected"
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+@pytest.mark.parametrize("saved_state", [None, "rejected", "uncertain"])
+def test_source_uuid_casing_keeps_original_recovery_payload(factory, tmp_path, monkeypatch, quoted, saved_state):
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+        NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    conversation = "abcdefab-0000-4000-8000-000000000001"
+    session = str(tmp_path)
+    key = "original-uppercase-key"
+    payload = {"conversation_id": conversation.upper(), "text": "Answer",
+        **({"reply_to_message_id": uid(2)} if quoted else {})}
+    saved = {"payload": payload, "key": key, "state": saved_state} if saved_state else None
+    bind_context(session, {"mode": "whatsapp", "turn_id": uid(1), "conversation_id": conversation,
+        "whatsapp_auto_reply_target": uid(1), "identity_id": uid(100), "base_url": value.adapter._base_url,
+        "authorize_whatsapp": Mock(), "whatsapp_send_attempt": saved})
+    # A saved quote is recovered without adding or rewriting any other field.
+    args = {**payload, "idempotency_key": key}
+    if saved_state:
+        args.pop("reply_to_message_id", None)
+    try:
+        if saved_state == "rejected":
+            # UUID ownership equivalence must not allow a changed retry body.
+            assert "error" in json.loads(invoke("send_whatsapp", {**args, "conversation_id": conversation}, session))
+            client.whatsapp._http.post.assert_not_called()
+        result = json.loads(invoke("send_whatsapp", args, session))
+        if saved_state == "uncertain":
+            assert "error" in result
+            client.whatsapp._http.post.assert_not_called()
+            assert active_context(session)["whatsapp_send_attempt"] == saved
+        else:
+            assert result["ok"]
+            client.whatsapp._http.post.assert_called_once()
+            assert client.whatsapp._http.post.call_args.kwargs["json"] == payload
+            assert client.whatsapp._http.post.call_args.kwargs["headers"]["Idempotency-Key"] == key
+            assert len(active_context(session)["explicit_sends"]) == 1
+    finally:
+        clear_context(session, uid(1))
+        client.close()

@@ -13,6 +13,13 @@ from .imessage_state import active_context, explicit_send, record_explicit, turn
 from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, field, method, public_quota_error
 
 
+def _same_uuid(left, right):
+    try:
+        return uuid.UUID(str(left)) == uuid.UUID(str(right))
+    except (ValueError, TypeError):
+        return False
+
+
 def _destination(payload, owner):
     if "conversation_id" in payload:
         return ("conversation", str(uuid.UUID(str(payload["conversation_id"]))))
@@ -79,6 +86,10 @@ def invoke(operation, args, session_id=""):
         if (owner and owner.get("mode") == "whatsapp" and owner.get("conversation_kind") != "group" and canonical == owner.get("author")
                 and re.fullmatch(r"\+[1-9][0-9]{6,14}", canonical or "")):
             conversation, recipient = owner.get("conversation_id"), None
+        if (operation == "send_whatsapp" and owner and owner.get("mode") == "whatsapp" and recipient is None
+                and _same_uuid(conversation, owner.get("conversation_id"))):
+            # Bind source ownership without rewriting an exact retained wire selector.
+            conversation = owner["conversation_id"]
         with explicit_send(session_id, conversation, recipient, allow_other_destination=True) as context:
             cfg, client, identity = _client_and_identity()
             authorize()
