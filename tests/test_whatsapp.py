@@ -1998,6 +1998,8 @@ def test_rejected_outreach_allows_independent_destination_and_retains_intent(fac
 
     async def run():
         value = await harness(factory, tmp_path)
+        # Multiple durable tool checkpoints test recovery, not a two-second host deadline.
+        value.queue.completion_timeout = 30
         client = real_identity(value.adapter)
         monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
         original = {**destination, "text": "For Bob", "idempotency_key": "outreach-b"}
