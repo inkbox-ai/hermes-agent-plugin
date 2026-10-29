@@ -122,6 +122,14 @@ def invoke(operation, args, session_id=""):
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
                     **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
+                supplied_key = args.get("idempotency_key")
+                if supplied_key is not None and (not isinstance(supplied_key, str) or not supplied_key.strip()
+                        or len(supplied_key) > 255 or not supplied_key.isascii() or not supplied_key.isprintable()):
+                    raise ValueError("idempotency_key must contain 1–255 printable ASCII characters")
+                if "conversation_id" in payload:
+                    uuid.UUID(str(payload["conversation_id"]))
+                if args.get("media_id") is not None:
+                    uuid.UUID(str(args["media_id"]))
                 attempt_owner = owner if owner and owner.get("mode") == "whatsapp" else None
                 prior = (attempt_owner or {}).get("whatsapp_send_attempt")
                 attempts = copy.deepcopy((attempt_owner or {}).get("whatsapp_send_attempts", {}))

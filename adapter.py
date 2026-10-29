@@ -2436,7 +2436,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 row = read_checkpoint(path)
                 envelopes = [row.get("trigger_envelope", {})] + [turn.get("envelope", {}) for turn in row.get("turns", [])]
                 for envelope in envelopes:
-                    data = envelope.get("data") or {}
+                    data = (envelope or {}).get("data") or {}
                     item = data.get("message") or data.get("text_message") or {}
                     if item.get("agent_identity_id") and str(item["agent_identity_id"]) != self._identity_id:
                         raise RuntimeError("Companion checkpoint belongs to a different identity")

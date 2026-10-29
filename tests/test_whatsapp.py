@@ -1229,6 +1229,10 @@ def test_stale_or_mismatched_server_reaction_receipt_never_wakes_context(factory
     {"conversation_id": uid(30), "group_name": "Not creation"},
     {"to": ["+15555550101", "+15555550101"]},
     {"to": "+15555550101", "text": "x" * 4001},
+    *[{"conversation_id": uid(30), "idempotency_key": key} for key in
+      ("reply—1", "x" * 256, "reply\n1", " ", "", 123)],
+    {"conversation_id": "not-a-uuid"},
+    {"conversation_id": uid(30), "media_id": "not-a-uuid"},
 ])
 def test_local_contract_rejection_does_not_fence_corrected_explicit_send(factory, tmp_path, monkeypatch, args):
     from inkbox_plugin import tools
@@ -1241,7 +1245,7 @@ def test_local_contract_rejection_does_not_fence_corrected_explicit_send(factory
     bind_context(session, {"mode": "whatsapp", "turn_id": "validation", "conversation_id": uid(30), "author": "+15555550101",
         "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock(), "explicit_delivery_state": states.append})
     try:
-        result = json.loads(invoke("send_whatsapp", {"text": "Answer", **args, "idempotency_key": "same-key"}, session))
+        result = json.loads(invoke("send_whatsapp", {"text": "Answer", "idempotency_key": "same-key", **args}, session))
         assert "error" in result and not states and not client.whatsapp._http.post.called
         assert json.loads(invoke("send_whatsapp", {"conversation_id": uid(30), "text": "Answer", "idempotency_key": "same-key"}, session))["ok"]
         assert states == ["sending", "sent"]
@@ -1361,7 +1365,8 @@ def test_group_stop_preserves_other_authors_pending_work(factory, tmp_path, monk
 
 
 @pytest.mark.parametrize("state", ["pending", "completed", "submitted"])
-def test_startup_preserves_legacy_companion_namespace_turn_ids_and_delivery_proof(factory, tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("context_only", [False, True])
+def test_startup_preserves_legacy_companion_namespace_turn_ids_and_delivery_proof(factory, tmp_path, monkeypatch, state, context_only):
     import hashlib
     from inkbox_plugin.companion import CompanionReceiver
     from tests.test_companion import event
@@ -1383,6 +1388,9 @@ def test_startup_preserves_legacy_companion_namespace_turn_ids_and_delivery_proo
         await old.accept(envelope)
         row = next(iter(old.rows.values()))
         row["turns"][0]["state"] = state
+        if context_only:
+            row["trigger_envelope"] = None
+            row["turns"][0].update(phase="initialization", envelope=None, context_only=True)
         if state == "completed":
             row["turns"][0]["delivery"] = {"state": "sent", "message_id": uid(800)}
         turn_id = row["turns"][0]["id"]
