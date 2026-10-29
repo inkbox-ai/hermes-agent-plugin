@@ -101,6 +101,102 @@ def inbound(**changes):
     }
 
 
+def conversation_wire(conversation_id, **changes):
+    return {"id": conversation_id, "agent_identity_id": uid(100),
+        "local_number": "+15555550100", "remote_number": "+15555550102",
+        "participants": ["+15555550102"], "is_group": False,
+        "created_at": TIME, "updated_at": TIME, **changes}
+
+
+@pytest.mark.parametrize("outcome", ["not_found", "timeout", "accepted"])
+@pytest.mark.parametrize("explicit_key", [False, True])
+def test_whatsapp_send_cannot_own_matching_imessage_turn(factory, tmp_path, monkeypatch, outcome, explicit_key):
+    import hashlib
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+    from inkbox_plugin.native_turns import NativeTurns
+
+    monkeypatch.setattr("inkbox._message_requests.time.sleep", lambda _: None)
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        whatsapp_identity = value.adapter._reply_identity
+        # Keep the native iMessage final on its own transport.
+        value.adapter._reply_identity = value.base.identity
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+            NS(base_url=value.adapter._base_url), client, whatsapp_identity))
+        if outcome == "not_found":
+            client.whatsapp._http.post.side_effect = InkboxAPIError(404, "WhatsApp conversation not found")
+        elif outcome == "timeout":
+            client.whatsapp._http.post.side_effect = httpx.ReadTimeout("response lost")
+        completed = []
+        contexts = []
+        payload = {"conversation_id": uid(30), "text": "Requested WhatsApp message"}
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            context = active_context(session)
+            assert context["mode"] == "imessage"
+            assert context["conversation_id"] == payload["conversation_id"]
+            contexts.append(context)
+            args = {**payload, **({"idempotency_key": "requested-message-1"} if explicit_key else {})}
+            result = json.loads(invoke("send_whatsapp", args, session))
+            key = "requested-message-1" if explicit_key else "hermes-wa-tool:" + hashlib.sha256(
+                json.dumps([uid(100), event.message_id, payload], sort_keys=True).encode()).hexdigest()
+            if outcome == "accepted":
+                assert result["ok"]
+                assert result["result"]["idempotency_key"] == key
+            else:
+                assert "error" in result and result["idempotency_key"] == key
+                if outcome == "not_found":
+                    assert result["status_code"] == 404
+            calls = client.whatsapp._http.post.call_args_list
+            assert len(calls) == (3 if outcome == "timeout" else 1)
+            assert all(call.kwargs["json"] == payload for call in calls)
+            assert all(call.kwargs["headers"]["Idempotency-Key"] == key for call in calls)
+            value.queue.capture_result(event, "iMessage final")
+            final = await value.adapter.send(event.source.chat_id, "iMessage final", reply_to=event.message_id)
+            await value.adapter.on_processing_complete(event, "success" if final.success else "failure")
+            completed.append(final)
+
+        value.adapter.handle_message = handle
+        try:
+            await value.queue.accept(receipt(1, mode="imessage"))
+            await settle(value.queue)
+            assert len(completed) == 1 and completed[0].success
+            value.base.identity.send_imessage.assert_called_once()
+            sent = value.base.identity.send_imessage.call_args.kwargs
+            assert sent["conversation_id"] == uid(30) and sent["text"] == "iMessage final"
+            assert sent["reply_to_message_id"] == uid(1)
+            context = contexts[0]
+            assert context["whatsapp_send_attempt"] is None
+            assert context["whatsapp_send_attempts"] == {}
+            assert context["explicit_sends"] == [] and context["leases"] == 0
+            for restarted in (False, True):
+                if restarted:
+                    await value.queue.close()
+                    value.adapter._native_turns = value.queue = NativeTurns(value.adapter, tmp_path / "native")
+                    await value.queue.start()
+                    await settle(value.queue)
+                row = next(iter(value.queue.rows.values()))
+                turn = row["turns"][0]
+                assert turn["state"] == "done" and not row.get("blocked")
+                assert not {"whatsapp_send_attempt", "whatsapp_send_attempts", "explicit_delivery_state", "reply_suppressed"} & turn.keys()
+                assert not turn.get("explicit_sends")
+                value.base.identity.send_imessage.assert_called_once()
+                assert len(completed) == 1
+                assert client.whatsapp._http.post.call_count == (3 if outcome == "timeout" else 1)
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 def test_native_plain_reply_works_without_imessage_flag_and_uses_stable_real_sdk_key(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
@@ -1906,6 +2002,7 @@ def test_rejected_outreach_allows_independent_destination_and_retains_intent(fac
         monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
         original = {**destination, "text": "For Bob", "idempotency_key": "outreach-b"}
         independent = {"to": "+15555550103", "text": "For Carol", "idempotency_key": "outreach-c"}
+        client.whatsapp._http.get.return_value = conversation_wire(uid(99))
         saved = {}
         completed = []
 
@@ -1990,6 +2087,8 @@ def test_rejected_request_recovery_after_outreach_and_context_rebind(factory, tm
         monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
         destination = uid(30) if source_destination else uid(99)
         original = {"conversation_id": destination, "text": "Original", "reply_to_message_id": uid(2)}
+        client.whatsapp._http.get.return_value = conversation_wire(destination,
+            remote_number="+15555550101" if source_destination else "+15555550102")
         completed = []
 
         async def handle(event):
@@ -2039,6 +2138,8 @@ def test_rejected_request_recovery_after_outreach_and_context_rebind(factory, tm
             await settle(value.queue)
             assert completed == [True]
             assert client.whatsapp._http.post.call_count == 2 + int(recover) + int(not source_destination or recover)
+            if source_destination:
+                client.whatsapp._http.get.assert_not_called()
         finally:
             await value.queue.close()
             client.close()
@@ -2078,6 +2179,155 @@ def test_inflight_independent_outreach_remains_turnwide_fence(factory, tmp_path,
         if uncertain:
             assert "error" in json.loads(invoke("send_whatsapp", original, session))
         assert client.whatsapp._http.post.call_count == (1 if uncertain else 2)
+    finally:
+        clear_context(session, uid(1))
+        client.close()
+
+
+@pytest.mark.parametrize("rebind", [False, True])
+@pytest.mark.parametrize("alias", ["uuid_case", "phone", "conversation"])
+def test_rejected_destination_alias_cannot_replace_saved_request(factory, tmp_path, monkeypatch, alias, rebind):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        bob = "abcdefab-1234-4567-89ab-123456789abc"
+        client.whatsapp._http.get.return_value = conversation_wire(bob)
+        monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+            NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+        selector = {"to": "+15555550102"} if alias == "conversation" else {
+            "conversation_id": bob, "reply_to_message_id": uid(2)}
+        replacement = ({"conversation_id": bob.upper()} if alias == "uuid_case" else
+            {"to": ["+1 (555) 555-0102"]} if alias == "phone" else {"conversation_id": bob})
+        original = {**selector, "text": "Answer", "idempotency_key": "outreach-b"}
+        completed = []
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": "whatsapp_quote_unavailable"})
+            assert "error" in json.loads(invoke("send_whatsapp", original, session))
+            turn = next(iter(value.queue.rows.values()))["turns"][0]
+            saved = json.loads(json.dumps(turn["whatsapp_send_attempt"]))
+            client.whatsapp._http.post.side_effect = None
+            if rebind:
+                turn.pop("whatsapp_send_attempts", None)
+                assert clear_context(session, event.message_id)
+                await value.adapter.on_processing_start(event)
+            assert "error" in json.loads(invoke("send_whatsapp", {
+                **replacement, "text": "Answer", "idempotency_key": "replacement-b"}, session))
+            assert client.whatsapp._http.post.call_count == 1
+            assert turn["whatsapp_send_attempt"] == saved
+            # Identical content alone must not prohibit independent outreach.
+            assert json.loads(invoke("send_whatsapp", {
+                "to": "+15555550103", "text": "Answer", "idempotency_key": "outreach-c"}, session))["ok"]
+            if rebind:
+                assert clear_context(session, event.message_id)
+                await value.adapter.on_processing_start(event)
+            assert active_context(session)["whatsapp_send_attempts"]["outreach-b"] == saved
+            assert "error" in json.loads(invoke("send_whatsapp", {
+                **replacement, "text": "Answer", "idempotency_key": "replacement-after-outreach"}, session))
+            assert client.whatsapp._http.post.call_count == 2
+            assert turn["whatsapp_send_attempts"]["outreach-b"] == saved
+            recovery = {k: v for k, v in original.items() if k != "reply_to_message_id"}
+            assert json.loads(invoke("send_whatsapp", recovery, session))["ok"]
+            calls = client.whatsapp._http.post.call_args_list
+            assert calls[-1] == calls[0]
+            assert turn["whatsapp_send_attempts"]["outreach-b"] == {**saved, "state": "sent"}
+            # Once accepted, a later explicitly keyed send is not payload-deduplicated.
+            assert json.loads(invoke("send_whatsapp", {**original, "idempotency_key": "later-b"}, session))["ok"]
+            value.queue.capture_result(event, "Source final")
+            final = await value.adapter.send(event.source.chat_id, "Source final", reply_to=event.message_id)
+            assert final.success
+            assert client.whatsapp._http.post.call_args.kwargs["json"] == {
+                "conversation_id": uid(30), "text": "Source final", "reply_to_message_id": uid(1)}
+            await value.adapter.on_processing_complete(event, "success")
+            completed.append(True)
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound())
+            await settle(value.queue)
+            assert completed == [True]
+            assert client.whatsapp._http.post.call_count == 5
+            reads = client.whatsapp._http.get.call_args_list
+            assert reads and all(call.args == (f"/conversations/{bob}",) and
+                call.kwargs == {"params": {"agent_identity_id": uid(100)}} for call in reads)
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("evidence", ["unavailable", "wrong_identity", "wrong_conversation", "missing_phone", "group", "direct"])
+def test_rejected_alias_requires_owned_direct_conversation_evidence(factory, tmp_path, monkeypatch, evidence):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+    from inkbox_plugin.imessage_state import active_context
+
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+        NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": uid(1), "conversation_id": uid(30),
+        "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
+    original = {"conversation_id": uid(99), "text": "Answer", "reply_to_message_id": uid(2), "idempotency_key": "original"}
+    details = conversation_wire(uid(99))
+    details.update({"wrong_identity": {"agent_identity_id": uid(999)}, "wrong_conversation": {"id": uid(999)},
+        "missing_phone": {"remote_number": None}, "group": {"is_group": True}}.get(evidence, {}))
+    client.whatsapp._http.get.return_value = details
+    if evidence == "unavailable":
+        client.whatsapp._http.get.side_effect = InkboxAPIError(404, "Conversation unavailable")
+    try:
+        client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": "whatsapp_quote_unavailable"})
+        assert "error" in json.loads(invoke("send_whatsapp", original, session))
+        saved = json.loads(json.dumps(active_context(session)["whatsapp_send_attempt"]))
+        client.whatsapp._http.post.side_effect = None
+        result = json.loads(invoke("send_whatsapp", {
+            "to": "+15555550102", "text": "Answer", "idempotency_key": "replacement"}, session))
+        assert result.get("ok") if evidence == "group" else "error" in result
+        assert client.whatsapp._http.post.call_count == (2 if evidence == "group" else 1)
+        assert active_context(session)["whatsapp_send_attempts"]["original"] == saved
+        assert json.loads(invoke("send_whatsapp", original, session))["ok"]
+        assert client.whatsapp._http.post.call_args == client.whatsapp._http.post.call_args_list[0]
+        client.whatsapp._http.get.assert_called_once_with(
+            f"/conversations/{uid(99)}", params={"agent_identity_id": uid(100)})
+    finally:
+        clear_context(session, uid(1))
+        client.close()
+
+
+def test_rejected_group_does_not_alias_distinct_group_or_participants(factory, tmp_path, monkeypatch):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin import tools
+
+    value = factory("imessage")
+    client = real_identity(value.adapter)
+    participants = ["+15555550102", "+15555550103"]
+    client.whatsapp._http.get.side_effect = lambda path, **kwargs: conversation_wire(
+        path.rsplit("/", 1)[-1], is_group=True, remote_number=None, participants=participants)
+    monkeypatch.setattr(tools, "_client_and_identity", lambda: (
+        NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
+    session = str(tmp_path)
+    bind_context(session, {"mode": "whatsapp", "turn_id": uid(1), "conversation_id": uid(30),
+        "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
+    original = {"conversation_id": uid(98), "text": "Answer", "reply_to_message_id": uid(2), "idempotency_key": "group-a"}
+    try:
+        client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": "whatsapp_quote_unavailable"})
+        assert "error" in json.loads(invoke("send_whatsapp", original, session))
+        client.whatsapp._http.post.side_effect = None
+        for selector in ({"conversation_id": uid(99)}, {"to": participants, "group_name": "Team"}):
+            assert json.loads(invoke("send_whatsapp", {
+                **selector, "text": "Answer", "idempotency_key": str(selector)}, session))["ok"]
+            assert client.whatsapp._http.post.call_args.kwargs["json"] == {**selector, "text": "Answer"}
+        assert client.whatsapp._http.post.call_count == 3
+        client.whatsapp._http.get.assert_not_called()
     finally:
         clear_context(session, uid(1))
         client.close()

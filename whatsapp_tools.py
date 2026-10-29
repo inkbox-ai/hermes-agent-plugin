@@ -10,18 +10,45 @@ import re
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit
-from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, method, public_quota_error
+from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, field, method, public_quota_error
 
 
 def _destination(payload, owner):
     if "conversation_id" in payload:
-        return ("conversation", str(payload["conversation_id"]))
+        return ("conversation", str(uuid.UUID(str(payload["conversation_id"]))))
     recipients = payload.get("to")
     recipients = [recipients] if isinstance(recipients, str) else recipients
     phones = tuple(sorted(re.sub(r"[\s().-]", "", phone) for phone in recipients or []))
     if owner and owner.get("conversation_kind") != "group" and phones == (owner.get("author"),):
-        return ("conversation", str(owner.get("conversation_id")))
+        return ("conversation", str(uuid.UUID(str(owner.get("conversation_id")))))
     return ("recipients", phones)
+
+
+def _same_destination(left, right, identity, owner):
+    if left == right:
+        return True
+    if left[0] == right[0]:
+        return False
+    conversation, recipients = (left, right) if left[0] == "conversation" else (right, left)
+    # Participant sets do not identify an existing group conversation.
+    if len(recipients[1]) != 1:
+        return False
+    if owner and conversation[1] == str(uuid.UUID(str(owner.get("conversation_id")))):
+        if owner.get("conversation_kind") == "group":
+            return False
+        author = owner.get("author")
+        if owner.get("conversation_kind") == "direct" and isinstance(author, str) and re.fullmatch(r"\+[1-9][0-9]{6,14}", author):
+            return recipients[1] == (author,)
+    details = method(identity, "get_whatsapp_conversation")(conversation[1])
+    if (str(field(details, "id")) != conversation[1]
+            or str(field(details, "agent_identity_id")) != str(identity.id)):
+        raise ValueError("WhatsApp destination ownership could not be verified")
+    if field(details, "is_group") is True:
+        return False
+    phone = field(details, "remote_number")
+    if field(details, "is_group") is not False or not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
+        raise ValueError("WhatsApp direct destination could not be verified")
+    return recipients[1] == (phone,)
 
 
 def invoke(operation, args, session_id=""):
@@ -95,7 +122,7 @@ def invoke(operation, args, session_id=""):
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
                     **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
                 }
-                attempt_owner = owner if owner and owner.get("mode") == "whatsapp" else context
+                attempt_owner = owner if owner and owner.get("mode") == "whatsapp" else None
                 prior = (attempt_owner or {}).get("whatsapp_send_attempt")
                 attempts = copy.deepcopy((attempt_owner or {}).get("whatsapp_send_attempts", {}))
                 if prior:
@@ -134,7 +161,7 @@ def invoke(operation, args, session_id=""):
                     if prior["state"] in {"sending", "uncertain"}:
                         raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
                     if (prior["key"] == key or (prior["state"] == "rejected"
-                            and _destination(prior["payload"], owner) == _destination(payload, owner))):
+                            and _same_destination(_destination(prior["payload"], owner), _destination(payload, owner), identity, owner))):
                         if prior["payload"] != payload or prior["key"] != key:
                             raise ValueError("Recover the exact original WhatsApp request and key; do not send a replacement")
                 authorize()
