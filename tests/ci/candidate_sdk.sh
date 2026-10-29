@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the reviewed public SDK candidate; failures never fall back to a registry version.
 set -euo pipefail
-revision=65201706464e488abf345f3890215d53805cd644
+revision=2e693e18613e1e08ad0d920a890475be55b2bb13
 root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-${revision}"
 if [[ ! -d "$root/source/.git" ]]; then
   mkdir -p "$root"
