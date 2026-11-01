@@ -219,7 +219,7 @@ MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ),
     (
         "whatsapp",
-        "use approved dedicated WhatsApp direct/group messaging, native quoted replies, whole-message reactions, owned attachments, history and read-only recovery (not calls)",
+        "use approved dedicated WhatsApp direct messaging, native quoted replies, whole-message reactions, owned attachments, history and read-only recovery (not calls)",
         (
             "inkbox_send_whatsapp", "inkbox_list_whatsapp_conversations", "inkbox_get_whatsapp_conversation",
             "inkbox_list_whatsapp_messages", "inkbox_get_whatsapp_message", "inkbox_upload_whatsapp_media",

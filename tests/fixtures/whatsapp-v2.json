@@ -10,7 +10,7 @@
     },
     {
       "name": "direct_list",
-      "valid": true,
+      "valid": false,
       "body": {
         "to": [
           "+14155550100"
@@ -19,14 +19,13 @@
       }
     },
     {
-      "name": "group",
-      "valid": true,
+      "name": "recipient_array_rejected",
+      "valid": false,
       "body": {
         "to": [
           "+14155550101",
           "+14155550100"
         ],
-        "group_name": "Team",
         "text": "Hello everyone"
       }
     },
@@ -85,6 +84,14 @@
         "group_name": "Rename",
         "text": "Reply"
       }
+    },
+    {
+      "name": "comma_recipients_rejected",
+      "valid": false,
+      "body": {
+        "to": "+15555550101,+15555550102",
+        "text": "Hello"
+      }
     }
   ],
   "named_emoji": {
@@ -107,7 +114,6 @@
     "participants": [
       "+15555550101"
     ],
-    "is_group": false,
     "content": "Hello 👋",
     "media": [],
     "status": "sent",
@@ -161,18 +167,13 @@
   "conversation": {
     "agent_identity_id": "10000000-0000-4000-8000-000000000001",
     "local_number": "+15555550100",
-    "remote_number": null,
+    "remote_number": "+15555550101",
     "participants": [
-      "+15555550101",
-      "+15555550102"
+      "+15555550101"
     ],
-    "is_group": true,
     "created_at": "2026-10-01T12:00:00Z",
     "updated_at": "2026-10-01T12:00:00Z",
-    "id": "20000000-0000-4000-8000-000000000002",
-    "group_name": "Example group",
-    "group_creation_status": "uncertain",
-    "unresolved_participant_count": 1
+    "id": "20000000-0000-4000-8000-000000000002"
   },
   "reaction": {
     "id": "55555555-5555-4555-8555-555555555555",
@@ -238,12 +239,17 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
-        "content": "Original group question",
+        "content": "Original question",
         "media": [],
         "status": "received",
         "delivery_state": null,
-        "recipients": [],
+        "recipients": [
+          {
+            "remote_number": "+15555550101",
+            "delivery_status": "received",
+            "delivery_state": "unknown"
+          }
+        ],
         "is_read": false,
         "is_blocked": false,
         "error_code": null,
@@ -272,7 +278,6 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",
@@ -337,7 +342,7 @@
         "conversation_id": "20000000-0000-4000-8000-000000000002",
         "agent_identity_id": "10000000-0000-4000-8000-000000000001",
         "direction": "inbound",
-        "remote_number": null,
+        "remote_number": "+15555550101",
         "reaction": "love",
         "custom_emoji": null,
         "emoji": "❤️",
@@ -360,7 +365,6 @@
         "participants": [
           "+15555550101"
         ],
-        "is_group": false,
         "content": "Hello 👋",
         "media": [],
         "status": "sent",

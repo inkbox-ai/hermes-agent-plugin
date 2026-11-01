@@ -31,6 +31,20 @@ def _whatsapp_attempt_rows(turn):
     return rows
 
 
+def _unsupported_whatsapp_turn(turn):
+    from .whatsapp import unsupported_context
+    route = turn.get("route", {})
+    if route.get("mode") != "whatsapp":
+        return False
+    if unsupported_context(route) or unsupported_context(turn.get("event", {}).get("source", {})):
+        return True
+    for attempt in _whatsapp_attempt_rows(turn):
+        payload = attempt.get("payload", {})
+        if unsupported_context(payload) or ("to" in payload and not isinstance(payload["to"], str)):
+            return True
+    return False
+
+
 def _fenced_whatsapp_delivery(turn, state):
     """Keep a rejected or still-unresolved attempt ahead of a later outreach result."""
     rows = _whatsapp_attempt_rows(turn)
@@ -85,6 +99,9 @@ class NativeTurns(CompanionReceiver):
                 if state == "submitting":
                     row["controls"][control] = "uncertain"
             for turn in row["turns"]:
+                if _unsupported_whatsapp_turn(turn):
+                    turn["state"] = "quarantined"
+                    turn["reply_suppressed"] = "unsupported_whatsapp_context"
                 # A new process holds the exclusive owner lock. Do not replay
                 # an ambiguous model/tool/send attempt, but retain its evidence.
                 uncertain_effect = (turn.get("reply_delivery_state") in {"sending", "uncertain"}
@@ -147,6 +164,8 @@ class NativeTurns(CompanionReceiver):
     async def accept(self, event):
         self._require_owner()
         route = event.metadata["inkbox_reply_route"]
+        if _unsupported_whatsapp_turn({"route": route, "event": self._serialize(event)}):
+            return
         # Native authorization happens before activity and before receipt ACK.
         owner = self._host_owner()
         check = getattr(owner, "_is_user_authorized", None)
@@ -353,6 +372,11 @@ class NativeTurns(CompanionReceiver):
 
     async def _drain(self, row):
         for turn in row["turns"]:
+            if _unsupported_whatsapp_turn(turn):
+                turn["state"] = "quarantined"
+                turn["reply_suppressed"] = "unsupported_whatsapp_context"
+                self._save(row)
+                continue
             if row.get("blocked") or "submitting" in row.get("controls", {}).values():
                 return
             if turn["state"] not in {"pending", "answer_ready"}:
@@ -670,6 +694,8 @@ class NativeTurns(CompanionReceiver):
 
     def check_media_authority(self, row, turn, *, admitted_send=False):
         self._require_owner()
+        if _unsupported_whatsapp_turn(turn):
+            raise PermissionError("Unsupported WhatsApp context; no send attempted")
         if turn["route"]["mode"] == "imessage" and not getattr(self.adapter, "_imessage_threaded_replies", False):
             raise RuntimeError("Native iMessage replies are disabled")
         if (turn["state"] in {"uncertain", "cancelled", "quarantined"}
@@ -688,6 +714,8 @@ class NativeTurns(CompanionReceiver):
 
     def check_whatsapp_tool_authority(self, row, turn, *, read_only=False):
         self._require_owner()
+        if _unsupported_whatsapp_turn(turn):
+            raise PermissionError("Unsupported WhatsApp context; no replay attempted")
         if read_only:
             unavailable = self.active.get(row["chat_id"]) is not turn or turn["state"] in {"cancelled", "quarantined"}
         else:
@@ -731,8 +759,7 @@ class NativeTurns(CompanionReceiver):
         transient = isinstance(exc, ReplyPreflightError) and exc.retryable
         turn["preflight_failure"] = {"retryable": transient, "error": str(exc)}
         if not transient and turn["route"]["mode"] == "whatsapp":
-            # No effect was admitted. Settle this turn without blocking other
-            # authors in the same group or replaying an unauthorized answer.
+            # No effect was admitted; do not replay an unauthorized answer.
             turn.pop("preflight_failure", None)
             turn["state"] = "done"
             turn["reply_suppressed"] = "preflight_rejected"

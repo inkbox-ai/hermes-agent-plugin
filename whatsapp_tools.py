@@ -10,7 +10,7 @@ import re
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit, turn_lock
-from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, field, method, public_quota_error
+from .whatsapp import MAX_MEDIA_BYTES, auto_reply_kwargs, direct_destination, field, method, public_quota_error, unsupported_context
 
 
 def _same_uuid(left, right):
@@ -23,12 +23,12 @@ def _same_uuid(left, right):
 def _destination(payload, owner):
     if "conversation_id" in payload:
         return ("conversation", str(uuid.UUID(str(payload["conversation_id"]))))
-    recipients = payload.get("to")
-    recipients = [recipients] if isinstance(recipients, str) else recipients
-    phones = tuple(sorted(re.sub(r"[\s().-]", "", phone) for phone in recipients or []))
-    if owner and owner.get("conversation_kind") != "group" and phones == (owner.get("author"),):
+    phone = payload.get("to")
+    if not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
+        raise ValueError("WhatsApp requires one E.164 recipient")
+    if owner and phone == owner.get("author"):
         return ("conversation", str(uuid.UUID(str(owner.get("conversation_id")))))
-    return ("recipients", phones)
+    return ("recipient", phone)
 
 
 def _same_destination(left, right, identity, owner):
@@ -37,25 +37,17 @@ def _same_destination(left, right, identity, owner):
     if left[0] == right[0]:
         return False
     conversation, recipients = (left, right) if left[0] == "conversation" else (right, left)
-    # Participant sets do not identify an existing group conversation.
-    if len(recipients[1]) != 1:
-        return False
     if owner and conversation[1] == str(uuid.UUID(str(owner.get("conversation_id")))):
-        if owner.get("conversation_kind") == "group":
-            return False
         author = owner.get("author")
         if owner.get("conversation_kind") == "direct" and isinstance(author, str) and re.fullmatch(r"\+[1-9][0-9]{6,14}", author):
-            return recipients[1] == (author,)
+            return recipients[1] == author
     details = method(identity, "get_whatsapp_conversation")(conversation[1])
     if (str(field(details, "id")) != conversation[1]
             or str(field(details, "agent_identity_id")) != str(identity.id)):
         raise ValueError("WhatsApp destination ownership could not be verified")
-    if field(details, "is_group") is True:
-        return False
-    phone = field(details, "remote_number")
-    if field(details, "is_group") is not False or not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
+    if not direct_destination(details):
         raise ValueError("WhatsApp direct destination could not be verified")
-    return recipients[1] == (phone,)
+    return recipients[1] == field(details, "remote_number")
 
 
 def invoke(operation, args, session_id=""):
@@ -77,14 +69,19 @@ def invoke(operation, args, session_id=""):
 
         authorize()
         args = dict(args)
+        if any(key.startswith("group_") or key in {"groupName", "include_groups", "is_group", "isGroup", "unresolved_participant_count"} for key in args):
+            raise ValueError("Unsupported WhatsApp arguments")
+        if operation == "send_whatsapp" and "to" in args and (
+                not isinstance(args["to"], str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", args["to"])):
+            raise ValueError("WhatsApp requires one E.164 recipient")
+        if owner and owner.get("mode") == "whatsapp" and unsupported_context(owner):
+            raise ValueError("Unsupported WhatsApp context")
         if (operation == "send_whatsapp" and owner and owner.get("mode") == "whatsapp"
                 and "conversation_id" not in args and "to" not in args):
             args["conversation_id"] = owner["conversation_id"]
         conversation, recipient = args.get("conversation_id"), args.get("to")
-        direct_recipient = recipient[0] if isinstance(recipient, list) and len(recipient) == 1 else recipient
-        canonical = re.sub(r"[\s().-]", "", direct_recipient) if isinstance(direct_recipient, str) else None
-        if (owner and owner.get("mode") == "whatsapp" and owner.get("conversation_kind") != "group" and canonical == owner.get("author")
-                and re.fullmatch(r"\+[1-9][0-9]{6,14}", canonical or "")):
+        if (owner and owner.get("mode") == "whatsapp" and recipient == owner.get("author")
+                and isinstance(recipient, str) and re.fullmatch(r"\+[1-9][0-9]{6,14}", recipient)):
             conversation, recipient = owner.get("conversation_id"), None
         if (operation == "send_whatsapp" and owner and owner.get("mode") == "whatsapp" and recipient is None
                 and _same_uuid(conversation, owner.get("conversation_id"))):
@@ -122,16 +119,12 @@ def invoke(operation, args, session_id=""):
             elif operation == "send_whatsapp":
                 selector = {name: args[name] for name in ("to", "conversation_id") if name in args}
                 if len(selector) != 1 or not (str(args.get("text") or "").strip() or args.get("media_id")):
-                    raise ValueError("Use 1–8 unique recipients or a conversation, with text or an owned media ID")
-                if isinstance(selector.get("to"), str):
-                    selector["to"] = re.sub(r"[\s().-]", "", selector["to"])
-                elif isinstance(selector.get("to"), list):
-                    selector["to"] = [re.sub(r"[\s().-]", "", phone) if isinstance(phone, str) else phone for phone in selector["to"]]
+                    raise ValueError("Use one E.164 recipient or a direct conversation, with text or an owned media ID")
                 payload = {
                     **selector,
                     **({"text": args["text"]} if "text" in args else {}),
                     **({"media_ids": [args["media_id"]]} if args.get("media_id") else {}),
-                    **{name: args[name] for name in ("reply_to_message_id", "group_name") if name in args},
+                    **{name: args[name] for name in ("reply_to_message_id",) if name in args},
                 }
                 supplied_key = args.get("idempotency_key")
                 if supplied_key is not None and (not isinstance(supplied_key, str) or not supplied_key.strip()
@@ -153,20 +146,10 @@ def invoke(operation, args, session_id=""):
                 if (context and context.get("mode") == "whatsapp" and "conversation_id" in payload
                         and "reply_to_message_id" not in payload and not args.get("idempotency_key")):
                     payload.update(auto_reply_kwargs(context))
-                # Prove the public request shape before recording a send attempt.
-                recipients = [payload["to"]] if isinstance(payload.get("to"), str) else payload.get("to")
-                if recipients is not None and (not isinstance(recipients, list) or not 1 <= len(recipients) <= 8
-                        or any(not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone) for phone in recipients)
-                        or len(set(recipients)) != len(recipients)):
-                    raise ValueError("Provide 1–8 unique E.164 recipients")
                 if "reply_to_message_id" in payload:
                     if "conversation_id" not in payload:
                         raise ValueError("Quoted replies require conversation_id")
                     uuid.UUID(str(payload["reply_to_message_id"]))
-                name = payload.get("group_name")
-                if name is not None and (not isinstance(payload.get("to"), list) or len(payload["to"]) < 2
-                        or not isinstance(name, str) or not name.strip() or len(name) > 100):
-                    raise ValueError("A group name requires 2–8 recipients and 1–100 characters")
                 if "text" in payload and (not isinstance(payload["text"], str) or len(payload["text"]) > 4000):
                     raise ValueError("WhatsApp text must be at most 4000 characters")
                 source = (owner or {}).get("turn_id")
@@ -189,6 +172,9 @@ def invoke(operation, args, session_id=""):
 
                 def conflicts(seen):
                     for prior in seen.values():
+                        retained = prior.get("payload", {})
+                        if unsupported_context(retained) or ("to" in retained and not isinstance(retained["to"], str)):
+                            raise ValueError("Unsupported retained WhatsApp request; no replacement send")
                         if prior["state"] in {"sending", "uncertain"}:
                             raise ValueError(recover)
                         if prior["key"] == key:
@@ -335,12 +321,11 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested direct or group WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
+            "Send requested direct WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
             {
-                "to": {"description": "One E.164 recipient or 2–8 distinct E.164 recipients for a group", "oneOf": [string("E.164 recipient"), {"type": "array", "items": string("E.164 recipient"), "minItems": 1, "maxItems": 8, "uniqueItems": True}]},
+                "to": {**string("One E.164 recipient; arrays are not supported"), "pattern": r"^\+[1-9][0-9]{6,14}$"},
                 "reply_to_message_id": string("Optional authorized message UUID to quote; otherwise the active source is used. Requires a conversation."),
-                "group_name": {**string("Creation-only name with 2–8 recipients; never renames an existing group"), "minLength": 1, "maxLength": 100},
-                "conversation_id": string("Existing conversation, mutually exclusive with to"),
+                "conversation_id": string("Existing direct conversation, mutually exclusive with to"),
                 "text": {**string("Message text"), "maxLength": 4000},
                 "media_id": string("Owned attachment ID"),
                 "idempotency_key": string("Optional original key when recovering the same logical send"),
@@ -351,7 +336,7 @@ def register(ctx, check_fn):
         (
             "inkbox_list_whatsapp_conversations",
             "List WhatsApp conversations with local unread counts.",
-            {**pagination, "include_groups": {"type": "boolean", "description": "Default false; true also includes group conversations"}},
+            pagination,
             [],
             "list_whatsapp_conversations",
         ),
@@ -365,7 +350,7 @@ def register(ctx, check_fn):
         (
             "inkbox_list_whatsapp_messages",
             "List WhatsApp messages, newest first.",
-            {**pagination, "conversation_id": string("Conversation ID"), "thread_id": string("Quote-chain ID; requires conversation_id"), "include_groups": {"type": "boolean"}},
+            {**pagination, "conversation_id": string("Conversation ID"), "thread_id": string("Quote-chain ID; requires conversation_id")},
             ["conversation_id"],
             "list_whatsapp_messages",
         ),
