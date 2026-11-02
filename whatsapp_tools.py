@@ -285,7 +285,7 @@ def invoke(operation, args, session_id=""):
         if str(exc) == "WhatsApp sends outside an active turn require an explicit stable idempotency_key":
             result["error"] = str(exc)
         if "WhatsApp requires Inkbox SDK" in str(exc):
-            result["error"] = "WhatsApp requires Inkbox SDK 0.7.24 or newer"
+            result["error"] = "WhatsApp requires Inkbox SDK 0.7.26 or newer"
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             result["status_code"] = status

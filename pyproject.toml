@@ -24,7 +24,7 @@ package = false
 
 # Temporary public SDK candidate until a WhatsApp-capable SDK release is published.
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "f9e83f9a20407b2fc29263be294be1b38faf23af", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "ce09cf9a75b507c0f3b5e8b94b253afb385fe7f3", subdirectory = "sdk/python" }
 
 [tool.ruff]
 line-length = 125

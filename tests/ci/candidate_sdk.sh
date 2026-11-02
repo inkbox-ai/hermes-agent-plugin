@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the reviewed public SDK candidate; failures never fall back to a registry version.
 set -euo pipefail
-revision=f9e83f9a20407b2fc29263be294be1b38faf23af
+revision=ce09cf9a75b507c0f3b5e8b94b253afb385fe7f3
 root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inkbox-sdk-${revision}"
 if [[ ! -d "$root/source/.git" ]]; then
   mkdir -p "$root"
@@ -11,7 +11,7 @@ if [[ ! -d "$root/source/.git" ]]; then
   git -C "$root/source" checkout --detach FETCH_HEAD >&2
 fi
 [[ "$(git -C "$root/source" rev-parse HEAD)" == "$revision" ]]
-wheel="$root/wheels/inkbox-0.7.24-py3-none-any.whl"
+wheel="$root/wheels/inkbox-0.7.26-py3-none-any.whl"
 if [[ ! -f "$wheel" ]]; then
   uv build --wheel --out-dir "$root/wheels" "$root/source/sdk/python" >&2
 fi

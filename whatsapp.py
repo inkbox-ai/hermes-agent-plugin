@@ -52,7 +52,7 @@ def direct_destination(value):
 def method(identity, name):
     result = getattr(identity, name, None)
     if not callable(result):
-        raise RuntimeError("WhatsApp requires Inkbox SDK 0.7.24 or newer")
+        raise RuntimeError("WhatsApp requires Inkbox SDK 0.7.26 or newer")
     return result
 
 

@@ -6,7 +6,7 @@
 
 - WhatsApp supports direct messages only: one E.164 string or an existing direct conversation. Reject recipient arrays and unsupported group events, and quarantine retained group intents without replay. Preserve quoted replies, media, reactions, threads and recovery keys.
 - Add chronological quote-chain reads and whole-message named/custom reaction tools with explicit stable mutation keys and versioned receipt/removal semantics. Authorized peer reactions admit lightweight context once per revision; self echoes and inaccessible or unresolved targets never wake model work.
-- Raise the current WhatsApp SDK floor to 0.7.24 and share the SDK's direct-message/reply request fixture matrix. Existing iMessage, Slack, media and native turn lifecycles remain in place.
+- Raise the current WhatsApp SDK floor to 0.7.26 and share the SDK's direct-message/reply request fixture matrix. Existing iMessage, Slack, media and native turn lifecycles remain in place.
 
 - Add approved, dedicated one-to-one WhatsApp with signed reception, native final replies, scoped approvals, and durable duplicate/uncertain-send protection.
 - Add ten WhatsApp tools for messages, conversations, owned media, local mark-read, readiness, and send lookup. Preserve media IDs and refresh incoming attachment URLs at dispatch.
