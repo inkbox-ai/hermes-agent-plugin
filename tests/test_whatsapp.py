@@ -128,6 +128,8 @@ def test_whatsapp_send_cannot_own_matching_imessage_turn(factory, tmp_path, monk
 
     async def run():
         value = await harness(factory, tmp_path)
+        # Exercise durable send ownership, not a two-second host deadline.
+        value.queue.completion_timeout = 30
         client = real_identity(value.adapter)
         whatsapp_identity = value.adapter._reply_identity
         # Keep the native iMessage final on its own transport.
@@ -173,7 +175,7 @@ def test_whatsapp_send_cannot_own_matching_imessage_turn(factory, tmp_path, monk
         value.adapter.handle_message = handle
         try:
             await value.queue.accept(receipt(1, mode="imessage"))
-            await settle(value.queue)
+            await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in list(value.queue.tasks.values()))), 30)
             assert len(completed) == 1 and completed[0].success
             value.base.identity.send_imessage.assert_called_once()
             sent = value.base.identity.send_imessage.call_args.kwargs
@@ -188,7 +190,7 @@ def test_whatsapp_send_cannot_own_matching_imessage_turn(factory, tmp_path, monk
                     await value.queue.close()
                     value.adapter._native_turns = value.queue = NativeTurns(value.adapter, tmp_path / "native")
                     await value.queue.start()
-                    await settle(value.queue)
+                    await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in list(value.queue.tasks.values()))), 30)
                 row = next(iter(value.queue.rows.values()))
                 turn = row["turns"][0]
                 assert turn["state"] == "done" and not row.get("blocked")
@@ -255,6 +257,8 @@ def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_pat
 def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path, monkeypatch):
     async def run():
         value = await harness(factory, tmp_path)
+        # Exercise durable send ownership, not a two-second host deadline.
+        value.queue.completion_timeout = 30
         client = real_identity(value.adapter)
         value.adapter._imessage_threaded_replies = False
         admitted = asyncio.Event()
@@ -275,7 +279,7 @@ def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path,
                     id=uid(2), content="Attached question", media=[{**MEDIA, "url": "https://media.example/expired"}],
                 ))).status == 202
             admitted.set()
-            await settle(value.queue)
+            await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in list(value.queue.tasks.values()))), 30)
             assert len(value.inputs) == 2
             assert value.inputs[0].text.endswith("\nFirst question")
             assert value.inputs[1].text.endswith("\nAttached question")
