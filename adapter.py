@@ -1500,6 +1500,7 @@ _TOOL_PROGRESS_GLYPHS: Tuple[str, ...] = (
 _TOOL_PROGRESS_TAIL_RE = re.compile(
     r"\s+[A-Za-z_][A-Za-z0-9_.-]*(?:\s*\(|\s*:|\.{3})(?:\s|$)",
 )
+_LEGACY_VISION_PROGRESS_RE = re.compile(r"^👁️?\s+Looking at the image\b")
 _SLACK_PROGRESS_LABELS = (
     (r"🔀\s+Delegating\b", "Delegating work"),
     (r"📄\s+Reading\b", "Reading information"),
@@ -1616,7 +1617,7 @@ def _is_hermes_admin_notice(
         if metadata.get("is_approval_prompt") is True:
             return False
     head = (content or "").lstrip().lstrip(chr(0xFEFF))
-    if head.startswith(_ADMIN_NOTICE_PREFIXES):
+    if _LEGACY_VISION_PROGRESS_RE.match(head) or head.startswith(_ADMIN_NOTICE_PREFIXES):
         return True
     for glyph in _TOOL_PROGRESS_GLYPHS:
         if head.startswith(glyph) and _TOOL_PROGRESS_TAIL_RE.match(head[len(glyph):]):
@@ -3507,7 +3508,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if _is_hermes_admin_notice(content, metadata):
             route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
             explicit_notice = str((metadata or {}).get("notice_type") or "").strip().lower() in _ADMIN_NOTICE_METADATA_TYPES
-            if not (route is not None and not explicit_notice and (
+            legacy_vision = _LEGACY_VISION_PROGRESS_RE.match((content or "").lstrip().lstrip(chr(0xFEFF)))
+            if not ((route is not None or legacy_vision) and not explicit_notice and (
                     self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn))):
                 logger.debug(
                     "[Inkbox] Suppressed admin notice for chat %s: %s…",

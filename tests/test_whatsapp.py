@@ -3,12 +3,12 @@
 import asyncio
 import json
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 from inkbox import Inkbox
-from inkbox_plugin.whatsapp import receive, send_media, record_status
+from inkbox_plugin.whatsapp import receive, refresh_media, send_media, record_status
 from inkbox_plugin.whatsapp_tools import invoke
 from inkbox_plugin.imessage_state import bind_context, clear_context
 from tests import test_native_turns as native_harness
@@ -231,7 +231,24 @@ def test_native_plain_reply_works_without_imessage_flag_and_uses_stable_real_sdk
     asyncio.run(run())
 
 
-def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_path):
+@pytest.fixture
+def cached_media(tmp_path, monkeypatch):
+    import gateway.platforms.base as host
+
+    paths = []
+
+    async def cache(url, *, ext):
+        path = tmp_path / f"attachment-{len(paths)}{ext}"
+        path.write_bytes(b"attachment bytes")
+        paths.append(path)
+        return str(path)
+
+    monkeypatch.setattr(host, "cache_image_from_url", AsyncMock(side_effect=cache), raising=False)
+    monkeypatch.setattr(host, "cache_audio_from_url", AsyncMock(side_effect=cache), raising=False)
+    return paths
+
+
+def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_path, cached_media):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
@@ -243,7 +260,9 @@ def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_pat
             assert response.status == 202
             await settle(value.queue)
             assert len(value.inputs) == 1
-            assert value.inputs[0].media_urls == [MEDIA["url"]]
+            assert value.inputs[0].media_urls == [str(cached_media[0])]
+            assert cached_media[0].is_file()
+            assert value.inputs[0].media_types == ["image/png"]
             client.whatsapp._http.get.assert_called_once_with(f"/media/{uid(801)}", params={"agent_identity_id": uid(100)})
             route = next(iter(value.queue.rows.values()))["turns"][0]["route"]
             assert route["mode"] == "whatsapp" and route["whatsapp_media_ids"] == [uid(801)]
@@ -254,7 +273,115 @@ def test_received_media_is_owned_and_refreshed_at_host_dispatch(factory, tmp_pat
     asyncio.run(run())
 
 
-def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path, monkeypatch):
+@pytest.mark.parametrize("content_type", ["image/jpeg", "audio/ogg; codecs=opus"])
+def test_media_refresh_returns_new_local_files_each_time(content_type, cached_media):
+    async def run():
+        identity = NS(get_whatsapp_media=Mock(return_value={**MEDIA, "content_type": content_type}))
+        adapter = NS(_reply_identity=identity)
+        events = [NS(text="Caption", media_urls=[], media_types=[]) for _ in range(2)]
+        for event in events:
+            await refresh_media(adapter, event, [MEDIA["id"]])
+        assert len(cached_media) == 2
+        assert cached_media[0] != cached_media[1]
+        assert all(path.is_file() for path in cached_media)
+        assert [event.media_urls for event in events] == [[str(path)] for path in cached_media]
+        assert all(event.media_types == [content_type.split(";", 1)[0]] for event in events)
+        assert all(event.text == "Caption" for event in events)
+        assert all(path.suffix.startswith(".") for path in cached_media)
+        assert identity.get_whatsapp_media.call_count == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["download", "empty_cache", "pending", "unsupported", "lookup"])
+def test_media_refresh_failure_is_explicit_and_does_not_reuse_old_attachment(failure, monkeypatch):
+    import gateway.platforms.base as host
+
+    async def run():
+        media = dict(MEDIA)
+        if failure == "pending":
+            media["status"] = "pending"
+        if failure == "unsupported":
+            media["content_type"] = "application/octet-stream"
+        lookup = Mock(return_value=media, side_effect=RuntimeError("unavailable") if failure == "lookup" else None)
+        adapter = NS(_reply_identity=NS(get_whatsapp_media=lookup))
+        download = AsyncMock(return_value=None, side_effect=None if failure == "empty_cache" else ValueError("unavailable"))
+        monkeypatch.setattr(host, "cache_image_from_url", download, raising=False)
+        monkeypatch.setattr(host, "cache_audio_from_url", download, raising=False)
+        event = NS(text="Caption", media_urls=["/old/image.png"], media_types=["image/png"])
+        await refresh_media(adapter, event, [MEDIA["id"]])
+        assert event.media_urls == event.media_types == []
+        assert event.text == "Caption\n[WhatsApp attachment unavailable; its media ID remains retained]"
+        assert download.await_count == (1 if failure in {"download", "empty_cache"} else 0)
+
+    asyncio.run(run())
+
+
+def test_local_cached_images_attach_to_real_host_on_successive_turns(tmp_path, monkeypatch):
+    import base64
+    from pathlib import Path
+
+    image_routing = pytest.importorskip("agent.image_routing")
+    import gateway.platforms.base as host
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=")
+
+    async def cache(url, *, ext):
+        return host.cache_image_from_bytes(png, ext)
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(host, "cache_image_from_url", cache)
+
+    async def run():
+        adapter = NS(_reply_identity=NS(get_whatsapp_media=Mock(return_value=MEDIA)))
+        for _ in range(2):
+            event = NS(text="Caption", media_urls=[], media_types=[])
+            await refresh_media(adapter, event, [MEDIA["id"]])
+            assert Path(event.media_urls[0]).read_bytes() == png
+            parts, skipped = image_routing.build_native_content_parts(event.text, event.media_urls)
+            assert not skipped
+            assert any(part.get("type") == "image_url" for part in parts)
+
+    asyncio.run(run())
+
+
+def test_cached_audio_reaches_real_host_transcription_provider(tmp_path, monkeypatch):
+    import io
+    import wave
+    from pathlib import Path
+
+    transcription = pytest.importorskip("tools.transcription_tools")
+    import gateway.platforms.base as host
+
+    data = io.BytesIO()
+    with wave.open(data, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b"\x00\x00" * 1600)
+    wav = data.getvalue()
+
+    async def cache(url, *, ext):
+        return host.cache_audio_from_bytes(wav, ext)
+
+    def transcribe(path, model, source):
+        assert Path(path).read_bytes() == wav
+        return {"success": True, "transcript": "A spoken message"}
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(host, "cache_audio_from_url", cache)
+    monkeypatch.setattr(transcription, "_transcribe_prepared_audio", transcribe)
+
+    async def run():
+        adapter = NS(_reply_identity=NS(get_whatsapp_media=Mock(return_value={**MEDIA, "content_type": "audio/wav"})))
+        event = NS(text="", media_urls=[], media_types=[])
+        await refresh_media(adapter, event, [MEDIA["id"]])
+        assert event.media_types == ["audio/wav"]
+        assert transcription.transcribe_audio(event.media_urls[0]) == {"success": True, "transcript": "A spoken message"}
+
+    asyncio.run(run())
+
+
+def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path, monkeypatch, cached_media):
     async def run():
         value = await harness(factory, tmp_path)
         # Exercise durable send ownership, not a two-second host deadline.
@@ -284,7 +411,7 @@ def test_attachment_following_text_keeps_its_own_durable_turn(factory, tmp_path,
             assert value.inputs[0].text.endswith("\nFirst question")
             assert value.inputs[1].text.endswith("\nAttached question")
             assert value.inputs[0].media_urls == []
-            assert value.inputs[1].media_urls == [MEDIA["url"]]
+            assert value.inputs[1].media_urls == [str(cached_media[0])]
             turns = next(iter(value.queue.rows.values()))["turns"]
             assert [turn["source_ids"] for turn in turns] == [[uid(1)], [uid(2)]]
             assert turns[1]["route"]["whatsapp_media_ids"] == [uid(801)]

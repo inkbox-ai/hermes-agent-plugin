@@ -316,14 +316,28 @@ async def receive_reaction(adapter, envelope):
 
 
 async def refresh_media(adapter, event, identifiers):
-    """Resolve temporary access immediately before native host download, including recovery."""
+    """Refresh owned attachments into the host's local media cache, including recovery."""
     event.media_urls, event.media_types = [], []
     for media_id in identifiers:
         try:
             media = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_media"), media_id)
             if str(field(media, "status")) == "ready" and field(media, "url"):
-                event.media_urls.append(field(media, "url"))
-                event.media_types.append(field(media, "content_type") or "application/octet-stream")
+                from gateway.platforms.base import cache_audio_from_url, cache_image_from_url
+
+                content_type = str(field(media, "content_type") or "application/octet-stream").split(";", 1)[0].strip().lower()
+                if content_type.startswith("image/"):
+                    cache = cache_image_from_url
+                    extension = mimetypes.guess_extension(content_type) or ".jpg"
+                elif content_type.startswith("audio/"):
+                    cache = cache_audio_from_url
+                    extension = mimetypes.guess_extension(content_type) or ".ogg"
+                else:
+                    raise ValueError("Unsupported WhatsApp attachment type")
+                local_path = await cache(str(field(media, "url")), ext=extension)
+                if not local_path or not Path(local_path).is_file():
+                    raise ValueError("WhatsApp attachment could not be cached")
+                event.media_urls.append(local_path)
+                event.media_types.append(content_type)
                 continue
         except Exception as exc:
             if getattr(exc, "status_code", None) in {401, 403}:
