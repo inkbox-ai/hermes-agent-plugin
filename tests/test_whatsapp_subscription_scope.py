@@ -55,3 +55,30 @@ def test_incomplete_shared_receiver_is_not_truncated():
         run()
     subscriptions.update.assert_not_called()
     subscriptions.delete.assert_not_called()
+
+
+def test_unavailable_identity_scope_skips_without_channel_fallback_or_writes():
+    from inkbox.webhook_subscriptions import WebhookSubscriptionsResource
+    from inkbox_plugin.whatsapp import reconcile_notifications
+
+    http = Mock()
+    http.get.return_value = {"supports_identity_subscriptions": False}
+    subscriptions = WebhookSubscriptionsResource(http)
+    client = NS(webhooks=NS(subscriptions=subscriptions))
+    assert reconcile_notifications(lambda events: _reconcile_imessage_subscription(
+        client, "identity-1", desired_url=URL, previous_webhook_url=None, desired_events=events)) is False
+    http.get.assert_called_once_with("/webhooks/catalog")
+    http.post.assert_not_called()
+    http.patch.assert_not_called()
+    http.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [ValueError("Unexpected catalog value"), RuntimeError("connection failed"),
+                                  InkboxAPIError(status_code=403, detail="Forbidden")])
+def test_unrelated_subscription_errors_still_propagate(error):
+    from inkbox_plugin.whatsapp import reconcile_notifications
+
+    callback = Mock(side_effect=error)
+    with pytest.raises(type(error)):
+        reconcile_notifications(callback)
+    callback.assert_called_once_with(EVENTS)

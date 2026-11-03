@@ -73,18 +73,17 @@ def unsupported(exc):
 
 def reconcile_notifications(reconcile):
     """Retain direct-message callbacks when an older API rejects only reaction events."""
-    try:
-        reconcile(EVENTS)
-        return True
-    except Exception as exc:
-        if not unsupported(exc):
-            raise
-    try:
-        reconcile(tuple(event for event in EVENTS if event != "whatsapp.reaction_received"))
-        return True
-    except Exception as exc:
-        if not unsupported(exc):
-            raise
+    for events in (EVENTS, tuple(event for event in EVENTS if event != "whatsapp.reaction_received")):
+        try:
+            reconcile(events)
+            return True
+        except Exception as exc:
+            if isinstance(exc, ValueError) and str(exc).startswith(
+                "Identity-wide webhook subscriptions are not supported by this server yet."
+            ):
+                return False
+            if not unsupported(exc):
+                raise
     return False
 
 
