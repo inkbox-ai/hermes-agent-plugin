@@ -60,15 +60,15 @@ def _adapter():
     return adapter
 
 
-# The exact payload the yc-product-showcase workflow sends (flat object, the
+# A synthetic payload an example workflow sends (flat object, the
 # key is "event", no "event_type", no "data" wrapper).
 DEMO_BODY = (
     b'{"event":"agent_escalation_demo","title":"Agent escalation demo",'
     b'"severity":"demo","summary":"A demo workflow requested human follow-up.",'
-    b'"requested_action":"Call Dima and explain what happened.",'
-    b'"github":{"repository":"inkbox-ai/servers","workflow":"YC product showcase",'
+    b'"requested_action":"Contact the operator and explain what happened.",'
+    b'"github":{"repository":"example/project","workflow":"Example automation",'
     b'"run_id":"16012345678",'
-    b'"run_url":"https://github.com/inkbox-ai/servers/actions/runs/16012345678"}}'
+    b'"run_url":"https://github.com/example/project/actions/runs/16012345678"}}'
 )
 
 
@@ -85,11 +85,11 @@ def test_demo_payload_wakes_agent_on_new_thread():
     # Synthetic event must bypass user authorization.
     assert event.internal is True
     # Source = the GitHub repo; thread keyed by the run id.
-    assert event.source.chat_id == "external:inkbox-ai/servers"
-    assert event.source.thread_id == "external:inkbox-ai/servers:16012345678"
+    assert event.source.chat_id == "external:example/project"
+    assert event.source.thread_id == "external:example/project:16012345678"
     # Marker + the human fields + the requested action are all surfaced.
-    assert "[inkbox:external source=inkbox-ai/servers event=agent_escalation_demo" in event.text
-    assert "Requested action: Call Dima and explain what happened." in event.text
+    assert "[inkbox:external source=example/project event=agent_escalation_demo" in event.text
+    assert "Requested action: Contact the operator and explain what happened." in event.text
     assert "16012345678" in event.text  # raw payload included
 
 
@@ -158,7 +158,7 @@ def test_distinct_events_get_distinct_threads():
 
     def _post(run_id, rid):
         body = (
-            b'{"event":"agent_escalation_demo","github":{"repository":"inkbox-ai/servers",'
+            b'{"event":"agent_escalation_demo","github":{"repository":"example/project",'
             b'"run_id":"' + run_id.encode() + b'"}}'
         )
         return asyncio.run(adapter._handle_webhook(_FakeRequest(body, request_id=rid)))
@@ -168,8 +168,8 @@ def test_distinct_events_get_distinct_threads():
 
     threads = {e.source.thread_id for e in adapter._enqueued}
     assert threads == {
-        "external:inkbox-ai/servers:100",
-        "external:inkbox-ai/servers:200",
+        "external:example/project:100",
+        "external:example/project:200",
     }
 
 
@@ -180,19 +180,19 @@ def test_github_native_payload_extracts_source_and_run(caplog):
     body = {
         "action": "completed",
         "conclusion": "failure",
-        "repository": {"full_name": "inkbox-ai/servers"},
+        "repository": {"full_name": "example/project"},
         "workflow_run": {
             "id": "991",
-            "html_url": "https://github.com/inkbox-ai/servers/actions/runs/991",
+            "html_url": "https://github.com/example/project/actions/runs/991",
         },
     }
     caplog.set_level("INFO", logger=adapter_mod.logger.name)
     asyncio.run(adapter._on_external_event(body, "req-gh", verified=True))
     event = adapter._enqueued[0]
-    assert event.source.chat_id == "external:inkbox-ai/servers"
-    assert event.source.thread_id == "external:inkbox-ai/servers:991"
+    assert event.source.chat_id == "external:example/project"
+    assert event.source.thread_id == "external:example/project:991"
     assert "runs/991" in event.text
-    assert "External event enqueued: external:inkbox-ai/servers:991" in caplog.text
+    assert "External event enqueued: external:example/project:991" in caplog.text
 
 
 def test_external_source_name_sanitized_in_marker():

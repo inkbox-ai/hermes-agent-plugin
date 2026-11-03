@@ -266,7 +266,9 @@ def test_imessage_enabled_identity_keeps_call_events_separate(monkeypatch):
         for channel, row in reconciled
         if row["desired_events"] != adapter._DESIRED_A2A_EVENTS
     ]
+    from inkbox_plugin.whatsapp import EVENTS as WHATSAPP_EVENTS
     assert channel_rows == [
+        ("imessage", "https://voice-agent.inkboxwire.com/webhook", WHATSAPP_EVENTS),
         (
             "imessage",
             "https://voice-agent.inkboxwire.com/webhook",

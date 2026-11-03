@@ -622,7 +622,7 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The base SDK floor is **0.7.15**, including the Slack file upload and operation APIs. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The base SDK floor is **0.7.24** for Slack file upload and operation APIs. Dedicated WhatsApp additionally requires the reviewed 0.7.26 source candidate until a WhatsApp-capable SDK release is published. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
 ### Slack setup and replies
 
@@ -643,6 +643,22 @@ Inline replies show source 👀 while working, remove it on completion/cancel, a
 While a Slack turn is running, Hermes tool-progress notices update a native task card when the connection, source thread, and API support task streaming. Inline conversations and unsupported installations use one ordinary progress message edited in place; the plugin never creates a thread solely for progress. Both paths preserve the original destination, omit delegation identifiers and tool arguments, and coexist with Working/Stop. Updates are coalesced and paced; completion, Stop, and failure finish the original progress display. Final replies and approval prompts stay separate.
 
 Task streaming is detected automatically through the connection's capabilities and requires no additional app-manifest scopes beyond `chat:write`. An unsupported start may fall back to ordinary progress, but an unknown or timed-out stream operation never creates a replacement message. Restart cleanup looks up the original operation before closing a stream. The plugin prefers the SDK's typed streaming methods when available. Older supported SDKs use a narrow authenticated transport bridge until the minimum version can advance; a failed typed call never retries through that bridge. The plugin never handles Slack bot credentials directly.
+
+### Dedicated WhatsApp
+
+WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. `inkbox_get_whatsapp_status` reads current readiness without sending a message. No extra local feature flag is required.
+
+Signed direct messages enter the existing Hermes session and authorization flow, with a durable channel/conversation/author boundary for approvals, Stop, and text bursts. Permissions, approvals and Stop remain scoped to the actual sender. New final replies, media deliveries, and same-conversation tool sends are plain messages by default. Quote selectively with an explicit `reply_to_message_id` when referring to an older message, distinguishing multiple requests, or identifying a specific attachment. Omitting a tool destination selects the active conversation. Explicit destinations remain authoritative, and an authorized quote target can be selected explicitly. Caller-supplied recovery keys retain the supplied request instead of acquiring a new quote. Rejected or uncertain sends are never replaced by automatic plain messages. Existing durable replies keep their original payload. Native voice calls, remote read receipts, typing, and Companion activation are not exposed. Delivery updates do not wake the model or resend an answer. A confirmed send with unknown delivery is not a failed send.
+
+Tools: `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get_whatsapp_conversation`, `inkbox_list_whatsapp_messages`, `inkbox_get_whatsapp_message`, `inkbox_upload_whatsapp_media`, `inkbox_get_whatsapp_media`, `inkbox_mark_whatsapp_read`, `inkbox_get_whatsapp_status`, `inkbox_lookup_whatsapp_send`, `inkbox_get_whatsapp_thread`, `inkbox_get_whatsapp_conversation_thread`, `inkbox_send_whatsapp_reaction`, `inkbox_get_whatsapp_reaction`, and `inkbox_remove_whatsapp_reaction`. Send text is limited to 4,000 characters and one uploaded attachment within the effective server policy (default 5 MiB; protocol ceiling 20 MiB). Effective server limits can be lower. Upload local files using the host's media-path policy; a media ID is identity-owned, not a URL. Incoming attachment URLs are refreshed from their media IDs immediately before host dispatch; unavailable attachments are identified explicitly. Mark-read changes local inbox state only.
+
+Automatic replies and attachments retain the original route, answer, media ID, and stable idempotency key before delivery. Outside an active host turn, sends require an explicit stable `idempotency_key` for the logical message; this avoids treating identical text in separate deliberate sends as one permanent operation. Explicit sends return their key and media ID; preserve both on an uncertain result and use `inkbox_lookup_whatsapp_send` to inspect the original attempt. Reuse the original key only with the exact original payload. Do not upload again or send a new message to recover an ambiguous result.
+
+WhatsApp supports direct messages only. Pass exactly one E.164 string in `to`, or use `conversation_id` for an existing direct conversation. Arrays (including one-element arrays), comma-separated recipients, group creation, and group discovery are not supported. Message participants and delivery recipients remain singleton direct-message facts. Unsupported inbound group events stay silent. Retained group requests are not replayed or converted into direct messages.
+
+For an explicit quote, provide `reply_to_message_id` together with the original conversation. Thread reads preserve their opaque cursor and never invent inaccessible parent content. Native quote chains do not split the host's ordinary conversation session.
+
+Whole-message reactions accept `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, or `eyes`, or an exclusive custom emoji. Each add/remove requires an explicit stable idempotency key. Keep queued/uncertain receipts separate from applied reactions; removing an old receipt must not remove a newer replacement. Authorized peer reaction additions/removals enter a lightweight contextual turn at most once per revision, with the real actor and visible target. Self echoes, delivery notifications, unresolved actors and hidden targets stay quiet. Reactions cannot execute commands or satisfy permission prompts.
 
 ### Native iMessage replies
 
@@ -668,8 +684,7 @@ A superseding instruction denies unresolved permission requests without clearing
 
 ## Development Commands
 
-Development installs use the published Inkbox SDK (`>=0.7.15,<1.0.0`); PR checks
-also exercise older SDK compatibility boundaries.
+The normal dependency is Inkbox SDK `>=0.7.24,<1.0.0`. Until a WhatsApp-capable SDK release is published, the UV source override and lockfile pin the reviewed public SDK candidate. PR checks build that exact candidate and retain separate historical compatibility lanes. Before release, remove the UV source override and regenerate the registry lock after a WhatsApp-capable SDK release is available, updating the dependency floor to that release; source-candidate checks do not claim a published-package installation.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:

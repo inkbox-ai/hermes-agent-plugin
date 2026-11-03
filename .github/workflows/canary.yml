@@ -29,17 +29,42 @@ jobs:
           path: .upstream-hermes
           fetch-depth: 1
 
-      - name: Install test deps + real Hermes host (main)
+      - name: Prepare the official Hermes PM toolchain
+        id: host-pm
+        uses: ./.upstream-hermes/.github/actions/setup-pm
+        with:
+          toolchain: python
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+
+      - name: Build test deps with the real Hermes main lock
         run: |
-          uv venv --python 3.14
-          uv pip install --no-sources -r pyproject.toml --extra test
-          uv pip install --editable "$GITHUB_WORKSPACE/.upstream-hermes"
+          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
+          "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
+            --host "$GITHUB_WORKSPACE/.upstream-hermes" --wheel "$WHEEL" \
+            --out "$GITHUB_WORKSPACE/.venv"
 
       - name: Complete offline suite vs real Hermes main
-        run: uv run --no-sync pytest -q
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
+          # Keep independent launcher fixtures out of the bootstrap tool store.
+          HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
+          HERMES_RUNTIME_DIR: ''
+        run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" -c \
+            'import gateway.config, gateway.platforms.base, hermes_cli.plugins; print(hermes_cli.plugins.__file__)'
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest \
+            --rootdir="$GITHUB_WORKSPACE" --override-ini pythonpath= \
+            --import-mode=importlib "$GITHUB_WORKSPACE/tests" -q
 
       - name: Verify Hermes plugin security scan
         working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
+          HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
+          HERMES_RUNTIME_DIR: ''
         run: |
           mkdir -p "$RUNNER_TEMP/plugin-scan"
           git -C "$GITHUB_WORKSPACE" archive HEAD | tar -x -C "$RUNNER_TEMP/plugin-scan"

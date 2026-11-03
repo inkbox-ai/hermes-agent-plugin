@@ -138,7 +138,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.helpers import redact_phone
 try:
-    from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from .native_turns import NativeTurns
     from .tunnel_tls import install_tunnel_tls_compatibility
     from .slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
@@ -188,7 +188,7 @@ try:
         open_inkbox_realtime_bridge,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
-    from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK
+    from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from native_turns import NativeTurns
     from tunnel_tls import install_tunnel_tls_compatibility
     from slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
@@ -1145,7 +1145,10 @@ def _reconcile_subscription(
         desired_endpoint.netloc,
         desired_endpoint.path.rstrip("/"),
     )
+    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
     list_kwargs = {owner_kwarg: owner_id}
+    if identity_scope:
+        list_kwargs["scope"] = "identity"
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
     # Same URL + a compatible event superset: adopt verbatim, no writes. A
@@ -1160,7 +1163,7 @@ def _reconcile_subscription(
         if (
             row.url == desired_url
             and desired_set.issubset(row_set)
-            and row_families == desired_families
+            and (row_families == desired_families or identity_scope)
         ):
             active_id = row.id
             break
@@ -1173,7 +1176,8 @@ def _reconcile_subscription(
             (
                 row
                 for row in existing
-                if desired_families
+                if (not identity_scope or {event.split(".", 1)[0] for event in row.event_types} == desired_families)
+                and desired_families
                 & {
                     event_type.split(".", 1)[0]
                     for event_type in row.event_types
@@ -1230,6 +1234,8 @@ def _reconcile_subscription(
             and previous_webhook_url != desired_url
             and row.url == previous_webhook_url
         )
+        if identity_scope and row_families != desired_families:
+            continue  # Shared receivers retain their other event channels.
         if desired_families & row_families and (
             same_receiver or previous_receiver
         ):
@@ -1269,7 +1275,10 @@ def _create_with_409_repair(
     desired_families = {
         event_type.split(".", 1)[0] for event_type in desired_events
     }
+    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
     list_kwargs = {owner_kwarg: owner_id}
+    if identity_scope:
+        list_kwargs["scope"] = "identity"
     for row in client.webhooks.subscriptions.list(**list_kwargs):
         if row.url != desired_url:
             continue
@@ -1279,8 +1288,10 @@ def _create_with_409_repair(
         if not desired_families & row_families:
             continue
 
-        if set(row.event_types) == desired_set:
+        if set(row.event_types) == desired_set or (identity_scope and desired_set.issubset(row.event_types)):
             return row.id
+        if identity_scope and row_families != desired_families:
+            continue
 
         repaired = client.webhooks.subscriptions.update(
             row.id, event_types=list(desired_events),
@@ -1500,6 +1511,7 @@ _TOOL_PROGRESS_GLYPHS: Tuple[str, ...] = (
 _TOOL_PROGRESS_TAIL_RE = re.compile(
     r"\s+[A-Za-z_][A-Za-z0-9_.-]*(?:\s*\(|\s*:|\.{3})(?:\s|$)",
 )
+_LEGACY_VISION_PROGRESS_RE = re.compile(r"^👁️?\s+Looking at the image\b")
 _SLACK_PROGRESS_LABELS = (
     (r"🔀\s+Delegating\b", "Delegating work"),
     (r"📄\s+Reading\b", "Reading information"),
@@ -1616,7 +1628,7 @@ def _is_hermes_admin_notice(
         if metadata.get("is_approval_prompt") is True:
             return False
     head = (content or "").lstrip().lstrip(chr(0xFEFF))
-    if head.startswith(_ADMIN_NOTICE_PREFIXES):
+    if _LEGACY_VISION_PROGRESS_RE.match(head) or head.startswith(_ADMIN_NOTICE_PREFIXES):
         return True
     for glyph in _TOOL_PROGRESS_GLYPHS:
         if head.startswith(glyph) and _TOOL_PROGRESS_TAIL_RE.match(head[len(glyph):]):
@@ -2417,23 +2429,41 @@ class InkboxAdapter(BasePlatformAdapter):
         """Recover durable Companion receipts for this configured identity."""
         import hashlib
 
+        identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(self._inkbox.get_identity, self._identity_handle)
+        self._reply_identity = identity
+        self._identity_id = str(identity.id)
         identity_key = hashlib.sha256(json.dumps([
             self._base_url, self._identity_handle, self._identity_id,
         ]).encode()).hexdigest()
-        self._companion = CompanionReceiver(
-            self, _inkbox_state_path().parent / "inkbox_companion" / identity_key,
-            self._companion_max_bytes,
-        )
+        companion_root = _inkbox_state_path().parent / "inkbox_companion" / identity_key
+        legacy_key = hashlib.sha256(json.dumps([
+            self._base_url, self._identity_handle, None,
+        ]).encode()).hexdigest()
+        legacy_root = companion_root.parent / legacy_key
+        legacy_rows = list(legacy_root.glob("*.json"))
+        if legacy_rows:
+            if list(companion_root.glob("*.json")):
+                raise RuntimeError("Conflicting Companion checkpoints require recovery before startup")
+            for path in legacy_rows:
+                row = read_checkpoint(path)
+                envelopes = [row.get("trigger_envelope", {})] + [turn.get("envelope", {}) for turn in row.get("turns", [])]
+                for envelope in envelopes:
+                    data = (envelope or {}).get("data") or {}
+                    item = data.get("message") or data.get("text_message") or {}
+                    if item.get("agent_identity_id") and str(item["agent_identity_id"]) != self._identity_id:
+                        raise RuntimeError("Companion checkpoint belongs to a different identity")
+            companion_root = legacy_root
+        self._companion = CompanionReceiver(self, companion_root, self._companion_max_bytes)
+        if legacy_rows:
+            self._companion.namespace_identity_id = None
         if self._slack_enabled:
             self._slack_activity = SlackActivity(self._inkbox.slack, _inkbox_state_path().parent / "inkbox_slack_activity" / (identity_key + ".json"), identity_id=self._identity_id)
             await self._slack_activity.recover()
         if self._imessage_threaded_replies:
-            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(self._inkbox.get_identity, self._identity_handle)
             require_threading(identity)
-            self._reply_identity = identity
         await self._companion.start()
         native_root = _inkbox_state_path().parent / "inkbox_native_turns" / identity_key
-        if self._slack_enabled or self._imessage_threaded_replies or native_root.exists():
+        if self._slack_enabled or self._imessage_threaded_replies or callable(getattr(getattr(self, "_reply_identity", None), "send_whatsapp", None)) or native_root.exists():
             self._native_turns = NativeTurns(self, native_root)
             await self._native_turns.start()
 
@@ -2868,6 +2898,11 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
+            from .whatsapp import reconcile_notifications
+            if not reconcile_notifications(lambda events: _reconcile_imessage_subscription(
+                    self._inkbox, self._identity_id, desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url, desired_events=events)):
+                logger.warning("WhatsApp notifications unavailable; other channels remain active")
             if getattr(identity, "imessage_enabled", False):
                 _reconcile_imessage_subscription(
                     self._inkbox,
@@ -3040,6 +3075,11 @@ class InkboxAdapter(BasePlatformAdapter):
             return await receiver.send_slack_media(row, turn, payload, link=link_text is not None)
         except Exception as exc:
             return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
+
+    def _is_whatsapp_media_route(self, chat_id, metadata):
+        origin = reply_route.get() or {}
+        route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
+        return route.get("mode") == "whatsapp" or (not route.get("mode") and getattr(self, "_last_inbound_modality", {}).get(str(chat_id)) == "whatsapp")
 
     def _is_imessage_media_route(
         self,
@@ -3314,6 +3354,8 @@ class InkboxAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            return SendResult(success=False, error="WhatsApp attachments require a local file or owned media ID", raw_response={"inkbox_no_retry": True})
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3343,6 +3385,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, image_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3368,6 +3413,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, file_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3392,6 +3440,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, video_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3416,6 +3467,9 @@ class InkboxAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        if self._is_whatsapp_media_route(chat_id, metadata):
+            from .whatsapp import send_media
+            return await send_media(self, chat_id, audio_path, caption, metadata)
         if self._is_imessage_media_route(chat_id, metadata):
             return await self._send_imessage_media(
                 chat_id,
@@ -3465,7 +3519,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if _is_hermes_admin_notice(content, metadata):
             route, turn = self._slack_progress_context(chat_id, metadata, reply_to)
             explicit_notice = str((metadata or {}).get("notice_type") or "").strip().lower() in _ADMIN_NOTICE_METADATA_TYPES
-            if not (route is not None and not explicit_notice and (
+            legacy_vision = _LEGACY_VISION_PROGRESS_RE.match((content or "").lstrip().lstrip(chr(0xFEFF)))
+            if not ((route is not None or legacy_vision) and not explicit_notice and (
                     self._matches_checkpointed_reply(turn, content) or self._is_host_final_reply(chat_id, turn))):
                 logger.debug(
                     "[Inkbox] Suppressed admin notice for chat %s: %s…",
@@ -3618,6 +3673,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if not mode:
             mode = "sms" if str(chat_id).startswith("+") else "email"
 
+        if mode == "whatsapp":
+            return SendResult(success=False, error="WhatsApp reply requires its original native conversation", raw_response={"inkbox_no_retry": True})
         if mode == "sms" and len(content or "") > SMS_MAX_LENGTH:
             failure = _sms_too_long_failure(content)
             await self._maybe_wake_on_send_rejection(
@@ -4112,6 +4169,11 @@ class InkboxAdapter(BasePlatformAdapter):
         # the request — an unknown/unverifiable third party.
         source = provider.name if provider is not None else None
 
+        if str(envelope.get("event_type") or "").startswith("whatsapp."):
+            if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
+                return web.Response(status=401, text="WhatsApp requires an authenticated Inkbox webhook")
+            if envelope.get("companion") is not None:
+                return web.Response(status=400, text="Unsupported WhatsApp event")
         if str(envelope.get("event_type") or "").startswith("slack."):
             if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
                 return web.Response(status=401, text="Slack requires an authenticated Inkbox webhook")
@@ -4166,7 +4228,7 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=200, text="duplicate")
 
         try:
-            if source == "inkbox" and self._is_known_inkbox_event(event_type, envelope):
+            if source == "inkbox" and (str(event_type or "").startswith("whatsapp.") or self._is_known_inkbox_event(event_type, envelope)):
                 # An Inkbox-signed request carrying a known Inkbox event shape —
                 # pick the handler. Mail / text / iMessage arrive wrapped in
                 # ``{event_type, data:{...}}``; the incoming-call webhook is a
@@ -4199,6 +4261,16 @@ class InkboxAdapter(BasePlatformAdapter):
                         if source is not None
                         else None,
                     )
+                elif event_type == "whatsapp.received":
+                    from .whatsapp import receive
+                    response = await receive(self, envelope)
+                elif event_type == "whatsapp.reaction_received":
+                    from .whatsapp import receive_reaction
+                    response = await receive_reaction(self, envelope)
+                elif event_type and event_type.startswith("whatsapp."):
+                    from .whatsapp import record_status
+                    record_status(self, envelope)
+                    response = web.Response(status=200, text="WhatsApp delivery status recorded")
                 elif event_type == "imessage.received":
                     response = await self._on_imessage_received(envelope)
                 elif event_type == "imessage.reaction_received":
@@ -9685,7 +9757,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if not isinstance(envelope, dict) or envelope.get("companion") or "_inkbox_companion_turn" in envelope:
             return True
         channel = {"message.received": "email", "text.received": "sms", "imessage.received": "imessage",
-                   "imessage.reaction_received": "imessage"}.get(envelope.get("event_type"))
+                   "imessage.reaction_received": "imessage", "whatsapp.received": "whatsapp"}.get(envelope.get("event_type"))
         if channel is None or (event.metadata or {}).get("inkbox_prepared"):
             return True
         data = envelope.get("data") or {}
@@ -9713,7 +9785,7 @@ class InkboxAdapter(BasePlatformAdapter):
         answer = self._conversation_prompt_reply(event.source, text) if pending and asked and not reaction else None
         wrong_approval = pending and not asked and approval_reply(text) is not None
         native = getattr(self, "_native_turns", None)
-        retry_control = channel == "imessage" and native is not None and str(event.message_id) in native.unconfirmed_controls
+        retry_control = channel in {"imessage", "whatsapp"} and native is not None and str(event.message_id) in native.unconfirmed_controls
         quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
                 and not mentions(text, self._identity_handle) and not command and answer is None))
         if quiet:

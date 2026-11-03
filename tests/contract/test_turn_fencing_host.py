@@ -117,7 +117,7 @@ def test_completed_real_worker_survives_native_slot_cleanup_and_restores_forward
         identity.get_imessage = Mock(side_effect=lambda message_id: NS(id=message_id, conversation_id=uid(30)))
         identity.get_imessage_thread = Mock(return_value=NS(conversation_id=uid(30)))
         identity.get_imessage_conversation_thread = Mock()
-        adapter = NS(gateway_runner=owner, _message_handler=None, _imessage_threaded_replies=True, _slack_enabled=False,
+        adapter = NS(_identity_id=uid(100), gateway_runner=owner, _message_handler=None, _imessage_threaded_replies=True, _slack_enabled=False,
                      _reply_identity=identity, build_source=lambda **kwargs: NS(**kwargs))
         queue = NativeTurns(adapter, tmp_path / "native")
         queue._session_key = lambda _: "session-key"
