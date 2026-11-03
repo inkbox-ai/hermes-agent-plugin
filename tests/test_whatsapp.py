@@ -63,6 +63,17 @@ def receipt(*args, **kwargs):
     return event
 
 
+def seed_legacy_autoquote(queue, monkeypatch):
+    """Model saved turns created before plain replies became the default."""
+    accept = queue.accept
+
+    async def legacy_accept(event):
+        event.metadata["inkbox_reply_route"]["whatsapp_auto_reply_target"] = event.message_id
+        return await accept(event)
+
+    monkeypatch.setattr(queue, "accept", legacy_accept)
+
+
 def real_identity(adapter):
     client = Inkbox("test-only", base_url="http://127.0.0.1:9")
     client._ids_resource._http = Mock()
@@ -789,10 +800,13 @@ def test_group_without_resolved_remote_author_never_enters_native_permissions(fa
     asyncio.run(run())
 
 
-def test_native_replies_quote_first_burst_source_without_moving_the_host_session(factory, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_quote", [False, True])
+def test_native_reply_burst_keeps_default_or_saved_quote_without_moving_host_session(factory, tmp_path, monkeypatch, legacy_quote):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
+        if legacy_quote:
+            seed_legacy_autoquote(value.queue, monkeypatch)
         admitted = asyncio.Event()
         original_batch = value.queue._batch
         async def wait_batch(*args):
@@ -811,7 +825,12 @@ def test_native_replies_quote_first_burst_source_without_moving_the_host_session
             assert len(value.inputs) == 1
             route = next(iter(value.queue.rows.values()))["turns"][0]["route"]
             assert route["whatsapp_reply_target"] == uid(2)
-            assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(1)
+            if legacy_quote:
+                assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(1)
+                assert route["whatsapp_auto_reply_target"] == uid(1)
+            else:
+                assert "reply_to_message_id" not in client.whatsapp._http.post.call_args.kwargs["json"]
+                assert "whatsapp_auto_reply_target" not in route
             assert value.inputs[0].source.thread_id == f"whatsapp:{uid(30)}"
         finally:
             admitted.set()
@@ -908,12 +927,12 @@ def test_whatsapp_registration_exposes_direct_quote_thread_and_reaction_contract
     assert reaction["properties"]["reaction"]["enum"] == ["love", "like", "dislike", "laugh", "emphasize", "question", "eyes"]
 
 
-def test_quoted_inbound_dm_automatically_quotes_source_not_its_parent(factory, tmp_path):
+def test_quoted_inbound_dm_defaults_to_plain_reply(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
         def source_reply(_path, **kwargs):
-            assert kwargs["json"]["reply_to_message_id"] == uid(1)
+            assert "reply_to_message_id" not in kwargs["json"]
             assert "plain_reply_fallback" not in kwargs["json"]
             return {"message": WIRE}
         client.whatsapp._http.post.side_effect = source_reply
@@ -1187,7 +1206,7 @@ def test_reaction_admission_failure_releases_reservation_for_replay(factory, tmp
     asyncio.run(run())
 
 
-def test_peer_reaction_add_and_removal_quote_only_verified_real_target(factory, tmp_path):
+def test_peer_reaction_add_and_removal_preserve_target_but_reply_plain(factory, tmp_path):
     from inkbox_plugin.whatsapp import receive_reaction
     async def run():
         value = await harness(factory, tmp_path)
@@ -1212,7 +1231,7 @@ def test_peer_reaction_add_and_removal_quote_only_verified_real_target(factory, 
             assert len(value.inputs) == 2
             assert (await receive_reaction(value.adapter, first)).status == 200
             assert len(value.inputs) == 2
-            assert all(call.kwargs["json"]["reply_to_message_id"] == uid(800) for call in client.whatsapp._http.post.call_args_list)
+            assert all("reply_to_message_id" not in call.kwargs["json"] for call in client.whatsapp._http.post.call_args_list)
         finally:
             await value.queue.close()
             client.close()
@@ -1497,7 +1516,8 @@ def test_read_and_mark_tools_use_real_sdk_signatures_and_identity_scope(factory,
 
 
 @pytest.mark.parametrize("saved_key", [False, True])
-def test_legacy_checkpoint_restart_preserves_plain_body_and_unicode_key(factory, tmp_path, monkeypatch, saved_key):
+@pytest.mark.parametrize("quoted", [False, True])
+def test_legacy_checkpoint_restart_preserves_body_and_unicode_key(factory, tmp_path, monkeypatch, saved_key, quoted):
     from inkbox_plugin.companion import digest
     from inkbox_plugin.native_turns import NativeTurns
 
@@ -1508,11 +1528,15 @@ def test_legacy_checkpoint_restart_preserves_plain_body_and_unicode_key(factory,
         await receive(value.adapter, inbound())
         row = next(iter(value.queue.rows.values()))
         turn = row["turns"][0]
-        turn["route"].pop("whatsapp_auto_reply_target")
-        turn["event"]["metadata"]["inkbox_reply_route"].pop("whatsapp_auto_reply_target")
+        turn["route"].pop("whatsapp_auto_reply_target", None)
+        turn["event"]["metadata"]["inkbox_reply_route"].pop("whatsapp_auto_reply_target", None)
+        if quoted:
+            turn["route"]["whatsapp_auto_reply_target"] = uid(1)
+            turn["event"]["metadata"]["inkbox_reply_route"]["whatsapp_auto_reply_target"] = uid(1)
+            turn["whatsapp_reply_options"] = {"reply_to_message_id": uid(1)}
         answer = "A café reply 🐳"
         turn.update(state="answer_ready", answer=answer)
-        original_key = "hermes:" + digest(json.dumps([turn["id"], uid(30), None, answer]))
+        original_key = "hermes:" + digest(json.dumps([turn["id"], uid(30), uid(1) if quoted else None, answer]))
         if saved_key:
             turn["reply_idempotency_key"] = original_key
         value.queue._save(row)
@@ -1524,7 +1548,8 @@ def test_legacy_checkpoint_restart_preserves_plain_body_and_unicode_key(factory,
             await settle(recovered)
             assert not value.inputs
             call = client.whatsapp._http.post.call_args
-            assert call.kwargs["json"] == {"conversation_id": uid(30), "text": answer}
+            assert call.kwargs["json"] == {"conversation_id": uid(30), "text": answer,
+                **({"reply_to_message_id": uid(1)} if quoted else {})}
             assert call.kwargs["headers"]["Idempotency-Key"] == original_key
             assert next(iter(recovered.rows.values()))["turns"][0]["state"] == "done"
         finally:
@@ -1541,14 +1566,12 @@ def test_active_tool_defaults_and_outreach_destinations(factory, tmp_path, monke
     monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(base_url=value.adapter._base_url), client, value.adapter._reply_identity))
     session = str(tmp_path)
     bind_context(session, {"mode": "whatsapp", "turn_id": uid(1), "conversation_id": uid(30), "author": "+15555550101",
-        "conversation_kind": "direct", "whatsapp_auto_reply_target": uid(1),
+        "conversation_kind": "direct",
         "identity_id": uid(100), "base_url": value.adapter._base_url, "authorize_whatsapp": Mock()})
     try:
         assert json.loads(invoke("send_whatsapp", {**selector, "text": "Answer"}, session))["ok"]
         payload = client.whatsapp._http.post.call_args.kwargs["json"]
         expected = {**(selector or {"conversation_id": uid(30)}), "text": "Answer"}
-        if not selector or selector.get("conversation_id") == uid(30):
-            expected["reply_to_message_id"] = uid(1)
         assert payload == expected
     finally:
         clear_context(session, uid(1))
@@ -1626,13 +1649,56 @@ def test_source_tool_quote_suppresses_final_and_never_retries_plain(factory, tmp
     asyncio.run(run())
 
 
+def test_new_media_reply_and_followup_text_stay_plain(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        path = tmp_path / "photo.png"
+        path.write_bytes(b"png")
+        value.adapter.validate_media_delivery_path = lambda path: path
+        completed = []
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            route = event.metadata["inkbox_reply_route"]
+            assert "whatsapp_auto_reply_target" not in route
+            if event.message_id == uid(1):
+                result = await send_media(value.adapter, event.source.chat_id, path, "Photo", {"inkbox_reply_route": route})
+                assert result.success
+            value.queue.capture_result(event, "Plain response")
+            result = await value.adapter.send(event.source.chat_id, "Plain response", reply_to=event.message_id)
+            assert result.success
+            await value.adapter.on_processing_complete(event, "success")
+            completed.append(event.message_id)
+
+        value.adapter.handle_message = handle
+        try:
+            await receive(value.adapter, inbound())
+            await settle(value.queue)
+            await receive(value.adapter, {**inbound(id=uid(2), content="Follow-up"), "id": "followup-event"})
+            await settle(value.queue)
+            assert completed == [uid(1), uid(2)]
+            payloads = [call.kwargs["json"] for call in client.whatsapp._http.post.call_args_list]
+            assert len(payloads) == 3
+            assert payloads[0]["media_ids"] == [uid(801)]
+            assert all("reply_to_message_id" not in payload for payload in payloads)
+            assert payloads[-1]["text"] == "Plain response"
+        finally:
+            await value.queue.close()
+            client.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("legacy_media", [False, True])
-def test_media_quote_options_are_frozen_before_upload(factory, tmp_path, legacy_media):
+def test_legacy_media_quote_options_are_frozen_before_upload(factory, tmp_path, monkeypatch, legacy_media):
     import hashlib
 
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
+        seed_legacy_autoquote(value.queue, monkeypatch)
         try:
             await receive(value.adapter, inbound())
             await settle(value.queue)
@@ -1659,12 +1725,13 @@ def test_media_quote_options_are_frozen_before_upload(factory, tmp_path, legacy_
 
 
 @pytest.mark.parametrize("status", [403, 409, 422])
-def test_automatic_quote_rejection_never_downgrades_or_replays(factory, tmp_path, status):
+def test_legacy_automatic_quote_rejection_never_downgrades_or_replays(factory, tmp_path, monkeypatch, status):
     from inkbox import InkboxAPIError
 
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
+        seed_legacy_autoquote(value.queue, monkeypatch)
         client.whatsapp._http.post.side_effect = InkboxAPIError(status, {"error": "whatsapp_quote_unavailable"})
         try:
             await receive(value.adapter, inbound())
@@ -1682,7 +1749,7 @@ def test_automatic_quote_rejection_never_downgrades_or_replays(factory, tmp_path
 
 
 @pytest.mark.parametrize("revocation", ["sender", "identity", "endpoint"])
-def test_autoquote_rechecks_source_authority_before_sending(factory, tmp_path, monkeypatch, revocation):
+def test_plain_reply_rechecks_source_authority_before_sending(factory, tmp_path, monkeypatch, revocation):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
@@ -1774,7 +1841,7 @@ def test_definite_quoted_rejection_settles_turn_and_releases_successor(factory, 
             assert all(turn["state"] == "done" for turn in row["turns"])
             assert row["turns"][0]["whatsapp_send_attempt"] == original_attempt
             assert not row.get("blocked") and client.whatsapp._http.post.call_count == 2
-            assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(3)
+            assert "reply_to_message_id" not in client.whatsapp._http.post.call_args.kwargs["json"]
             assert client.whatsapp._http.post.call_args.kwargs["headers"]["Idempotency-Key"] != original_attempt["key"]
         finally:
             await value.queue.close()
@@ -2026,7 +2093,7 @@ def test_rejected_outreach_allows_independent_destination_and_retains_intent(fac
             assert len(calls) == (1 if uncertain else 3)
             if not uncertain:
                 assert calls[-1].kwargs["json"] == {
-                    "conversation_id": uid(30), "text": "Source final", "reply_to_message_id": uid(1)}
+                    "conversation_id": uid(30), "text": "Source final"}
             row = next(iter(value.queue.rows.values()))
             if not uncertain:
                 assert row["turns"][0]["whatsapp_send_attempts"]["outreach-b"] == saved
@@ -2220,7 +2287,7 @@ def test_rejected_destination_alias_cannot_replace_saved_request(factory, tmp_pa
             final = await value.adapter.send(event.source.chat_id, "Source final", reply_to=event.message_id)
             assert final.success
             assert client.whatsapp._http.post.call_args.kwargs["json"] == {
-                "conversation_id": uid(30), "text": "Source final", "reply_to_message_id": uid(1)}
+                "conversation_id": uid(30), "text": "Source final"}
             await value.adapter.on_processing_complete(event, "success")
             completed.append(True)
 
@@ -2398,7 +2465,7 @@ def test_lookup_overlap_cannot_drop_or_release_unresolved_source_reply(factory, 
 
 @pytest.mark.parametrize("uppercase", [False, True])
 @pytest.mark.parametrize("failure", [None, "rejected", "uncertain"])
-def test_source_uuid_casing_preserves_quote_and_final_fences(factory, tmp_path, monkeypatch, uppercase, failure):
+def test_source_uuid_casing_preserves_plain_default_and_final_fences(factory, tmp_path, monkeypatch, uppercase, failure):
     from inkbox import InkboxAPIError
     from inkbox_plugin import tools
 
@@ -2436,7 +2503,7 @@ def test_source_uuid_casing_preserves_quote_and_final_fences(factory, tmp_path, 
             assert completed == [True]
             client.whatsapp._http.post.assert_called_once()
             assert client.whatsapp._http.post.call_args.kwargs["json"] == {
-                "conversation_id": selector, "text": "Answer", "reply_to_message_id": uid(1)}
+                "conversation_id": selector, "text": "Answer"}
             turn = next(iter(value.queue.rows.values()))["turns"][0]
             assert len(turn.get("explicit_sends", [])) == (0 if failure else 1)
             assert turn["explicit_delivery_state"] == (failure or "sent")

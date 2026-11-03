@@ -321,10 +321,10 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested direct WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Same-conversation sends quote the source automatically; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
+            "Send requested direct WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Sends are plain by default. Set reply_to_message_id only when a quote helps identify an older message, distinguish multiple requests, or identify a specific attachment; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
             {
                 "to": {**string("One E.164 recipient; arrays are not supported"), "pattern": r"^\+[1-9][0-9]{6,14}$"},
-                "reply_to_message_id": string("Optional authorized message UUID to quote; otherwise the active source is used. Requires a conversation."),
+                "reply_to_message_id": string("Optional authorized message UUID to quote selectively; omit for an ordinary unquoted message. Requires a conversation."),
                 "conversation_id": string("Existing direct conversation, mutually exclusive with to"),
                 "text": {**string("Message text"), "maxLength": 4000},
                 "media_id": string("Owned attachment ID"),

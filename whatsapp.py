@@ -57,7 +57,7 @@ def method(identity, name):
 
 
 def auto_reply_kwargs(route):
-    """Only new admissions carry an automatic target; legacy requests stay plain."""
+    """Preserve quote targets on saved routes; new turns are plain by default."""
     target = route.get("whatsapp_auto_reply_target")
     return {"reply_to_message_id": target} if target else {}
 
@@ -161,7 +161,7 @@ async def receive(adapter, envelope):
         prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
         prompt = (
             (prompt or "")
-            + "\nYour normal final reply is delivered here automatically. Do not also send it with a tool. Keep text under 4,000 characters. Final replies automatically quote the source message. Same-conversation tools inherit that source unless selecting another authorized message. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
+            + "\nYour normal final reply is delivered here automatically. Do not duplicate it with a tool send. Keep text under 4,000 characters. Normal replies are plain chat messages. Quote selectively only when referring to an older message, distinguishing multiple requests, or identifying a specific attachment. To quote, use inkbox_send_whatsapp with an explicit reply_to_message_id and do not repeat the sent answer as a final reply. Tools support whole-message named/custom reactions; pending or uncertain receipts are not applied. No typing, remote read receipts, or calls."
         )
         event = MessageEvent(
             text=text,
@@ -188,7 +188,6 @@ async def receive(adapter, envelope):
                 conversation_kind="direct",
                 participants=participants,
                 whatsapp_reply_target=message_id,
-                whatsapp_auto_reply_target=message_id,
                 reply_to_message_id=message.get("reply_to_message_id"),
                 thread_id=message.get("thread_id"),
                 thread_root_message_id=message.get("thread_root_message_id"),
@@ -273,7 +272,6 @@ async def receive_reaction(adapter, envelope):
         route = {"mode": "whatsapp", "chat_id": str(chat_id), "message_id": source_id, "author": actor,
             "conversation_id": conversation_id, "conversation_kind": "direct", "participants": participants,
             "raw_text": "", "reaction": True, "reaction_id": reaction_id, "reaction_target_message_id": target_id,
-            "whatsapp_auto_reply_target": target_id,
             "identity_id": str(adapter._identity_id), "base_url": str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
             "imessage_event_ids": [str(envelope.get("id") or source_id)]}
         # Resolve independently, then serialize the final read through admission.
