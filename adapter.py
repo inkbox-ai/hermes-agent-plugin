@@ -1145,7 +1145,10 @@ def _reconcile_subscription(
         desired_endpoint.netloc,
         desired_endpoint.path.rstrip("/"),
     )
+    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
     list_kwargs = {owner_kwarg: owner_id}
+    if identity_scope:
+        list_kwargs["scope"] = "identity"
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
     # Same URL + a compatible event superset: adopt verbatim, no writes. A
@@ -1160,7 +1163,7 @@ def _reconcile_subscription(
         if (
             row.url == desired_url
             and desired_set.issubset(row_set)
-            and row_families == desired_families
+            and (row_families == desired_families or identity_scope)
         ):
             active_id = row.id
             break
@@ -1173,7 +1176,8 @@ def _reconcile_subscription(
             (
                 row
                 for row in existing
-                if desired_families
+                if (not identity_scope or {event.split(".", 1)[0] for event in row.event_types} == desired_families)
+                and desired_families
                 & {
                     event_type.split(".", 1)[0]
                     for event_type in row.event_types
@@ -1230,6 +1234,8 @@ def _reconcile_subscription(
             and previous_webhook_url != desired_url
             and row.url == previous_webhook_url
         )
+        if identity_scope and row_families != desired_families:
+            continue  # Shared receivers retain their other event channels.
         if desired_families & row_families and (
             same_receiver or previous_receiver
         ):
@@ -1269,7 +1275,10 @@ def _create_with_409_repair(
     desired_families = {
         event_type.split(".", 1)[0] for event_type in desired_events
     }
+    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
     list_kwargs = {owner_kwarg: owner_id}
+    if identity_scope:
+        list_kwargs["scope"] = "identity"
     for row in client.webhooks.subscriptions.list(**list_kwargs):
         if row.url != desired_url:
             continue
@@ -1279,8 +1288,10 @@ def _create_with_409_repair(
         if not desired_families & row_families:
             continue
 
-        if set(row.event_types) == desired_set:
+        if set(row.event_types) == desired_set or (identity_scope and desired_set.issubset(row.event_types)):
             return row.id
+        if identity_scope and row_families != desired_families:
+            continue
 
         repaired = client.webhooks.subscriptions.update(
             row.id, event_types=list(desired_events),
