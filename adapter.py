@@ -2151,13 +2151,25 @@ class InkboxAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 4096  # email/voice are unbounded; SMS chunked separately in send()
 
-    def validate_native_metadata(self, event: MessageEvent) -> bool:
-        from .native_envelope import validate
-        return validate(self, event)
+    async def handle_message(self, event: MessageEvent) -> Any:
+        from .native_envelope import dispatch, eligible, remember_plain_voice
+        if eligible(self, event):
+            return await dispatch(self, event)
+        await remember_plain_voice(self, event)
+        return await super().handle_message(event)
 
-    def native_execution_scope(self, event: MessageEvent):
-        from .native_envelope import execution_scope
-        return execution_scope(self, event)
+    async def _run_processing_hook(self, hook_name, *args, **kwargs):
+        from .native_envelope import bind_execution, complete
+        event = args[0] if args else None
+        if (hook_name == "on_processing_start" and event is not None and not event.internal
+                and not event.metadata and getattr(event, "_claimed_owner", None) is not None):
+            # Producer lifecycle invokes this on the actual restored event.
+            # Validate outside Base's deliberately fail-open hook dispatcher.
+            bind_execution(self, event)
+            return await self.on_processing_start(event)
+        if hook_name == "on_processing_complete" and getattr(event, "_inkbox_producer_execution", False):
+            return await complete(self, event, args[1])
+        return await super()._run_processing_hook(hook_name, *args, **kwargs)
 
     def max_message_length_for_chat(self, chat_id: str) -> int:
         route = reply_route.get() or {}
@@ -2172,7 +2184,11 @@ class InkboxAdapter(BasePlatformAdapter):
     async def _send_final_text(self, event, *args, **kwargs):
         # Only the host's final-delivery boundary can bypass narration filters;
         # externally supplied notify metadata is not equivalent authority.
-        from .native_envelope import delivery_scope
+        from .native_envelope import delivery_scope, delivery_callback
+        if "record_delivery" in kwargs:
+            kwargs["record_delivery"] = delivery_callback(event, kwargs["record_delivery"])
+        elif len(args) >= 6:
+            args = (*args[:5], delivery_callback(event, args[5]), *args[6:])
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
             with delivery_scope(self, event):
@@ -2181,7 +2197,9 @@ class InkboxAdapter(BasePlatformAdapter):
             _host_final_reply.reset(token)
 
     async def _deliver_attachments(self, event, *args, **kwargs):
-        from .native_envelope import delivery_scope
+        from .native_envelope import delivery_scope, delivery_callback
+        if "record_delivery" in kwargs:
+            kwargs["record_delivery"] = delivery_callback(event, kwargs["record_delivery"])
         with delivery_scope(self, event):
             return await super()._deliver_attachments(event, *args, **kwargs)
 
@@ -2189,7 +2207,7 @@ class InkboxAdapter(BasePlatformAdapter):
         from .native_envelope import delivery_scope
         native = getattr(self, "_native_turns", None)
         with delivery_scope(self, event):
-            if native and getattr(event, "_native_execution_lifecycle", False):
+            if native and getattr(event, "_inkbox_producer_execution", False):
                 native.capture_result(event, response)
             extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
         if native:
@@ -2615,12 +2633,21 @@ class InkboxAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         await self._cleanup()
+        from .native_envelope import uninstall
+        owner = getattr(self, "gateway_runner", None) or getattr(self._message_handler, "__self__", None)
+        uninstall(self, owner)
         self._release_platform_lock()
         self._mark_disconnected()
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
         self._a2a_closing = True
+        receipt_tasks = [task for task in getattr(self, "_inkbox_receipt_tasks", {}).values()
+                         if task is not asyncio.current_task() and not task.done()]
+        for task in receipt_tasks:
+            task.cancel()
+        if receipt_tasks:
+            await asyncio.gather(*receipt_tasks, return_exceptions=True)
         if getattr(self, "_native_turns", None) is not None:
             await self._native_turns.close()
             self._native_turns = None
@@ -4500,6 +4527,8 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             if replayable and replay_envelope is not None:
                 entry["envelope"] = replay_envelope
+            if replayable and isinstance(previous, dict) and previous.get("native_admissions"):
+                entry["native_admissions"] = previous["native_admissions"]
             current[call_id] = entry
             if len(current) > 1_000:
                 newest = sorted(
@@ -5777,9 +5806,7 @@ class InkboxAdapter(BasePlatformAdapter):
         event_key = getattr(self, "_event_session_key", None)
         if getattr(self, "_active_sessions", None) and callable(event_key):
             guard = self._active_sessions.get(event_key(event))
-            processing_owner = getattr(event, "_inkbox_processing_owner", None)
-            if (guard is not None and not getattr(event, "_inkbox_recovered_delivery", False)
-                    and (processing_owner is None or getattr(guard, "_inkbox_event", None) is processing_owner())):
+            if guard is not None and not getattr(event, "_inkbox_recovered_delivery", False):
                 guard._inkbox_event = event
         from .native_envelope import route_for
         route = route_for(self, event)
@@ -5855,9 +5882,9 @@ class InkboxAdapter(BasePlatformAdapter):
         outcome: Any,
     ) -> None:
         from .native_envelope import route_for
-        actual = getattr(event, "_inkbox_execution_event", getattr(event, "_native_execution_event", event))
-        if getattr(actual, "_inkbox_execution_failed", False):
-            outcome = "failure"
+        actual = getattr(event, "_inkbox_execution_event", event)
+        if getattr(event, "_inkbox_plain_voice", False):
+            self._conversation_state().complete(str(event.source.chat_id), str(event.message_id))
         if route_for(self, event):
             journal = self._conversation_state()
             if str(getattr(outcome, "value", outcome)).lower() == "success":
@@ -9676,14 +9703,9 @@ class InkboxAdapter(BasePlatformAdapter):
             if callable(peek):
                 key = self._conversation_session_key(event.source)
                 previous = peek(key)
-            from .native_envelope import stamp
-            original_metadata = event.metadata
-            projected = stamp(self, event)
             try:
                 response = await handler(event)
             finally:
-                if projected:
-                    event.metadata = original_metadata
                 # Observe the host's actual local session rotation, never a
                 # response string or a command before authorization. Inline
                 # controls do not emit the normal processing-complete hook.
@@ -9691,21 +9713,21 @@ class InkboxAdapter(BasePlatformAdapter):
                     current = peek(key)
                     if current and current != previous:
                         self._conversation_state().reset_context(str(event.source.chat_id))
-            actual = getattr(event, "_inkbox_execution_event", getattr(event, "_native_execution_event", event))
-            if projected:
-                from .native_envelope import require_completed_worker
-                if not require_completed_worker(self, actual):
-                    return None
+            actual = getattr(event, "_inkbox_execution_event", event)
             if (actual.metadata or {}).get("inkbox_interrupted"):
                 return None
             if getattr(self, "_companion", None):
                 self._companion.capture_result(event, response)
-            if getattr(self, "_native_turns", None) and not getattr(actual, "_inkbox_execution_failed", False):
+            if getattr(self, "_native_turns", None):
                 self._native_turns.capture_result(actual, response)
             return response
         if getattr(handler, "__self__", None) is not None:
             checkpointed.__self__ = handler.__self__
         super().set_message_handler(checkpointed)
+        owner = getattr(handler, "__self__", None)
+        if owner is not None:
+            from .native_envelope import install
+            install(self, owner)
 
     def _remember_outbound_context(self, **kwargs: Any) -> None:
         """Persist automatic delivery correlation with its immutable original route."""
@@ -9884,8 +9906,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     (meta.get("inkbox_event_type") or (raw.get("event_type") if isinstance(raw, dict) else None))
                     in {"text.received", "imessage.received", "message.received", "imessage.reaction_received"})
 
+        producer_owned = getattr(active, "_inkbox_producer_execution", False)
+        if producer_owned:
+            from .native_envelope import route_for
+            try:
+                producer_owned = bool(route_for(self, active))
+            except RuntimeError:
+                return False
         if (active is event or not ordinary(event) or not ordinary(active) or not callable(getattr(agent, "interrupt", None)) or
-                getattr(guard, "_inkbox_event", None) is not active or key not in self._session_tasks):
+                (not producer_owned and (getattr(guard, "_inkbox_event", None) is not active or key not in self._session_tasks))):
             return True
         # Use the same local admission gates as native busy handling before
         # letting an arriving sender affect another participant's running turn.

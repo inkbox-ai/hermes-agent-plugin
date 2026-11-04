@@ -1,222 +1,277 @@
-"""Exact journal/source/identity bindings and replay fences, without network calls."""
-import asyncio
+"""Private journal binding against the official host's actual event types."""
 import copy
-import json
-from types import SimpleNamespace as NS
 from unittest.mock import Mock
+from weakref import ref
 
 import pytest
 
-pytest.importorskip("gateway.session_adapter_execution")
+pytest.importorskip("gateway.platforms.webhook_ingress")
 
 from gateway.config import PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.platforms.base import MessageEvent
-from gateway.session_envelope import restore_native, snapshot_native
-from hermes_state_runtime import RuntimeStoreError
 from inkbox_plugin.adapter import InkboxAdapter
-from inkbox_plugin.conversation import reply_route
-from inkbox_plugin.native_envelope import event_record, stamp, validate, route_for
-from inkbox_plugin.native_turns import NativeTurns
+from inkbox_plugin.native_envelope import (
+    _digest,
+    _lookup,
+    event_record,
+    identity_scope,
+    install,
+    route_for,
+    uninstall,
+)
 
 
-@pytest.fixture(params=["ordinary", "queued"])
-def bound(tmp_path, monkeypatch, request):
+@pytest.fixture
+def bound(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter, check_fn=lambda: True))
     adapter = InkboxAdapter(PlatformConfig(extra={"identity": "sample-agent"}))
     adapter._identity_id, adapter._base_url = "sample-identity", "https://example.test"
-    runner = NS(session_authority=NS(), config=NS(multiplex_profiles=False),
-        _adapter_for_source=lambda _: adapter, _adapter_flag=lambda *args: False,
-        _adapter_profile_for_source=lambda _: None, _is_user_authorized_for_source=lambda *args, **kwargs: True,
-        session_store=NS(_generate_session_key=lambda source: source.chat_id))
-    adapter.gateway_runner = runner
     source = adapter.build_source(chat_id="sample-chat", user_id="sample-user", chat_type="group")
     event = MessageEvent(text="Synthetic request", source=source, message_id="sample-event",
         metadata={"inkbox_prepared": True, "inkbox_reply_route": {
-            "mode": "whatsapp", "chat_id": source.chat_id, "conversation_id": "sample-conversation", "author": "sample-user"}},
-        raw_message={"event_type": "text.received"})
-    if request.param == "queued":
-        queue = NativeTurns.__new__(NativeTurns)
-        queue.closed = False
-        turn = {"id": event.message_id, "state": "running"}
-        row = {"key": "sample-key", "chat_id": source.chat_id, "turns": [turn]}
-        queue.rows, queue.active, queue.events = {"sample-key": row}, {source.chat_id: turn}, {event.message_id: event}
-        queue._save = Mock()
-        queue._stopped_worker_exited = Mock()
-        adapter._native_turns = queue
-        event.raw_message = {"_inkbox_native_key": "sample-key", "_inkbox_native_turn": event.message_id}
-    else:
-        adapter._conversation_state().remember(source.chat_id, event.message_id, event.metadata["inkbox_reply_route"])
-    assert stamp(adapter, event)
-    runner.session_authority.marker_adopters = {"sample-admission": event}
-    payload = json.loads(json.dumps(snapshot_native(runner, event)))
-    return adapter, runner, event, payload
+            "mode": "whatsapp", "chat_id": source.chat_id, "conversation_id": "sample-conversation", "author": "sample-user"}})
+    media = tmp_path / "image.png"
+    media.write_bytes(b"synthetic image bytes")
+    event.media_urls, event.media_types = [str(media)], ["image/png"]
+    journal = adapter._conversation_state()
+    journal.remember(source.chat_id, event.message_id, event.metadata["inkbox_reply_route"])
+    record = {"scope": identity_scope(adapter), "event": event_record(event)}
+    record["digest"] = _digest(record["event"])
+    journal.row(source.chat_id).setdefault("native_admissions", {})[event.message_id] = record
+    journal.save(source.chat_id)
+    restored = copy.deepcopy(event)
+    restored.metadata = {}
+    return adapter, event, restored, record, media
 
 
-def test_exact_roundtrip_and_validation_does_not_mutate_binding(bound):
-    adapter, runner, original, payload = bound
-    restored = restore_native(payload, runner)
-    before = event_record(restored)
-    assert validate(adapter, restored)
-    assert event_record(restored) == before == event_record(original)
-    assert restored.raw_message is None
+def test_exact_wire_input_resolves_only_its_durable_context(bound):
+    adapter, original, wire, _, _ = bound
+    assert _lookup(adapter, wire, wire=True)
+    assert wire.metadata == {}
+    assert original.raw_message is None
 
 
-@pytest.mark.parametrize("change", ["user", "profile", "chat", "route", "text", "identity"])
-def test_changed_ownership_is_refused(bound, change):
-    adapter, runner, original, payload = bound
+@pytest.mark.parametrize("change", ["identity", "source", "author", "message", "text", "timestamp", "journal", "digest", "media", "route_expired", "metadata"])
+def test_changed_input_or_owner_cannot_borrow_journal(bound, change):
+    adapter, _, event, record, media = bound
     if change == "identity":
-        adapter._identity_id = "another-identity"
-    elif change in {"user", "profile", "chat"}:
-        payload["native_text_v1"]["source"][{"user": "user_id", "profile": "profile", "chat": "chat_id"}[change]] = "another"
-    elif change == "route":
-        payload["native_text_v1"]["event"]["metadata"]["inkbox_native_binding"]["digest"] = "another"
+        adapter._identity_id = "other-identity"
+    elif change == "source":
+        event.source.chat_id = "other-chat"
+    elif change == "author":
+        event.source.user_id = "other-user"
+    elif change == "message":
+        event.message_id = "other-message"
+    elif change == "text":
+        event.text = "Changed input"
+    elif change == "timestamp":
+        event.timestamp = event.timestamp.replace(year=event.timestamp.year - 1)
+    elif change == "journal":
+        record["event"]["metadata"]["inkbox_reply_route"]["conversation_id"] = "other-conversation"
+    elif change == "digest":
+        record["digest"] = "changed"
+    elif change == "media":
+        media.write_bytes(b"different image bytes")
+    elif change == "metadata":
+        event.metadata = {"inkbox_prepared": True}
     else:
-        payload["text"] = "Different request"
-    with pytest.raises(RuntimeStoreError):
-        restore_native(payload, runner)
+        adapter._conversation_state().row(event.source.chat_id)["routes"].clear()
+    assert _lookup(adapter, event, wire=True) is None
 
 
-def test_execution_scope_resets_context_after_preworker_error(bound):
-    adapter, runner, original, payload = bound
-    restored = restore_native(payload, runner)
-    adapter._event_session_key = lambda _: "sample-key"
-    guard = NS(_inkbox_event=original)
-    adapter._active_sessions = {"sample-key": guard}
-    async def processing(event):
-        guard._inkbox_event = event
-        reply_route.set(route_for(adapter, event))
-    adapter.on_processing_start = processing
+def test_retained_media_path_can_change_but_bytes_cannot(bound, tmp_path):
+    adapter, _, event, _, media = bound
+    retained = tmp_path / "core-retained.png"
+    retained.write_bytes(media.read_bytes())
+    event.media_urls = [str(retained)]
+    assert _lookup(adapter, event, wire=True)
+    retained.write_bytes(b"tampered retained bytes")
+    assert _lookup(adapter, event, wire=True) is None
+
+
+def test_execution_proof_allows_host_text_expansion_and_media_cleanup_only_for_actual_event(bound):
+    adapter, _, event, record, media = bound
+    assert _lookup(adapter, event, wire=True)
+    event.metadata = copy.deepcopy(record["event"]["metadata"])
+    event.metadata["inkbox_native_binding"] = {"kind": "ordinary", "scope": record["scope"], "digest": record["digest"]}
+    event._inkbox_execution_admission = (ref(event), record["digest"], tuple(event.media_urls), record["event"]["media"])
+    event.text = "Host-loaded skill\n" + event.text
+    media.unlink()
+    assert route_for(adapter, event)["conversation_id"] == "sample-conversation"
+    copied = copy.deepcopy(event)
+    with pytest.raises((OSError, RuntimeError)):
+        route_for(adapter, copied)
+    event.source.user_id = "other-user"
+    with pytest.raises(RuntimeError):
+        route_for(adapter, event)
+
+
+def test_handler_decorator_preserves_bound_owner_and_shared_registration():
+    class Owner:
+        async def _handle_message(self, event):
+            return "unchanged"
+    owner = Owner()
+    original = owner._handle_message
+    first, second = Mock(), Mock()
+    install(first, owner)
+    wrapped = owner._handle_message
+    assert wrapped.__self__ is owner
+    install(first, owner)
+    install(second, owner)
+    assert owner._handle_message is wrapped
+    uninstall(first, owner)
+    assert owner._handle_message is wrapped
+    uninstall(second, owner)
+    assert owner._handle_message == original
+
+
+def test_nonproducer_empty_metadata_keeps_base_hook_semantics(bound):
+    import asyncio
+    adapter, _, event, _, _ = bound
+    seen = []
+    async def start(actual):
+        seen.append(actual)
+    adapter.on_processing_start = start
+    asyncio.run(adapter._run_processing_hook("on_processing_start", event))
+    assert seen == [event]
+
+
+@pytest.mark.parametrize("change", [None, "identity", "profile", "text", "timestamp", "missing_journal", "media"])
+def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypatch, change):
+    """The public producer path and real retained-media codec preserve exact input ownership."""
+    import asyncio
+
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_envelope import restore_native
+    from hermes_state_runtime import get_session_admission
+    from inkbox_plugin.native_envelope import dispatch
+
     async def run():
-        token = reply_route.set({"outside": True})
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "true")
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter,
+            check_fn=lambda: True, allow_all_env="INKBOX_ALLOW_ALL_USERS"))
+        adapter = InkboxAdapter(PlatformConfig(enabled=True, typing_indicator=False, extra={"identity": "sample-agent"}))
+        adapter._identity_id, adapter._base_url = "sample-identity", "https://example.test"
+        runner = GatewayRunner(GatewayConfig())
+        runner.adapters = {adapter.platform: adapter}
+        authority = await initialize_session_authority(runner, profile_id="default", instance_id="binding-proof")
+        runner._wire_adapter_handlers(adapter)
+        adapter.gateway_runner = runner
+        monkeypatch.setattr(authority, "_schedule", lambda *_args: None)
+        source = adapter.build_source(chat_id="email:sample@example.test", user_id="sample@example.test", chat_type="dm")
+        route = {"mode": "email", "chat_id": source.chat_id, "author": source.user_id,
+                 "stored_message_id": "stored-original", "message_id": "binding-event"}
+        media = tmp_path / "original.png"
+        media.write_bytes(b"synthetic retained attachment")
+        event = MessageEvent(text="Original request", source=source, message_id="binding-event",
+            media_urls=[str(media)], media_types=["image/png"],
+            metadata={"inkbox_prepared": True, "inkbox_reply_route": route})
+        journal = adapter._conversation_state()
+        journal.remember(source.chat_id, event.message_id, route)
         try:
-            with pytest.raises(ValueError, match="preworker"):
-                async with adapter.native_execution_scope(restored):
-                    assert guard._inkbox_event is restored
-                    assert original._inkbox_execution_event is restored
-                    assert reply_route.get() == route_for(adapter, original)
-                    raise ValueError("preworker")
-            assert reply_route.get() == {"outside": True}
+            await dispatch(adapter, event)
+            record = journal.row(source.chat_id)["native_admissions"][event.message_id]
+            row = get_session_admission(authority.db, admission_id=record["receipt"]["id"])
+            assert row["status"] == "queued"
+            wire = restore_native(row["payload"], runner)
+            assert wire.metadata == {}
+            assert wire is not event
+            assert _lookup(adapter, wire, wire=True)
+            if change == "identity":
+                adapter._identity_id = "another-identity"
+            elif change == "profile":
+                wire.source.profile = "another-profile"
+            elif change == "text":
+                wire.text += " changed"
+            elif change == "timestamp":
+                wire.timestamp = wire.timestamp.replace(year=wire.timestamp.year - 1)
+            elif change == "missing_journal":
+                journal.row(source.chat_id)["native_admissions"].clear()
+            elif change == "media":
+                from pathlib import Path
+                Path(wire.media_urls[0]).write_bytes(b"altered retained bytes")
+            assert bool(_lookup(adapter, wire, wire=True)) is (change is None)
         finally:
-            reply_route.reset(token)
+            tasks = list(getattr(adapter, "_inkbox_receipt_tasks", {}).values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            uninstall(adapter, runner)
+            authority.db.close()
     asyncio.run(run())
 
 
-def test_stopped_or_unknown_queued_turn_never_replays(bound):
-    adapter, runner, original, payload = bound
-    queue = getattr(adapter, "_native_turns", None)
-    if queue is None:
-        return
-    turn = queue.active[original.source.chat_id]
-    for state in ("cancelled", "uncertain", "sending", "done", "pending"):
-        turn["state"] = state
-        with pytest.raises(RuntimeStoreError):
-            restore_native(payload, runner)
-    turn["state"] = "running"
-    queue.closed = True
-    with pytest.raises(RuntimeStoreError):
-        restore_native(payload, runner)
+@pytest.mark.parametrize("outcome", ["return", "raise", "cancel"])
+def test_owned_handler_context_always_resets(bound, outcome):
+    import asyncio
 
+    from gateway.session_ingress import executing_admission
+    from inkbox_plugin.conversation import reply_route
 
-def test_oversized_unregistered_metadata_is_refused(bound):
-    adapter, runner, event, _ = bound
-    event.metadata["inkbox_extra"] = "x" * (16 * 1024)
-    with pytest.raises(RuntimeStoreError):
-        snapshot_native(runner, event)
-    assert event.metadata["inkbox_extra"] == "x" * (16 * 1024)
-
-
-@pytest.mark.parametrize("change", ["tampered_route", "missing_record", "expired_route"])
-def test_journal_binding_cannot_be_substituted_or_expired(bound, change):
-    adapter, runner, event, payload = bound
-    queue = getattr(adapter, "_native_turns", None)
-    if queue:
-        records, key = queue.active[event.source.chat_id], "native_admission"
-    else:
-        records, key = adapter._conversation_state().row(event.source.chat_id)["native_admissions"], event.message_id
-    if change == "tampered_route":
-        records[key]["metadata"]["inkbox_reply_route"]["conversation_id"] = "another-conversation"
-    elif change == "missing_record":
-        records.pop(key)
-    elif queue:
-        queue.active.clear()
-    else:
-        adapter._conversation_state().row(event.source.chat_id)["routes"].pop(event.message_id)
-    with pytest.raises(RuntimeStoreError):
-        restore_native(payload, runner)
-
-
-def test_old_host_path_does_not_project_metadata(bound, monkeypatch):
-    import sys
-    adapter, _, event, _ = bound
-    # The plugin's own hook existing is not evidence that an older host calls it.
-    before = copy.deepcopy(event.metadata)
-    monkeypatch.setitem(sys.modules, "gateway.session_adapter_execution", None)
-    assert stamp(adapter, event) is False
-    assert event.metadata == before
-
-
-@pytest.mark.parametrize("change", ["source", "identity", "journal", "copy"])
-def test_execution_text_expansion_does_not_relax_delivery_ownership(bound, change):
-    adapter, runner, original, payload = bound
-    restored = restore_native(payload, runner)
-    adapter._event_session_key = lambda _: "sample-key"
-    adapter._active_sessions = {"sample-key": NS(_inkbox_event=original)}
-    async def processing(event):
-        pass
-    adapter.on_processing_start = processing
-    async def execute():
-        async with adapter.native_execution_scope(restored):
-            restored.text = "Host skill instructions\n" + restored.text
-    asyncio.run(execute())
-    expected_route = route_for(adapter, restored)
-    assert expected_route and not validate(adapter, restored)
-    if change == "source":
-        restored.source.user_id = "different-user"
-    elif change == "identity":
-        adapter._identity_id = "different-identity"
-    elif change == "copy":
-        restored = copy.deepcopy(restored)
-    else:
-        queue = getattr(adapter, "_native_turns", None)
-        record = (queue.active[original.source.chat_id]["native_admission"] if queue else
-            adapter._conversation_state().row(original.source.chat_id)["native_admissions"][original.message_id])
-        record["metadata"]["inkbox_reply_route"]["conversation_id"] = "different-conversation"
-    with pytest.raises(RuntimeError, match="no longer owns"):
-        route_for(adapter, restored)
-
-
-@pytest.mark.parametrize("bound", ["ordinary"], indirect=True)
-@pytest.mark.parametrize("served", [True, False])
-def test_execution_owner_uses_actual_profile_authority_without_launch_fallback(bound, tmp_path, served):
-    from gateway.session_authorities import SessionAuthorities
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    adapter, runner, launch_owner, payload = bound
-    restored = restore_native(payload, runner)
-    profile_home = tmp_path / "profiles" / "secondary"
-    profile_owner = copy.deepcopy(launch_owner)
-    registry = SessionAuthorities(tmp_path, multiplexed=True)
-    registry.add(tmp_path, runner.session_authority)
-    if served:
-        registry.add(profile_home, NS(marker_adopters={"profile-admission": profile_owner}), name="secondary")
-    runner.session_authorities = registry
-    adapter._event_session_key = lambda _: "sample-key"
-    async def processing(event):
-        pass
-    adapter.on_processing_start = processing
+    adapter, _, event, record, _ = bound
+    event.metadata = copy.deepcopy(record["event"]["metadata"])
+    event.metadata["inkbox_native_binding"] = {"kind": "ordinary", "scope": record["scope"], "digest": record["digest"]}
+    event._inkbox_producer_execution = True
+    class Owner:
+        def _adapter_for_source(self, source):
+            return adapter
+        async def _handle_message(self, actual):
+            assert actual is event
+            assert reply_route.get()["conversation_id"] == "sample-conversation"
+            if outcome == "raise":
+                raise ValueError("Synthetic handler failure")
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+            return "reply"
+    owner = Owner()
+    install(adapter, owner)
     async def run():
-        token = set_hermes_home_override(profile_home)
+        outer = {"mode": "outer-route"}
+        route_token = reply_route.set(outer)
+        admission_token = executing_admission.set(True)
         try:
-            if served:
-                async with adapter.native_execution_scope(restored):
-                    assert profile_owner._inkbox_execution_event is restored
-                    assert not hasattr(launch_owner, "_inkbox_execution_event")
+            if outcome == "return":
+                assert await owner._handle_message(event) == "reply"
             else:
-                with pytest.raises(RuntimeError, match="serving authority"):
-                    async with adapter.native_execution_scope(restored):
-                        pytest.fail("unserved profile executed")
-                assert not hasattr(launch_owner, "_inkbox_execution_event")
+                with pytest.raises(ValueError if outcome == "raise" else asyncio.CancelledError):
+                    await owner._handle_message(event)
+            assert reply_route.get() is outer
         finally:
-            reset_hermes_home_override(token)
+            executing_admission.reset(admission_token)
+            reply_route.reset(route_token)
+            uninstall(adapter, owner)
+    asyncio.run(run())
+
+@pytest.mark.parametrize("ending", ["unknown", "disconnect"])
+def test_receipt_observer_failure_releases_without_claiming_delivery(bound, monkeypatch, ending):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from inkbox_plugin import native_envelope
+    import hermes_state_runtime
+
+    async def run():
+        adapter, original, _, _, _ = bound
+        authority = SimpleNamespace(db=object(), waiters={})
+        monkeypatch.setattr(hermes_state_runtime, "get_session_admission",
+            lambda *args, **kwargs: {"status": "started"})
+        completed = AsyncMock()
+        monkeypatch.setattr(adapter, "on_processing_complete", completed)
+        native_envelope._watch_receipt(adapter, authority, "sample-admission", original)
+        task = adapter._inkbox_receipt_tasks["sample-admission"]
+        await asyncio.sleep(0)
+        if ending == "unknown":
+            authority.waiters["sample-admission"].set_exception(RuntimeError("unknown_execution"))
+            await task
+        else:
+            await adapter._cleanup()
+        completed.assert_awaited_once_with(original, "failure" if ending == "unknown" else "cancelled")
+        assert not adapter._inkbox_receipt_tasks
+        assert task.done()
+        assert not getattr(original, "_inkbox_delivery_results", [])
     asyncio.run(run())

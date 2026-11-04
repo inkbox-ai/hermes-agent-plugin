@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-pytest.importorskip("gateway.session_adapter_metadata")
+pytest.importorskip("gateway.platforms.webhook_ingress")
 
 from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
@@ -24,7 +24,7 @@ from inkbox_plugin.native_turns import NativeTurns
 from inkbox_plugin.native_envelope import route_for
 
 
-@pytest.mark.parametrize("mode,scenario", [(mode, "normal") for mode in ("email", "sms", "whatsapp", "imessage", "slack")] + [("whatsapp", "stop"), ("email", "recovered"), ("email", "recovered_failure"), ("sms", "group_interrupt"), ("whatsapp", "preworker"), ("whatsapp", "producer_unicode"), ("email", "long_email"), ("whatsapp", "preadmission"), ("whatsapp", "outgoing_media"), ("sms", "remote_media"), ("email", "recovered_skill"), ("email", "recovered_later_guard"), ("email", "shared_busy"), ("email", "shared_busy_failure"), ("email", "shared_busy_empty"), ("email", "shared_busy_cancel")] + [(mode, case) for mode in ("email", "whatsapp") for case in ("late_terminal", "late_inflight", "late_empty")] + [("email", "shared_busy_late_terminal"), ("email", "shared_busy_late_inflight")])
+@pytest.mark.parametrize("mode,scenario", [(mode, "normal") for mode in ("email", "sms", "whatsapp", "imessage", "slack")] + [("whatsapp", "stop"), ("email", "recovered"), ("email", "recovered_failure"), ("sms", "group_interrupt"), ("whatsapp", "preworker"), ("whatsapp", "producer_unicode"), ("email", "long_email"), ("whatsapp", "preadmission"), ("whatsapp", "outgoing_media"), ("sms", "remote_media"), ("email", "recovered_skill"), ("email", "recovered_later_guard"), ("email", "shared_busy"), ("email", "shared_busy_failure"), ("email", "shared_busy_empty"), ("email", "shared_busy_cancel")] + [(mode, case) for mode in ("email", "whatsapp") for case in ("late_terminal", "late_inflight", "late_empty", "late_delivery")] + [("email", "shared_busy_late_terminal"), ("email", "shared_busy_late_inflight")])
 def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeypatch, mode, scenario):
     is_busy = scenario.startswith("shared_busy")
     is_late = "late_" in scenario
@@ -72,7 +72,10 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             from PIL import Image
             Image.new("RGB", (2, 2)).save(picture)
         if scenario == "preadmission":
-            monkeypatch.setattr(InkboxAdapter, "validate_native_metadata", lambda self, event: False)
+            from inkbox_plugin import native_envelope
+            monkeypatch.setattr(native_envelope, "bind_execution", lambda *args: (_ for _ in ()).throw(RuntimeError("Synthetic refusal")))
+        delivery_started = asyncio.Event()
+        delivery_release = asyncio.Event()
         started = asyncio.Event()
         release = threading.Event()
         inflight_release = threading.Event()
@@ -86,6 +89,10 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                     return receipt
                 if is_busy:
                     release.set()
+                if scenario == "late_delivery":
+                    await asyncio.wait_for(delivery_started.wait(), 5)
+                    asyncio.get_running_loop().call_later(.1, delivery_release.set)
+                    return receipt
                 if scenario.endswith("inflight"):
                     for _ in range(500):
                         if any(item.message_id == target for item in executed):
@@ -102,6 +109,10 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             monkeypatch.setattr(authority, "admit_native", delayed_receipt)
         async def send(chat_id, content, reply_to=None, metadata=None, **kwargs):
             sent.append((chat_id, content, reply_route.get()))
+            if scenario == "late_delivery":
+                delivery_started.set()
+                await asyncio.wait_for(delivery_release.wait(), 5)
+                assert completions == [], "Receipt-only return cannot complete an in-flight delivery"
             if scenario.startswith("recovered"):
                 assert adapter._conversation_state().row(chat_id)["quiet"]
             busy_delivery = is_busy and (reply_route.get() or {}).get("message_id") == "next-event"
@@ -146,10 +157,10 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             if scenario == "producer_unicode":
                 assert reply_route.get()["raw_text"] == "😀" * 4000
                 assert "😀" * 4000 in event.text
-                assert len(json.dumps(event.metadata, ensure_ascii=False).encode()) < 1024
+                assert event._inkbox_producer_execution is True
             if scenario == "long_email":
                 assert event.text == "Long email body. " * 10000
-                assert len(json.dumps(event.metadata).encode()) < 1024
+                assert event._inkbox_producer_execution is True
             if scenario == "remote_media":
                 assert event.media_urls == []
                 assert event.text.endswith("[The user sent an attachment (image/png) that could not be retrieved.]")
@@ -162,7 +173,8 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 interrupt=lambda *args, **kwargs: release.set())
             state.turn.agent = agent
             if not scenario.startswith("recovered") and not is_late and not (is_busy and event.message_id == "next-event"):
-                assert adapter._active_sessions[session_key]._inkbox_event is event
+                assert event._inkbox_producer_execution is True
+                assert session_key not in adapter._active_sessions
             context = TurnContext(source=source, session_key=session_key,
                 session_id=runner.session_store.get_or_create_session(source).session_id,
                 run_generation=run_generation, inbound_message_id=event.message_id, agent_holder=[agent])
@@ -219,28 +231,16 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             elif queue:
                 await queue.accept(original)
             elif scenario.startswith("recovered"):
-                from inkbox_plugin.native_envelope import stamp
-                from gateway.session_ingress_context import native_callback
-                from hermes_constants import get_hermes_home
-                adapter._conversation_state().quiet(source.chat_id, "earlier-event", "Earlier context")
+                from hermes_state_runtime import get_session_admission
+                adapter._conversation_state().quiet(source.chat_id, "quiet-event", "Earlier context")
                 assert adapter._prepare_conversation_event(original)
-                stamp(adapter, original)
                 schedule = authority._schedule
+                monkeypatch.setattr(authority, "_schedule", lambda ref: None)
+                await adapter.handle_message(original)
+                record = adapter._conversation_state().row(source.chat_id)["native_admissions"][original.message_id]
+                receipt = authority._receipt(get_session_admission(authority.db, admission_id=record["receipt"]["id"]))
+                authority.producer_turns.clear()  # Simulate lost process-local producer bracket.
                 if scenario == "recovered_later_guard":
-                    monkeypatch.setattr(authority, "_schedule", lambda ref: None)
-                with native_callback(runner, original, get_hermes_home()):
-                    receipt = await authority.admit_native(original)
-                if scenario == "recovered_later_guard":
-                    # The real authority releases a messaging waiter but leaves
-                    # its durable admission queued, then another event owns the guard.
-                    from hermes_state_runtime import RuntimeStoreError, get_session_admission
-                    waiter = asyncio.get_running_loop().create_future()
-                    authority.waiters[receipt.admission_id] = waiter
-                    authority.native_waiters.add(receipt.admission_id)
-                    authority._pause(receipt.ref, "session_busy")
-                    with pytest.raises(RuntimeStoreError):
-                        await waiter
-                    assert get_session_admission(authority.db, admission_id=receipt.admission_id)["status"] == "queued"
                     later_event = copy.deepcopy(original)
                     later_event.message_id = "later-event"
                     later_event.metadata = {"inkbox_prepared": True, "inkbox_reply_route": {
@@ -249,8 +249,8 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                     adapter._active_sessions[adapter._event_session_key(original)] = guard
                     await adapter.on_processing_start(later_event)
                     assert guard._inkbox_event is later_event
-                    monkeypatch.setattr(authority, "_schedule", schedule)
-                    schedule(receipt.ref)
+                monkeypatch.setattr(authority, "_schedule", schedule)
+                schedule(receipt.ref)
             else:
                 task = await adapter._enqueue(original)
                 if scenario != "group_interrupt" and not is_busy:
@@ -265,7 +265,7 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                         "id": "next-message", "from_address": "sender@example.test", "body_text": "Next question"}}})
                 followup = await adapter._enqueue(incoming)
                 await asyncio.wait_for(followup, 3)
-                assert shared_busy_calls == ["next-event"]
+                assert shared_busy_calls == []  # Producer FIFO owns both receipts, not Base busy delivery.
                 if not is_late:
                     assert journal.row(source.chat_id)["quiet"][0]["turn"] == "next-event"
                 release.set()
@@ -307,7 +307,7 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 control.metadata["inkbox_reply_route"].update(message_id="stop-event", raw_text="/stop")
                 await queue.accept(control)
             for _ in range(500):
-                if (sent or scenario in {"stop", "preworker", "preadmission", "late_empty"}) and not adapter._session_tasks and (queue is None or not queue.tasks):
+                if (not is_late or completions) and (sent or scenario in {"stop", "preworker", "preadmission", "late_empty"}) and not adapter._session_tasks and (queue is None or not queue.tasks):
                     break
                 await asyncio.sleep(.01)
             if scenario == "preadmission":

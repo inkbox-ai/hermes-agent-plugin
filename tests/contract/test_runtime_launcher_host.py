@@ -1,9 +1,9 @@
 """Exercise arbitrary CI scripts through the real host's isolated bootstrap."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +28,15 @@ def _installation(tmp_path):
     return runtime, root, launcher
 
 
+def _external_install_env(runtime):
+    # The disposable installation uses this test venv as its external interpreter
+    # owner. An outer PM harness's store override belongs to that other install;
+    # inheriting it would select bare store Python with no committed generation.
+    env = {**os.environ, 'HERMES_HOME': str(runtime)}
+    env.pop('HERMES_RUNTIME_DIR', None)
+    return env
+
+
 def test_native_launcher_exec_preserves_pid_argv_and_dependencies(tmp_path):
     runtime, _, _ = _installation(tmp_path)
     script = tmp_path / 'script with spaces.py'
@@ -36,7 +45,7 @@ def test_native_launcher_exec_preserves_pid_argv_and_dependencies(tmp_path):
                       '"isolated":sys.flags.isolated, "bootstrap":"hermes_bootstrap" in sys.modules}))\n')
     child = subprocess.Popen(
         [sys.executable, str(ROOT / 'tests/ci/hermes_python.py'), str(script), 'literal $(not shell)'],
-        env={**os.environ, 'HERMES_HOME': str(runtime)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=_external_install_env(runtime), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     stdout, stderr = child.communicate(timeout=30)
     assert child.returncode == 0, stderr
@@ -55,7 +64,7 @@ def test_foreign_published_launcher_fails_before_script(tmp_path):
     script.write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
     result = subprocess.run(
         [sys.executable, str(ROOT / 'tests/ci/hermes_python.py'), str(script)],
-        env={**os.environ, 'HERMES_HOME': str(runtime)}, capture_output=True, text=True, timeout=30,
+        env=_external_install_env(runtime), capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode != 0
     assert 'published Hermes launcher does not match its installation' in result.stderr

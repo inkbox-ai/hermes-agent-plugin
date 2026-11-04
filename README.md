@@ -678,6 +678,11 @@ Set **only `INKBOX_HERMES_VAULT_KEY` for this plugin** through the host's local 
 
 ### Durable recovery
 
+On current official Hermes, the plugin uses native producer admission: Hermes still owns authorization, profile routing, FIFO execution, and delivery. Private channel context stays in identity-scoped plugin checkpoints rather than unsupported native envelope metadata. Replayed inputs must match the saved source, identity, timestamp, media content, and claimed execution generation before the model runs.
+
+A narrow per-runner handler bridge restores that context for Inkbox executions, including recovered admissions whose process-local producer callbacks no longer exist. It forwards other adapters unchanged and is removed when its last Inkbox adapter disconnects. This bridge depends on Hermes internal execution interfaces, not a promised stable public API; contract CI exercises the unmodified official main branch. No Hermes fork or core patch is required. Hosts without native producer admission retain their existing adapter path.
+
+
 Private identity-scoped native and Companion checkpoints retain receipts, original routes, completed answers, deliveries, and uncertain outcomes. Keep existing state when upgrading or disabling a feature; do not delete journals to force replay. Proven pre-admission failures and checkpointed answers are recoverable without rerunning the model. Unknown tool/send outcomes are never blindly retried, and callbacks do not schedule duplicate delivery.
 
 A superseding instruction denies unresolved permission requests without clearing remembered approvals or unrelated configuration. Conflicting successors are released only after the exact old native worker generation and its processes have settled. Current Hermes worker-finalizer ownership markers provide that proof for running turns. A completed native worker’s exact source/generation proof is checkpointed before delivery, allowing later work to proceed after an ambiguous send without retrying that send, including after restart. A legacy/restarted turn without conclusive native ownership remains quarantined with an actionable checkpoint error. A released session guard, fresh session, or canceled asyncio task alone is not proof of worker exit.
