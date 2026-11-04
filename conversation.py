@@ -141,7 +141,9 @@ class ConversationState:
         if message_id in row["routes"] and message_id not in completed:
             completed.append(message_id)
         while len(completed) > COMPLETED_ROUTE_LIMIT:
-            row["routes"].pop(completed.pop(0), None)
+            expired = completed.pop(0)
+            row["routes"].pop(expired, None)
+            row.get("native_admissions", {}).pop(expired, None)
         self.save(key)
 
     def release(self, key: str, message_id: str) -> None:

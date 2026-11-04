@@ -2151,6 +2151,14 @@ class InkboxAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 4096  # email/voice are unbounded; SMS chunked separately in send()
 
+    def validate_native_metadata(self, event: MessageEvent) -> bool:
+        from .native_envelope import validate
+        return validate(self, event)
+
+    def native_execution_scope(self, event: MessageEvent):
+        from .native_envelope import execution_scope
+        return execution_scope(self, event)
+
     def max_message_length_for_chat(self, chat_id: str) -> int:
         route = reply_route.get() or {}
         if route.get("chat_id") == str(chat_id) and route.get("mode") == "slack":
@@ -2164,15 +2172,26 @@ class InkboxAdapter(BasePlatformAdapter):
     async def _send_final_text(self, event, *args, **kwargs):
         # Only the host's final-delivery boundary can bypass narration filters;
         # externally supplied notify metadata is not equivalent authority.
+        from .native_envelope import delivery_scope
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
-            return await super()._send_final_text(event, *args, **kwargs)
+            with delivery_scope(self, event):
+                return await super()._send_final_text(event, *args, **kwargs)
         finally:
             _host_final_reply.reset(token)
 
+    async def _deliver_attachments(self, event, *args, **kwargs):
+        from .native_envelope import delivery_scope
+        with delivery_scope(self, event):
+            return await super()._deliver_attachments(event, *args, **kwargs)
+
     async def _extract_response_content(self, response, event, session_key, **kwargs):
-        extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
+        from .native_envelope import delivery_scope
         native = getattr(self, "_native_turns", None)
+        with delivery_scope(self, event):
+            if native and getattr(event, "_native_execution_lifecycle", False):
+                native.capture_result(event, response)
+            extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
         if native:
             native.capture_rendered(event, extracted)
         return extracted
@@ -5758,9 +5777,12 @@ class InkboxAdapter(BasePlatformAdapter):
         event_key = getattr(self, "_event_session_key", None)
         if getattr(self, "_active_sessions", None) and callable(event_key):
             guard = self._active_sessions.get(event_key(event))
-            if guard is not None:
+            processing_owner = getattr(event, "_inkbox_processing_owner", None)
+            if (guard is not None and not getattr(event, "_inkbox_recovered_delivery", False)
+                    and (processing_owner is None or getattr(guard, "_inkbox_event", None) is processing_owner())):
                 guard._inkbox_event = event
-        route = (event.metadata or {}).get("inkbox_reply_route")
+        from .native_envelope import route_for
+        route = route_for(self, event)
         # Native queue drains inherit the finishing task's ContextVars. An
         # unrouted voice/hosted turn must not inherit a previous text target.
         reply_route.set(route)
@@ -5832,7 +5854,11 @@ class InkboxAdapter(BasePlatformAdapter):
         event: MessageEvent,
         outcome: Any,
     ) -> None:
-        if (event.metadata or {}).get("inkbox_reply_route"):
+        from .native_envelope import route_for
+        actual = getattr(event, "_inkbox_execution_event", getattr(event, "_native_execution_event", event))
+        if getattr(actual, "_inkbox_execution_failed", False):
+            outcome = "failure"
+        if route_for(self, event):
             journal = self._conversation_state()
             if str(getattr(outcome, "value", outcome)).lower() == "success":
                 journal.complete(str(event.source.chat_id), str(event.message_id))
@@ -5840,7 +5866,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 journal.release(str(event.source.chat_id), str(event.message_id))
         if getattr(self, "_companion", None) is not None and self._companion.processing(event, outcome):
             return
-        if getattr(self, "_native_turns", None) is not None and self._native_turns.processing(event, outcome):
+        if getattr(self, "_native_turns", None) is not None and self._native_turns.processing(actual, outcome):
             return
         chat_id = str(event.source.chat_id)
         hosted = self._hosted_call_processing_data(event)
@@ -9650,9 +9676,14 @@ class InkboxAdapter(BasePlatformAdapter):
             if callable(peek):
                 key = self._conversation_session_key(event.source)
                 previous = peek(key)
+            from .native_envelope import stamp
+            original_metadata = event.metadata
+            projected = stamp(self, event)
             try:
                 response = await handler(event)
             finally:
+                if projected:
+                    event.metadata = original_metadata
                 # Observe the host's actual local session rotation, never a
                 # response string or a command before authorization. Inline
                 # controls do not emit the normal processing-complete hook.
@@ -9660,12 +9691,17 @@ class InkboxAdapter(BasePlatformAdapter):
                     current = peek(key)
                     if current and current != previous:
                         self._conversation_state().reset_context(str(event.source.chat_id))
-            if (event.metadata or {}).get("inkbox_interrupted"):
+            actual = getattr(event, "_inkbox_execution_event", getattr(event, "_native_execution_event", event))
+            if projected:
+                from .native_envelope import require_completed_worker
+                if not require_completed_worker(self, actual):
+                    return None
+            if (actual.metadata or {}).get("inkbox_interrupted"):
                 return None
             if getattr(self, "_companion", None):
                 self._companion.capture_result(event, response)
-            if getattr(self, "_native_turns", None):
-                self._native_turns.capture_result(event, response)
+            if getattr(self, "_native_turns", None) and not getattr(actual, "_inkbox_execution_failed", False):
+                self._native_turns.capture_result(actual, response)
             return response
         if getattr(handler, "__self__", None) is not None:
             checkpointed.__self__ = handler.__self__
@@ -9844,8 +9880,9 @@ class InkboxAdapter(BasePlatformAdapter):
             meta = getattr(item, "metadata", None) or {}
             raw = getattr(item, "raw_message", None)
             return (not getattr(item, "internal", False) and meta.get("inkbox_prepared") and
-                    not meta.get("inkbox_control") and isinstance(raw, dict) and
-                    raw.get("event_type") in {"text.received", "imessage.received", "message.received", "imessage.reaction_received"})
+                    not meta.get("inkbox_control") and
+                    (meta.get("inkbox_event_type") or (raw.get("event_type") if isinstance(raw, dict) else None))
+                    in {"text.received", "imessage.received", "message.received", "imessage.reaction_received"})
 
         if (active is event or not ordinary(event) or not ordinary(active) or not callable(getattr(agent, "interrupt", None)) or
                 getattr(guard, "_inkbox_event", None) is not active or key not in self._session_tasks):
