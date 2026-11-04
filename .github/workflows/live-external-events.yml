@@ -49,16 +49,20 @@ jobs:
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
-      - name: Check out Hermes main
+      - name: Check out native admission candidate
         uses: actions/checkout@v7
         with:
-          repository: NousResearch/hermes-agent
+          repository: dimavrem22/hermes-agent
+          ref: c6df0ce48cc1f8e9cef815d7f177f9f63fd61b5e
           path: .hermes/hermes-agent
           fetch-depth: 1
 
       - name: Install Hermes (non-interactive)
+        env:
+          HERMES_REPO_URL: https://github.com/dimavrem22/hermes-agent.git
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
+          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser --branch fix/native-admission-context --commit c6df0ce48cc1f8e9cef815d7f177f9f63fd61b5e
+          test "$(git -C "$HERMES_HOME/hermes-agent" rev-parse HEAD)" = "c6df0ce48cc1f8e9cef815d7f177f9f63fd61b5e"
           echo "$HERMES_HOME/hermes-agent/.hermes/bin" >> "$GITHUB_PATH"
 
       - name: Install plugin into the gateway

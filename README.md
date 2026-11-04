@@ -752,3 +752,14 @@ local allowlist:
 ```bash
 INKBOX_ALLOW_ALL_USERS=true
 ```
+
+
+### Native admission compatibility candidate
+
+The native admission changes in [the upstream proposal](https://github.com/NousResearch/hermes-agent/pull/149019)
+are not yet part of the default host release. For this compatibility branch, native-install,
+canary, and live integration checks pair with `dimavrem22/hermes-agent` at `c6df0ce48cc1f8e9cef815d7f177f9f63fd61b5e`.
+The normal `contract-pr` job continues to test upstream main, and offline tests retain
+coverage of the existing host path. This pairing affects CI only; installing the plugin
+does not change or update the user's host. Companion and post-call paths are not covered
+by this candidate's restored-message contract.

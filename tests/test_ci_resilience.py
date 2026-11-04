@@ -29,7 +29,8 @@ def test_every_live_workflow_uses_retrying_installer():
 def test_host_contract_workflows_use_authenticated_checkout():
     for name in ("canary.yml", "tests.yml"):
         workflow = ROOT.joinpath(".github", "workflows", name).read_text()
-        assert "repository: NousResearch/hermes-agent" in workflow
+        assert ("repository: dimavrem22/hermes-agent" if name == "canary.yml" else
+                "repository: NousResearch/hermes-agent") in workflow
         assert "path: .upstream-hermes" in workflow
         # Upstream PM must apply its authoritative lock overrides. An editable
         # raw-pip install bypasses them and can reject the supported host graph.
@@ -59,7 +60,7 @@ def test_live_workflows_precheckout_the_host_and_keep_bounded_install_retries():
         "live-voice.yml",
     ):
         workflow = ROOT.joinpath(".github", "workflows", name).read_text()
-        assert "repository: NousResearch/hermes-agent" in workflow
+        assert "repository: dimavrem22/hermes-agent" in workflow
         assert "path: .hermes/hermes-agent" in workflow
         assert "fetch-depth: 1" in workflow
 
@@ -179,13 +180,16 @@ def test_live_installer_arguments_match_current_host_cli(tmp_path, workflow_name
 cat > "$RUNNER_TEMP/hermes-install.sh" <<'INSTALL'
 #!/bin/bash
 set -eu
-for argument in "$@"; do
-  case "$argument" in
-    --non-interactive|--skip-browser) ;;
-    *) echo "unknown option: $argument" >&2; exit 1 ;;
+original=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --non-interactive|--skip-browser) shift ;;
+    --branch) [ "$2" = fix/native-admission-context ]; shift 2 ;;
+    --commit) [[ "$2" =~ ^[0-9a-f]{40}$ ]]; shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
-printf '%s\\n' "$@" > "$RUNNER_TEMP/accepted-arguments"
+printf '%s\\n' "${original[@]}" > "$RUNNER_TEMP/accepted-arguments"
 INSTALL
 ''')
     curl.chmod(0o755)
@@ -197,5 +201,25 @@ INSTALL
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "accepted-arguments").read_text().splitlines() == [
-        "--non-interactive", "--skip-browser",
+        "--non-interactive", *arguments,
     ]
+
+
+def test_candidate_host_is_immutable_and_main_compatibility_lane_remains():
+    import re
+    refs = []
+    for name in ("canary.yml", "tests.yml", "live-a2a.yml", "live-channels.yml",
+                 "live-external-events.yml", "live-voice.yml"):
+        workflow = ROOT.joinpath(".github", "workflows", name).read_text()
+        pins = re.findall(r"repository: dimavrem22/hermes-agent\n\s+ref: ([0-9a-f]{40})", workflow)
+        assert len(pins) == 1
+        refs.extend(pins)
+        if name != "canary.yml":
+            assert f"--branch fix/native-admission-context --commit {pins[0]}" in workflow
+            assert "HERMES_REPO_URL: https://github.com/dimavrem22/hermes-agent.git" in workflow
+            assert f'rev-parse HEAD)" = "{pins[0]}"' in workflow
+    assert len(set(refs)) == 1
+    workflow = ROOT.joinpath(".github", "workflows", "tests.yml").read_text()
+    contract = workflow.split("  contract-pr:", 1)[1].split("  sdk-compatibility:", 1)[0]
+    assert "repository: NousResearch/hermes-agent" in contract
+    assert "ref:" not in contract

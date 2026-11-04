@@ -1,8 +1,7 @@
-name: Canary — plugin vs Hermes main
+name: Canary — native admission candidate
 
-# Hermes main moves ~14 commits/day, so it can break us even when we don't push.
-# This reusable check runs the host-interface contract tests against the latest
-# host revision before full-stack suites.
+# This candidate lane validates the paired native admission interface before
+# full-stack suites. The PR contract lane continues to track upstream main.
 on:
   workflow_call:
   workflow_dispatch: {}
@@ -22,10 +21,11 @@ jobs:
         with:
           version: "latest"
 
-      - name: Check out Hermes main
+      - name: Check out native admission candidate
         uses: actions/checkout@v7
         with:
-          repository: NousResearch/hermes-agent
+          repository: dimavrem22/hermes-agent
+          ref: c6df0ce48cc1f8e9cef815d7f177f9f63fd61b5e
           path: .upstream-hermes
           fetch-depth: 1
 
@@ -38,14 +38,14 @@ jobs:
           cache-python: 'false'
           cache-node: 'false'
 
-      - name: Build test deps with the real Hermes main lock
+      - name: Build test deps with the candidate host lock
         run: |
           WHEEL="$(bash tests/ci/candidate_sdk.sh)"
           "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
             --host "$GITHUB_WORKSPACE/.upstream-hermes" --wheel "$WHEEL" \
             --out "$GITHUB_WORKSPACE/.venv"
 
-      - name: Complete offline suite vs real Hermes main
+      - name: Complete offline suite vs native admission candidate
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
