@@ -253,4 +253,3 @@ def delivery_scope(adapter, event):
         yield
     finally:
         reply_route.reset(token)
-
