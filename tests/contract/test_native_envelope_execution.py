@@ -317,7 +317,10 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 assert not saved.get("worker_completion")
                 assert "inkbox_reply_route" in original.metadata
                 return
-            assert len(executed) == (2 if scenario == "group_interrupt" else 1), queue.rows if queue else sent
+            assert len(executed) == (2 if scenario == "group_interrupt" else 1), (queue.rows if queue else {
+                "sent": sent, "accepted": getattr(original, "_gateway_accepted", None),
+                "handler_tasks": len(adapter._session_tasks), "authority_sessions": str(authority.sessions),
+                "source": original.source.to_dict(), "metadata": original.metadata})
             actual = executed[0]
             assert actual is not original and actual.raw_message is None
             if queue is None and not scenario.startswith("recovered") and not is_late:
@@ -391,6 +394,86 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             inflight_release.set()
             if queue:
                 await queue.close()
+            from gateway.session_runtime_workers import mutation_tasks
+            await asyncio.gather(*mutation_tasks(authority))
+            authority.db.close()
+    asyncio.run(run())
+
+
+def test_internal_a2a_uses_original_event_with_active_authority(tmp_path, monkeypatch):
+    """Task callbacks retain their existing producer path, not native text replay."""
+    async def run():
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "true")
+        platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter,
+            check_fn=lambda: True, allowed_users_env="INKBOX_ALLOWED_USERS", allow_all_env="INKBOX_ALLOW_ALL_USERS"))
+        adapter = InkboxAdapter(PlatformConfig(enabled=True, typing_indicator=False,
+            extra={"identity": "sample-agent", "require_signature": False}))
+        adapter._base_url = "https://example.test"
+        adapter._identity_id = "00000000-0000-0000-0000-000000000001"
+        adapter._a2a_progress_interval_seconds = 0
+        runner = GatewayRunner(GatewayConfig())
+        runner.adapters = {adapter.platform: adapter}
+        authority = await initialize_session_authority(runner, profile_id="default", instance_id="sample-instance")
+        runner._wire_adapter_handlers(adapter)
+        adapter.gateway_runner = runner
+        replies, executed = [], []
+        task = NS(id="sample-task", context_id="sample-context", state="submitted",
+            caller=NS(identity_id="sample-caller", organization_id="sample-org", handle="sample-caller"),
+            messages=[NS(role="ROLE_CALLER", message_id="sample-message", parts=[{"text": "Synthetic question"}])])
+        class Identity:
+            def a2a_task(self, task_id):
+                assert task_id == task.id
+                return task
+
+            def a2a_reply(self, task_id, **kwargs):
+                assert task_id == task.id
+                replies.append(kwargs)
+                task.state = "working" if kwargs.get("intent") == "progress" else "completed"
+                task.messages.append(NS(role="ROLE_AGENT", parts=[{"text": kwargs["text"]}]))
+        adapter._inkbox = NS(get_identity=lambda handle: Identity())
+        from inkbox_plugin import tools as plugin_tools
+        monkeypatch.setattr(plugin_tools, "_client_and_identity", lambda: (None, None, Identity()))
+        observe_native_workers(runner)
+        async def model_turn(event, source, session_key, run_generation):
+            from inkbox_plugin.a2a_context import activate_next_a2a_turn_context
+            executed.append(event)
+            assert event.internal and event.raw_message["event_type"] == "a2a.task.created"
+            assert not getattr(event, "_native_execution_lifecycle", False)
+            session_id = runner.session_store.get_or_create_session(source).session_id
+            context = activate_next_a2a_turn_context(session_id)
+            assert context["task_id"] == task.id and context["message_id"] == "sample-message"
+            state = runner._session_state(session_key)
+            agent = NS(_gateway_turn_process_task_id="sample-worker", _gateway_turn_process_baseline=frozenset(),
+                interrupt=lambda *args, **kwargs: None)
+            state.turn.event, state.turn.agent = event, agent
+            turn = TurnContext(source=source, session_key=session_key, session_id=session_id,
+                run_generation=run_generation, inbound_message_id=event.message_id, agent_holder=[agent])
+            def model():
+                result = json.loads(plugin_tools.inkbox_a2a_complete({"text": "Synthetic answer"}, task_id=session_id))
+                assert result.get("ok") is True, result
+                return "Synthetic answer"
+            worker = runner._run_agent_start_turn_worker(turn, model)
+            return await asyncio.shield(worker.executor_task)
+        monkeypatch.setattr(runner, "_handle_message_with_agent", model_turn)
+        envelope = {"id": "sample-envelope", "event_type": "a2a.task.created", "data": {
+            "task_id": task.id, "context_id": task.context_id, "state": "submitted",
+            "caller": {"identity_id": "sample-caller", "organization_id": "sample-org", "handle": "sample-caller"},
+            "message_id": "sample-message", "parts": [{"text": "Synthetic question"}]}}
+        try:
+            response = await adapter._on_a2a_event(envelope)
+            assert response.status == 200
+            for _ in range(500):
+                if executed and not adapter._background_tasks and not adapter._session_tasks:
+                    break
+                await asyncio.sleep(.01)
+            assert len(executed) == 1
+            assert any(item.get("text") == "Synthetic answer" for item in replies), replies
+            assert adapter._read_a2a_registry()["sample-task:sample-message"]["state"] == "finalized"
+            assert (await adapter._on_a2a_event(envelope)).text == "stopped"
+            assert len(executed) == 1
+        finally:
+            await adapter._stop_a2a_progress_updates(task.id)
             from gateway.session_runtime_workers import mutation_tasks
             await asyncio.gather(*mutation_tasks(authority))
             authority.db.close()

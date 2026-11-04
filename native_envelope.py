@@ -237,7 +237,7 @@ async def execution_scope(adapter, event):
 @contextmanager
 def delivery_scope(adapter, event):
     """Recovered delivery has no original adapter task's ambient route context."""
-    binding = (event.metadata or {}).get(_BINDING)
+    binding = (getattr(event, "metadata", None) or {}).get(_BINDING)
     if binding is None:
         yield
         return
