@@ -477,10 +477,10 @@ class NativeTurns(CompanionReceiver):
     def _stopped_worker_exited(self, row, turn, event):
         # Bound to the original event before host dispatch, not reconstructed
         # from a source ID or the (possibly removed/replaced) session slot.
+        from .native_envelope import native_refs
         if (self.closed or self.rows.get(row["key"]) is not row or turn["state"] != "cancelled"
-                or str(event.message_id) != turn["id"] or not isinstance(event.raw_message, dict)
-                or event.raw_message.get("_inkbox_native_key") != row["key"]
-                or event.raw_message.get("_inkbox_native_turn") != turn["id"]):
+                or str(event.message_id) != turn["id"]
+                or native_refs(event) != (row["key"], turn["id"])):
             return
         from .host_fencing import stopped_worker_proof
         proof = stopped_worker_proof(self._host_owner(), event)
@@ -537,12 +537,12 @@ class NativeTurns(CompanionReceiver):
         return self._clear_fenced_block(row)
 
     def _owned(self, event):
-        raw = event.raw_message
-        if not isinstance(raw, dict) or "_inkbox_native_key" not in raw:
-            return None
-        row = self.rows.get(raw["_inkbox_native_key"])
+        from .native_envelope import native_refs
+        key, turn_id = native_refs(event)
+        row = self.rows.get(key)
         turn = self.active.get(str(event.source.chat_id))
-        if not row or not turn or turn["id"] != event.message_id or raw.get("_inkbox_native_turn") != turn["id"]:
+        if (not row or not turn or turn["id"] != event.message_id or turn_id != turn["id"]
+                or not any(item is turn for item in row["turns"])):
             return None
         return row, turn
 
@@ -578,6 +578,10 @@ class NativeTurns(CompanionReceiver):
                         self._save(row)
                     bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "whatsapp_send_attempts": copy.deepcopy(turn.get("whatsapp_send_attempts", {})), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
         else:
+            from .host_fencing import completed_worker_proof
+            proof = completed_worker_proof(self._host_owner(), event)
+            if proof is not None:
+                turn["worker_completion"] = proof
             success = str(getattr(outcome, "value", outcome)).lower() == "success"
             if (turn.get("preflight_failure") and turn.get("answer") is not None
                     and turn["state"] not in {"cancelled", "quarantined", "uncertain", "sending"}):
