@@ -530,6 +530,7 @@ after that built-in guidance; no extra configuration is required to enable it.
 Hermes direct tools:
 
 - `inkbox_whoami`
+- `inkbox_refresh_capabilities`
 - `inkbox_send_email`
 - `inkbox_list_emails`
 - `inkbox_get_email`
@@ -642,6 +643,21 @@ These features use the existing Hermes platform, session store, authorization, a
 
 The SDK floor is **0.7.27**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
+### Capability visibility and refresh
+
+| Capability | Send or secret-access tools | History, recovery, and discovery |
+|---|---|---|
+| SMS | Active number with SMS ready | Text reads remain available while that number exists, including during sending restrictions |
+| Slack | Local Slack opt-in and a connected workspace | Retained connections keep history/recovery; connection listing stays available when Slack is opted in |
+| WhatsApp | Configured and enabled channel | Configured channels keep history/recovery; readiness lookup stays available |
+| Vault | Existing Vault and a locally configured `INKBOX_HERMES_VAULT_KEY` | Metadata listing stays available without unlocking |
+
+Discovery uses one shared 60-second cache, separated by profile, API key, API origin, identity, and Slack configuration. Failed remote checks are reported as unknown and do not remove potentially usable tools; known missing prerequisites still hide their dependent tools. Invocation always rechecks access through the API. No secret payloads are read or decrypted during discovery. Hermes also caches tool definitions, so use explicit refresh to update an existing catalog after capabilities change.
+
+After connecting or disconnecting a channel, run **`/inkbox refresh` in the active chat** to update the profile's open sessions, or call **`inkbox_refresh_capabilities`** to update only the calling session. Both bypass the discovery cache and use Hermes's native tool-refresh helpers without restarting the gateway. Existing toolset restrictions still apply. Results count the sessions actually refreshed and report partial failures; a missing live session is reported instead of claiming another process was refreshed.
+
+For a newly configured Vault key, first reload the host environment locally, then refresh capabilities. Never pass the key in chat or as a refresh-tool argument. Configuration changes to the channel transport itself still follow the setup wizard's guidance.
+
 ### Slack setup and replies
 
 Run `hermes inkbox setup` and choose Slack. The wizard can reuse saved workspaces, provision a connection using the appropriate claimed identity/admin credential, print its installation link, and wait for completion. Waiting is bounded and cancellable; skipping does not replace existing connections. Restart the gateway after changing configuration. `hermes inkbox doctor` provides read-only readiness checks.
@@ -664,7 +680,7 @@ Task streaming is detected automatically through the connection's capabilities a
 
 ### Dedicated WhatsApp
 
-WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. The 15 WhatsApp tools are exposed only when the configured identity reports `whatsapp_configured=true`, including when sending is temporarily unavailable so history and recovery remain usable. The shared availability lookup is cached for 60 seconds, refreshes when credentials or identity change, and hides the tools if the lookup fails. `inkbox_get_whatsapp_status` reads current readiness without sending a message. No extra local feature flag is required.
+WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. `inkbox_get_whatsapp_status` remains available for readiness checks. Sending, uploads, and reactions require an enabled channel; history and recovery remain available for configured channels during sending restrictions. No extra local feature flag is required.
 
 Signed direct messages enter the existing Hermes session and authorization flow, with a durable channel/conversation/author boundary for approvals, Stop, and text bursts. Permissions, approvals and Stop remain scoped to the actual sender. New final replies, media deliveries, and same-conversation tool sends are plain messages by default. Quote selectively with an explicit `reply_to_message_id` when referring to an older message, distinguishing multiple requests, or identifying a specific attachment. Omitting a tool destination selects the active conversation. Explicit destinations remain authoritative, and an authorized quote target can be selected explicitly. Caller-supplied recovery keys retain the supplied request instead of acquiring a new quote. Rejected or uncertain sends are never replaced by automatic plain messages. Existing durable replies keep their original payload. Native voice calls, remote read receipts, typing, and Companion activation are not exposed. Delivery updates do not wake the model or resend an answer. A confirmed send with unknown delivery is not a failed send.
 

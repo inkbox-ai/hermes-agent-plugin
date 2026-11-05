@@ -140,6 +140,7 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     tool_names = {args[0] for args, _kwargs in ctx.tools}
     base_tools = {
         "inkbox_whoami",
+        "inkbox_refresh_capabilities",
         "inkbox_list_vault_secrets",
         "inkbox_get_vault_secret",
         "inkbox_get_totp_code",

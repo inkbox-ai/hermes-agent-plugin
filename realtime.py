@@ -255,7 +255,8 @@ MAIN_AGENT_CAPABILITIES: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("calls", "place a separate outbound phone call, read call history and transcripts, or request hangup",
      ("inkbox_place_call", "inkbox_list_calls", "inkbox_get_call", "inkbox_get_call_transcripts", "inkbox_hangup_call")),
     ("message_recovery", "look up an uncertain message send without sending it again", ("inkbox_lookup_message_send",)),
-    ("identity", "check its own Inkbox identity and numbers", ("inkbox_whoami",)),
+    ("identity", "check its own Inkbox identity and numbers and refresh available communication tools",
+     ("inkbox_whoami", "inkbox_refresh_capabilities")),
     (
         "a2a",
         "delegate work to other agents, follow up on those tasks, complete "

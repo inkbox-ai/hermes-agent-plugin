@@ -251,27 +251,31 @@ def test_attachment_download_uses_only_sdk_url_and_cleans_up_oversize(sdk, monke
 
 
 def test_whatsapp_visibility_is_cached_by_identity_and_refreshes(monkeypatch):
-    from inkbox_plugin import config
+    from inkbox_plugin import capabilities
     cfg = InkboxPluginConfig(api_key="synthetic", identity="first")
-    monkeypatch.setattr(config, "read_runtime_config", lambda: cfg)
+    monkeypatch.setattr(capabilities, "read_runtime_config", lambda: cfg)
+    monkeypatch.setattr(capabilities, "_CACHE_KEY", None)
     clock = [0]
-    monkeypatch.setattr(whatsapp_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(capabilities.time, "monotonic", lambda: clock[0])
     client = Mock()
-    client.get_identity.return_value = NS(whatsapp_configured=False)
+    client.get_identity.return_value = NS(phone_number=None, whatsapp_configured=False, whatsapp_enabled=False)
     factory = Mock()
-    factory.return_value.__enter__ = Mock(return_value=client)
-    factory.return_value.__exit__ = Mock(return_value=False)
-    monkeypatch.setattr("inkbox.Inkbox", factory)
-    registered = []
-    whatsapp_tools.register(NS(register_tool=lambda *args, **kwargs: registered.append(kwargs["check_fn"])), lambda: True)
+    factory.return_value = client
+    monkeypatch.setattr(capabilities, "_discovery_client", factory)
+    registered = {}
+    whatsapp_tools.register(NS(register_tool=lambda *args, **kwargs: registered.update({args[0]: kwargs["check_fn"]})), lambda: True)
     assert len(registered) == 15
-    assert not any(check() for check in registered)
+    assert registered["inkbox_get_whatsapp_status"]()
+    assert not registered["inkbox_send_whatsapp"]()
+    assert not registered["inkbox_get_whatsapp_message"]()
     assert client.get_identity.call_count == 1
-    client.get_identity.return_value = NS(whatsapp_configured=True, whatsapp_enabled=False)
+    client.get_identity.return_value = NS(phone_number=None, whatsapp_configured=True, whatsapp_enabled=False)
     clock[0] = 61
-    assert all(check() for check in registered)
+    assert registered["inkbox_get_whatsapp_message"]()
+    assert not registered["inkbox_send_whatsapp"]()
     assert client.get_identity.call_count == 2
     cfg.identity = "second"
     client.get_identity.side_effect = RuntimeError("unavailable")
-    assert not any(check() for check in registered)
+    assert registered["inkbox_send_whatsapp"]()
+    assert registered["inkbox_get_whatsapp_message"]()
     assert client.get_identity.call_count == 3

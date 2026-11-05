@@ -351,7 +351,7 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
     resource = slack_resource(client)
     identity = client.get_identity(identity_handle)
     if name == "inkbox_slack_download_file_preview":
-        validate_connection(resource, str(identity.id), args)
+        validate_connection(resource, str(identity.id), args, require_connected=False)
         return download_file_preview(resource, args["connection_id"], args["file_id"])
     if name == "inkbox_slack_list_connections":
         return resource.list_connections(identity.id)
@@ -362,7 +362,7 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
         if not any(str(item.id) == connection for item in owned):
             raise ValueError("Slack connection does not belong to this identity")
     if name in {"inkbox_slack_upload_file", "inkbox_slack_get_operation"}:
-        validate_connection(resource, str(identity.id), args)
+        validate_connection(resource, str(identity.id), args, require_connected=name == "inkbox_slack_upload_file")
         method = getattr(resource, name.removeprefix("inkbox_slack_"), None)
         if not callable(method):
             raise RuntimeError("Slack files require inkbox>=0.7.15,<1.0.0; upgrade the installed SDK")
@@ -378,11 +378,11 @@ def run_tool(client: Any, identity_handle: str, name: str, args: dict) -> Any:
     return getattr(resource, name.removeprefix("inkbox_slack_"))(**args)
 
 
-def validate_connection(resource: Any, identity_id: str, meta: dict) -> None:
+def validate_connection(resource: Any, identity_id: str, meta: dict, *, require_connected: bool = True) -> None:
     """Recheck current installation authority immediately before an effect."""
     connections = resource.list_connections(identity_id).connections
     matches = [connection for connection in connections if str(connection.id) == meta["connection_id"]]
     if (len(matches) != 1 or str(matches[0].identity_id) != str(identity_id)
-            or matches[0].status != "connected"
+            or require_connected and matches[0].status != "connected"
             or meta.get("workspace_id") and matches[0].workspace_id != meta["workspace_id"]):
         raise PermissionError("Slack connection is no longer active for the original identity/workspace")

@@ -2278,6 +2278,8 @@ A2A_GET_SENT_TASK_SCHEMA = {
 
 
 def register_tools(ctx) -> None:
+    from .capabilities import check, REFRESH_SCHEMA, refresh_tool
+    ctx.register_tool("inkbox_refresh_capabilities", "inkbox", REFRESH_SCHEMA, refresh_tool, check_fn=_configured)
     from .communication_tools import register as register_communications
     register_communications(ctx, _configured)
     from .whatsapp_tools import register as register_whatsapp
@@ -2292,13 +2294,13 @@ def register_tools(ctx) -> None:
     ctx.register_tool("inkbox_update_contact", "inkbox", UPDATE_CONTACT_SCHEMA, inkbox_update_contact, check_fn=_configured)
     ctx.register_tool("inkbox_delete_contact", "inkbox", DELETE_CONTACT_SCHEMA, inkbox_delete_contact, check_fn=_configured)
     ctx.register_tool("inkbox_send_email", "inkbox", SEND_EMAIL_SCHEMA, inkbox_send_email, check_fn=_configured)
-    ctx.register_tool("inkbox_send_sms", "inkbox", SEND_SMS_SCHEMA, inkbox_send_sms, check_fn=_configured)
-    ctx.register_tool("inkbox_list_text_conversations", "inkbox", LIST_TEXT_CONVERSATIONS_SCHEMA, inkbox_list_text_conversations, check_fn=_configured)
-    ctx.register_tool("inkbox_get_text_conversation", "inkbox", GET_TEXT_CONVERSATION_SCHEMA, inkbox_get_text_conversation, check_fn=_configured)
-    ctx.register_tool("inkbox_list_texts", "inkbox", LIST_TEXTS_SCHEMA, inkbox_list_texts, check_fn=_configured)
-    ctx.register_tool("inkbox_get_text", "inkbox", GET_TEXT_SCHEMA, inkbox_get_text, check_fn=_configured)
-    ctx.register_tool("inkbox_mark_text_read", "inkbox", MARK_TEXT_READ_SCHEMA, inkbox_mark_text_read, check_fn=_configured)
-    ctx.register_tool("inkbox_mark_text_conversation_read", "inkbox", MARK_TEXT_CONVERSATION_READ_SCHEMA, inkbox_mark_text_conversation_read, check_fn=_configured)
+    ctx.register_tool("inkbox_send_sms", "inkbox", SEND_SMS_SCHEMA, inkbox_send_sms, check_fn=check("inkbox_send_sms"))
+    ctx.register_tool("inkbox_list_text_conversations", "inkbox", LIST_TEXT_CONVERSATIONS_SCHEMA, inkbox_list_text_conversations, check_fn=check("inkbox_list_text_conversations"))
+    ctx.register_tool("inkbox_get_text_conversation", "inkbox", GET_TEXT_CONVERSATION_SCHEMA, inkbox_get_text_conversation, check_fn=check("inkbox_get_text_conversation"))
+    ctx.register_tool("inkbox_list_texts", "inkbox", LIST_TEXTS_SCHEMA, inkbox_list_texts, check_fn=check("inkbox_list_texts"))
+    ctx.register_tool("inkbox_get_text", "inkbox", GET_TEXT_SCHEMA, inkbox_get_text, check_fn=check("inkbox_get_text"))
+    ctx.register_tool("inkbox_mark_text_read", "inkbox", MARK_TEXT_READ_SCHEMA, inkbox_mark_text_read, check_fn=check("inkbox_mark_text_read"))
+    ctx.register_tool("inkbox_mark_text_conversation_read", "inkbox", MARK_TEXT_CONVERSATION_READ_SCHEMA, inkbox_mark_text_conversation_read, check_fn=check("inkbox_mark_text_conversation_read"))
     ctx.register_tool("inkbox_imessage_triage_number", "inkbox", IMESSAGE_TRIAGE_NUMBER_SCHEMA, inkbox_imessage_triage_number, check_fn=_configured)
     ctx.register_tool("inkbox_send_imessage", "inkbox", SEND_IMESSAGE_SCHEMA, inkbox_send_imessage, check_fn=_configured)
     ctx.register_tool("inkbox_list_imessage_assignments", "inkbox", LIST_IMESSAGE_ASSIGNMENTS_SCHEMA, inkbox_list_imessage_assignments, check_fn=_configured)

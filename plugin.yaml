@@ -114,6 +114,7 @@ optional_env:
     secret: false
 provides_tools:
   - inkbox_whoami
+  - inkbox_refresh_capabilities
   - inkbox_lookup_contact
   - inkbox_list_contacts
   - inkbox_get_contact

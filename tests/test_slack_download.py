@@ -98,8 +98,13 @@ def test_invalid_arguments_fail_before_sdk(client, cache, updates):
     ("id", "00000000-0000-0000-0000-000000000099"),
     ("identity_id", "00000000-0000-0000-0000-000000000099"), ("status", "disconnected"),
 ])
-def test_connection_must_be_owned_and_active(client, cache, field, value):
+def test_connection_must_be_owned_but_cached_reads_survive_disconnect(client, cache, field, value):
     setattr(client.slack.list_connections.return_value.connections[0], field, value)
+    if field == "status":
+        slack.run_tool(client, "agent", TOOL, arguments())
+        client.slack.download_file_preview.assert_called_once()
+        cache.assert_called_once()
+        return
     with pytest.raises(PermissionError):
         slack.run_tool(client, "agent", TOOL, arguments())
     client.slack.download_file_preview.assert_not_called()
@@ -177,7 +182,10 @@ def test_preview_format_detection(client, cache, data, ext, mimetype):
 
 
 def test_registered_tool_dispatch_and_enablement(client, monkeypatch, cache):
-    from inkbox_plugin import tools
+    from inkbox_plugin import capabilities, tools
+    monkeypatch.setenv("INKBOX_API_KEY", "synthetic-key")
+    monkeypatch.setenv("INKBOX_IDENTITY", "example-agent")
+    monkeypatch.setattr(capabilities, "snapshot", lambda **kwargs: {"slack_history": True})
     monkeypatch.setattr(tools, "_client_and_identity", lambda: (NS(), client, client.get_identity.return_value))
     specs = {}
     extended_tools.register(NS(register_tool=lambda name, group, schema, handler, **kw:

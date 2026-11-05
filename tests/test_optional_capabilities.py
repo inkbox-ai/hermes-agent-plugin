@@ -12,6 +12,12 @@ from inkbox_plugin.slack_companion import require_sdk_support
 
 
 def test_catalog_opt_ins_and_runtime_config(monkeypatch):
+    from inkbox_plugin import capabilities
+    monkeypatch.setenv("INKBOX_API_KEY", "synthetic-key")
+    monkeypatch.setenv("INKBOX_IDENTITY", "example-agent")
+    monkeypatch.setenv("INKBOX_HERMES_VAULT_KEY", "synthetic-local-key")
+    monkeypatch.setattr(capabilities, "snapshot", lambda **kwargs: {
+        "slack_send": True, "slack_history": True, "vault_exists": True})
     monkeypatch.setenv("INKBOX_SLACK_ENABLED", "true")
     monkeypatch.setenv("INKBOX_IMESSAGE_THREADED_REPLIES", "true")
     assert read_config({"slack_enabled": False}).slack_enabled is False
