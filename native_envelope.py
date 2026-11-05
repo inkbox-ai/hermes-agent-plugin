@@ -4,11 +4,12 @@ Hermes owns authorization, FIFO execution and delivery. The plugin keeps its
 private route context in its existing journal, never in the host wire envelope.
 """
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from functools import wraps
 import hashlib
 import json
+import os
 from pathlib import Path
 from weakref import ref, WeakSet, WeakValueDictionary
 
@@ -39,9 +40,33 @@ def _media_record(event):
     return retained
 
 
+def _prepare_media(event):
+    """Keep uncached attachments out of the host's local-file capture path."""
+    fields = ("media_urls", "media_types", "media_text_inlined", "media_filenames")
+    lists = {name: getattr(event, name) for name in fields if hasattr(event, name)}
+    lists = {name: [] if value is None else value for name, value in lists.items()}
+    for name, values in lists.items():
+        if not isinstance(values, list):
+            raise ValueError(f"Invalid {name}")
+        valid = (all(value is None or type(value) is bool for value in values) if name == "media_text_inlined"
+                 else all(isinstance(value, str) for value in values))
+        if not valid:
+            raise ValueError(f"Invalid {name}")
+    urls = lists["media_urls"]
+    if any(len(values) not in (0, len(urls)) for values in lists.values()):
+        raise ValueError("Media metadata must align with attachments")
+    kept = [index for index, value in enumerate(urls) if os.path.isabs(value)]
+    if len(kept) == len(urls):
+        return
+    types = lists.get("media_types", [])
+    notes = [f"[The user sent an attachment ({types[index] if types else 'file'}) that could not be retrieved.]"
+             for index in range(len(urls)) if index not in kept]
+    event.text = "\n".join(filter(None, [event.text, *notes]))
+    for name, values in lists.items():
+        setattr(event, name, [values[index] for index in kept] if values else [])
+
+
 def event_record(event, *, captured_media=None):
-    from gateway.session_envelope import _drop_remote_media
-    event = _drop_remote_media(event)
     fields = ("user_id", "user_name", "platform_update_id", "reply_to_message_id", "reply_to_text",
         "reply_to_author_id", "reply_to_author_name", "reply_to_is_own_message", "channel_context",
         "reply_expected", "reply_anchor_override", "edit_revision", "inherit_channel_pin")
@@ -195,6 +220,7 @@ async def remember_plain_voice(adapter, event):
     owner = getattr(adapter, "gateway_runner", None) or getattr(adapter._message_handler, "__self__", None)
     if owner is None or active_authority(owner) is None:
         return
+    _prepare_media(event)
     async with producer_scope(adapter, event):
         journal = adapter._conversation_state()
         key, message = str(event.source.chat_id), str(event.message_id)
@@ -215,6 +241,7 @@ async def remember_plain_voice(adapter, event):
 
 async def dispatch(adapter, event):
     from gateway.platforms.webhook_ingress import admit_producer, producer_scope
+    _prepare_media(event)
     # Canonicalize and bind the profile before persisting ownership. Admission
     # below still performs the host's complete authorization and durable write.
     async with producer_scope(adapter, event) as authority:
@@ -305,8 +332,8 @@ def bind_execution(adapter, event):
         raise RuntimeError("Native execution no longer owns its journal input")
     record, slot = owned
     from gateway.session_authorities import authority_for_home
-    from gateway.session_identity import identity_of
-    identity = identity_of(event.source)
+    from gateway.session_identity import canonical_identity
+    identity = canonical_identity(event.source, runner=adapter.gateway_runner)
     authority = authority_for_home(adapter.gateway_runner, identity.runtime_home) if identity is not None else None
     if authority is None:
         raise RuntimeError("Native execution has no serving authority")
@@ -388,10 +415,13 @@ def bind_execution(adapter, event):
 
 
 def _watch_receipt(adapter, authority, admission_id, original, *, plain_voice=False):
+    if getattr(getattr(original, "_inkbox_execution_event", original), "_inkbox_producer_completed", False):
+        return
     tasks = getattr(adapter, "_inkbox_receipt_tasks", None)
     if tasks is None:
         tasks = adapter._inkbox_receipt_tasks = {}
     if admission_id in tasks:
+        original._inkbox_receipt_task = (ref(original), ref(tasks[admission_id]))
         return
     from hermes_state_runtime import get_session_admission
     row = get_session_admission(authority.db, admission_id=admission_id)
@@ -437,6 +467,7 @@ def _watch_receipt(adapter, authority, admission_id, original, *, plain_voice=Fa
         finally:
             tasks.pop(admission_id, None)
     task = asyncio.create_task(observe())
+    original._inkbox_receipt_task = (ref(original), ref(task))
     tasks[admission_id] = task
     adapter._background_tasks.add(task)
     task.add_done_callback(adapter._background_tasks.discard)
@@ -446,6 +477,10 @@ async def complete(adapter, event, outcome):
     if getattr(event, "_inkbox_producer_completed", False):
         return
     event._inkbox_producer_completed = True
+    binding = getattr(event, "_inkbox_receipt_task", None)
+    observer = binding[1]() if binding is not None and binding[0]() is event else None
+    if observer is not None and observer is not asyncio.current_task():
+        observer.cancel()
     if (event.metadata or {}).get("inkbox_interrupted"):
         outcome = "cancelled"
     await adapter.on_processing_complete(event, outcome)
@@ -486,8 +521,11 @@ def install(adapter, owner):
         plain = _lookup(current, event, wire=True) if not event.metadata else None
         if plain is not None and plain[0]["event"]["metadata"] == {"inkbox_plain_voice": True}:
             from gateway.session_authorities import authority_for_home
-            from gateway.session_identity import identity_of
-            authority = authority_for_home(owner, identity_of(event.source).runtime_home)
+            from gateway.session_identity import canonical_identity
+            identity = canonical_identity(event.source, runner=owner)
+            authority = authority_for_home(owner, identity.runtime_home) if identity is not None else None
+            if authority is None:
+                raise RuntimeError("Voice execution has no serving authority")
             row = _ledger_row(authority, event, plain[0])
             if row["status"] != "started":
                 raise RuntimeError("Voice execution is not claimed")
@@ -533,8 +571,8 @@ def uninstall(adapter, owner):
         owner._handle_message = handler._inkbox_original
 
 
-@contextmanager
-def delivery_scope(adapter, event):
+@asynccontextmanager
+async def delivery_scope(adapter, event):
     if _BINDING not in (getattr(event, "metadata", None) or {}):
         yield
         return
@@ -549,6 +587,9 @@ def delivery_scope(adapter, event):
     token = reply_route.set(route_for(adapter, event))
     try:
         yield
+    except (Exception, asyncio.CancelledError) as exc:
+        await complete(adapter, event, "cancelled" if isinstance(exc, asyncio.CancelledError) else "failure")
+        raise
     finally:
         reply_route.reset(token)
 

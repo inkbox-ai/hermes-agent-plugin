@@ -49,7 +49,8 @@ def test_hosted_completion_retains_call_identity_through_real_authority(tmp_path
                     assert event.raw_message["_inkbox_hosted_reconciliation_attempt"] == 2
             state = runner._session_state(session_key)
             state.turn.event = event
-            context = TurnContext(runner, event, source, session_key, session_key, state, run_generation)
+            context = TurnContext(source=source, session_key=session_key, session_id=session_key,
+                                  run_generation=run_generation, inbound_message_id=event.message_id)
             worker = runner._run_agent_start_turn_worker(context, lambda: "[SILENT]")
             answer = await asyncio.shield(worker.executor_task)
             execution_result.get()["result"] = {"final_response": answer, "messages": []}
@@ -163,7 +164,8 @@ def test_companion_initialization_retains_private_context_through_authority(tmp_
             observed.append((event.metadata.get("companion"), event.raw_message))
             state = runner._session_state(session_key)
             state.turn.event = event
-            context = TurnContext(runner, event, source, session_key, session_key, state, run_generation)
+            context = TurnContext(source=source, session_key=session_key, session_id=session_key,
+                                  run_generation=run_generation, inbound_message_id=event.message_id)
             worker = runner._run_agent_start_turn_worker(context, lambda: "Synthetic group answer")
             answer = await asyncio.shield(worker.executor_task)
             execution_result.get()["result"] = {"final_response": answer, "messages": []}
@@ -232,7 +234,8 @@ def test_plain_voice_turn_keeps_official_authority_path(tmp_path, monkeypatch):
             assert not event.metadata and not event.internal
             state = runner._session_state(session_key)
             state.turn.event = event
-            context = TurnContext(runner, event, source, session_key, session_key, state, run_generation)
+            context = TurnContext(source=source, session_key=session_key, session_id=session_key,
+                                  run_generation=run_generation, inbound_message_id=event.message_id)
             worker = runner._run_agent_start_turn_worker(context, lambda: "Synthetic voice answer")
             answer = await asyncio.shield(worker.executor_task)
             execution_result.get()["result"] = {"final_response": answer, "messages": []}

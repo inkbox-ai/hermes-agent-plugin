@@ -14,6 +14,7 @@ from inkbox_plugin.adapter import InkboxAdapter
 from inkbox_plugin.native_envelope import (
     _digest,
     _lookup,
+    _prepare_media,
     event_record,
     identity_scope,
     install,
@@ -138,7 +139,7 @@ def test_nonproducer_empty_metadata_keeps_base_hook_semantics(bound):
     assert seen == [event]
 
 
-@pytest.mark.parametrize("change", [None, "identity", "profile", "text", "timestamp", "missing_journal", "media"])
+@pytest.mark.parametrize("change", [None, "identity", "profile", "text", "timestamp", "missing_journal", "media", "remote_media"])
 def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypatch, change):
     """The public producer path and real retained-media codec preserve exact input ownership."""
     import asyncio
@@ -171,6 +172,10 @@ def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypa
         event = MessageEvent(text="Original request", source=source, message_id="binding-event",
             media_urls=[str(media)], media_types=["image/png"],
             metadata={"inkbox_prepared": True, "inkbox_reply_route": route})
+        if change == "remote_media":
+            event.media_urls.insert(0, "https://example.test/unavailable.png")
+            event.media_types.insert(0, "image/jpeg")
+            event.media_text_inlined = [True, False]
         journal = adapter._conversation_state()
         journal.remember(source.chat_id, event.message_id, route)
         try:
@@ -182,6 +187,10 @@ def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypa
             assert wire.metadata == {}
             assert wire is not event
             assert _lookup(adapter, wire, wire=True)
+            if change == "remote_media":
+                assert wire.text.endswith("[The user sent an attachment (image/jpeg) that could not be retrieved.]")
+                assert wire.media_types == ["image/png"] and wire.media_text_inlined == [False]
+                assert len(wire.media_urls) == 1
             if change == "identity":
                 adapter._identity_id = "another-identity"
             elif change == "profile":
@@ -195,7 +204,7 @@ def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypa
             elif change == "media":
                 from pathlib import Path
                 Path(wire.media_urls[0]).write_bytes(b"altered retained bytes")
-            assert bool(_lookup(adapter, wire, wire=True)) is (change is None)
+            assert bool(_lookup(adapter, wire, wire=True)) is (change in {None, "remote_media"})
         finally:
             tasks = list(getattr(adapter, "_inkbox_receipt_tasks", {}).values())
             for task in tasks:
@@ -204,6 +213,22 @@ def test_real_admission_codec_rejects_changed_private_binding(tmp_path, monkeypa
             uninstall(adapter, runner)
             authority.db.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("changes", [
+    {"media_urls": "https://example.test/image.png"},
+    {"media_urls": [None]},
+    {"media_types": ["image/png", "image/jpeg"]},
+    {"media_text_inlined": ["true"]},
+])
+def test_media_preparation_rejects_malformed_lists_without_mutating_input(bound, changes):
+    _, _, event, _, _ = bound
+    for key, value in changes.items():
+        setattr(event, key, value)
+    original = copy.deepcopy(event)
+    with pytest.raises(ValueError):
+        _prepare_media(event)
+    assert event == original
 
 
 @pytest.mark.parametrize("outcome", ["return", "raise", "cancel"])

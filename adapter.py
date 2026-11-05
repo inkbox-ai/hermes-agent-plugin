@@ -2191,7 +2191,7 @@ class InkboxAdapter(BasePlatformAdapter):
             args = (*args[:5], delivery_callback(event, args[5]), *args[6:])
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
-            with delivery_scope(self, event):
+            async with delivery_scope(self, event):
                 return await super()._send_final_text(event, *args, **kwargs)
         finally:
             _host_final_reply.reset(token)
@@ -2200,13 +2200,13 @@ class InkboxAdapter(BasePlatformAdapter):
         from .native_envelope import delivery_scope, delivery_callback
         if "record_delivery" in kwargs:
             kwargs["record_delivery"] = delivery_callback(event, kwargs["record_delivery"])
-        with delivery_scope(self, event):
+        async with delivery_scope(self, event):
             return await super()._deliver_attachments(event, *args, **kwargs)
 
     async def _extract_response_content(self, response, event, session_key, **kwargs):
         from .native_envelope import delivery_scope
         native = getattr(self, "_native_turns", None)
-        with delivery_scope(self, event):
+        async with delivery_scope(self, event):
             if native and getattr(event, "_inkbox_producer_execution", False):
                 native.capture_result(event, response)
             extracted = await super()._extract_response_content(response, event, session_key, **kwargs)

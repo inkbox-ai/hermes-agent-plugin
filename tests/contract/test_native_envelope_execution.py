@@ -239,7 +239,7 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 await adapter.handle_message(original)
                 record = adapter._conversation_state().row(source.chat_id)["native_admissions"][original.message_id]
                 receipt = authority._receipt(get_session_admission(authority.db, admission_id=record["receipt"]["id"]))
-                authority.producer_turns.clear()  # Simulate lost process-local producer bracket.
+                getattr(authority, "producer_turns", {}).clear()  # Older hosts have no process-local producer bracket.
                 if scenario == "recovered_later_guard":
                     later_event = copy.deepcopy(original)
                     later_event.message_id = "later-event"
@@ -289,6 +289,8 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                     assert outcomes == ["success"]
                     assert not journal.row(source.chat_id)["quiet"]
                 assert not adapter._post_delivery_callbacks
+                assert not adapter._inkbox_receipt_tasks
+                assert not any(waiter.cancelled() for waiter in authority.waiters.values())
                 return
             if scenario == "group_interrupt":
                 await asyncio.wait_for(started.wait(), 3)
