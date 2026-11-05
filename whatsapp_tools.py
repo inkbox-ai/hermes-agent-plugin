@@ -7,6 +7,8 @@ import hashlib
 import json
 import mimetypes
 import re
+import threading
+import time
 import uuid
 
 from .imessage_state import active_context, explicit_send, record_explicit, turn_lock
@@ -307,6 +309,29 @@ def invoke(operation, args, session_id=""):
 
 
 def register(ctx, check_fn):
+    from .config import inkbox_client_kwargs, read_runtime_config
+
+    cached_key, expires, enabled = None, 0.0, False
+    lock = threading.Lock()
+
+    def available():
+        nonlocal cached_key, expires, enabled
+        if not check_fn():
+            return False
+        cfg = read_runtime_config()
+        key = (cfg.api_key, cfg.base_url, cfg.identity)
+        with lock:
+            if key != cached_key or time.monotonic() >= expires:
+                from inkbox import Inkbox
+                enabled = False
+                try:
+                    with Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url), timeout=5) as client:
+                        enabled = client.get_identity(cfg.identity).whatsapp_configured is True
+                except Exception:
+                    pass
+                cached_key, expires = key, time.monotonic() + 60
+            return enabled
+
     def string(description):
         return {"type": "string", "description": description}
 
@@ -427,4 +452,4 @@ def register(ctx, check_fn):
             "description": description,
             "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
         }
-        ctx.register_tool(name, "inkbox", schema, handler, check_fn=check_fn)
+        ctx.register_tool(name, "inkbox", schema, handler, check_fn=available)

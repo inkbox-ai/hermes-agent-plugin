@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 try:
+    from .communication_tools import ATTACHMENTS, REQUEST_KEY, email_attachments, request_key, send_error, send_result
     from .a2a_context import (
         mark_a2a_reply_committed,
         read_a2a_turn_context,
@@ -27,6 +28,7 @@ try:
         read_runtime_config,
     )
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from communication_tools import ATTACHMENTS, REQUEST_KEY, email_attachments, request_key, send_error, send_result
     from a2a_context import mark_a2a_reply_committed, read_a2a_turn_context
     from a2a_progress import fence_a2a_progress_delivery
     from config import (
@@ -794,8 +796,12 @@ def inkbox_delete_contact(args: dict, **kwargs) -> str:
 
 def inkbox_send_email(args: dict, **kwargs) -> str:
     del kwargs
+    key = None
+    operation = "mail.reply_all" if args.get("reply_to_message_id") else "mail.send"
     try:
         _cfg, _client, identity = _client_and_identity()
+        attachments = email_attachments(args)
+        key = request_key(args)
         reply_parent = args.get("reply_to_message_id")
         if reply_parent:
             if any(args.get(key) for key in ("to", "cc", "bcc", "in_reply_to_message_id", "inReplyToMessageId")):
@@ -804,8 +810,10 @@ def inkbox_send_email(args: dict, **kwargs) -> str:
                 str(reply_parent), subject=args.get("subject") or None,
                 body_text=args.get("body_text") or args.get("bodyText") or None,
                 body_html=args.get("body_html") or args.get("bodyHtml") or None,
+                attachments=attachments or None,
+                idempotency_key=key,
             )
-            return _json({"ok": True, "message_id": str(getattr(msg, "id", ""))})
+            return _json(send_result(msg, key, operation))
         to = args.get("to") or []
         if isinstance(to, str):
             to = [to]
@@ -826,21 +834,23 @@ def inkbox_send_email(args: dict, **kwargs) -> str:
                 cc=args.get("cc") or None,
                 bcc=args.get("bcc") or None,
                 in_reply_to_message_id=in_reply_to or None,
+                attachments=attachments or None,
+                idempotency_key=key,
             )
 
         msg = _send()
         return _json({
-            "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            **send_result(msg, key, operation),
             "to": to,
             "subject": subject,
         })
     except Exception as exc:
-        return _json({"error": str(exc)})
+        return _json(send_error(exc, key, operation))
 
 
 def inkbox_send_sms(args: dict, **kwargs) -> str:
     del kwargs
+    key = None
     try:
         _cfg, _client, identity = _client_and_identity()
         text = str(args.get("text") or "")
@@ -861,26 +871,18 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
             return _json({"error": "Inkbox group texts support at most 8 recipients."})
 
         payload: dict[str, Any] = {"text": text}
-        camel_payload: dict[str, Any] = {"text": text}
         if conversation_id:
             payload["conversation_id"] = str(conversation_id).strip()
-            camel_payload["conversationId"] = str(conversation_id).strip()
         else:
             payload["to"] = to_list[0] if to_list and len(to_list) == 1 else to_list
-            camel_payload["to"] = payload["to"]
         media_urls = args.get("mediaUrls") or args.get("media_urls")
         if media_urls:
             payload["media_urls"] = media_urls
-            camel_payload["mediaUrls"] = media_urls
 
-        msg = _call_with_kwargs_or_payload(
-            _identity_method(identity, "send_text", "sendText"),
-            payload,
-            camel_payload,
-        )
+        key = request_key(args)
+        msg = identity.send_text(**payload, idempotency_key=key)
         return _json({
-            "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            **send_result(msg, key, "text.send"),
             "conversation_id": conversation_id or object_summary(
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),
@@ -888,7 +890,7 @@ def inkbox_send_sms(args: dict, **kwargs) -> str:
             "status": object_summary(getattr(msg, "delivery_status", None) or getattr(msg, "status", None)),
         })
     except Exception as exc:
-        return _json(_safe_tool_error(exc))
+        return _json(send_error(exc, key, "text.send"))
 
 
 def inkbox_list_text_conversations(args: dict, **kwargs) -> str:
@@ -1025,6 +1027,8 @@ def inkbox_imessage_triage_number(args: dict, **kwargs) -> str:
 
 def inkbox_send_imessage(args: dict, **kwargs) -> str:
     session_id = str(kwargs.get("session_id") or "")
+    key = None
+    payload = {}
     try:
         if any(key in args for key in ("reply_to_message_id", "replyToMessageId", "plain_reply_fallback", "plainReplyFallback", "thread_id", "threadId")):
             raise ValueError("Reply routing is selected by the gateway; do not supply reply-target arguments")
@@ -1079,22 +1083,18 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             })
 
         payload: dict[str, Any] = {"text": text or None}
-        camel_payload: dict[str, Any] = {"text": text or None}
         if conversation_id:
             payload["conversation_id"] = conversation_id
-            camel_payload["conversationId"] = conversation_id
         else:
             payload["to"] = to_list[0] if to_list and len(to_list) == 1 else to_list
-            camel_payload["to"] = payload["to"]
         def prepare_media():
             urls = [_upload_imessage_media_path(identity, media_paths[0])] if media_paths else media_urls
             if urls:
                 payload["media_urls"] = urls
-                camel_payload["mediaUrls"] = urls
         send_style = str(args.get("sendStyle") or args.get("send_style") or "").strip()
         if send_style:
             payload["send_style"] = send_style
-            camel_payload["sendStyle"] = send_style
+        key = request_key(args)
 
         if threaded_replies or original_context:
             from .imessage_state import active_context, explicit_send, record_explicit, require_threading, validate_reply_target
@@ -1118,9 +1118,11 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
                 state_callback = context.get("explicit_delivery_state") if context else None
                 if context:
                     import hashlib
-                    payload["idempotency_key"] = "hermes:tool:" + hashlib.sha256(json.dumps([
+                    native_key = "hermes:tool:" + hashlib.sha256(json.dumps([
                         context["turn_id"], payload,
                     ], sort_keys=True).encode()).hexdigest()
+                    key = args.get("idempotency_key", native_key)
+                payload["idempotency_key"] = key
                 if state_callback:
                     state_callback("sending")
                 try:
@@ -1134,12 +1136,10 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
                     state_callback("sent")
         else:
             prepare_media()
-            msg = _call_with_kwargs_or_payload(
-                _identity_method(identity, "send_imessage", "sendImessage"), payload, camel_payload,
-            )
+            msg = identity.send_imessage(**payload, idempotency_key=key)
         return _json({
-            "ok": True,
-            "message_id": str(getattr(msg, "id", "")),
+            **send_result(msg, key, "imessage.send"),
+            "media_urls": payload.get("media_urls", []),
             "conversation_id": _json_safe(
                 getattr(msg, "conversation_id", None) or getattr(msg, "conversationId", None)
             ),
@@ -1147,7 +1147,7 @@ def inkbox_send_imessage(args: dict, **kwargs) -> str:
             "status": _json_safe(getattr(msg, "status", None)),
         })
     except Exception as exc:
-        return _json({"error": str(exc)})
+        return _json({**send_error(exc, key, "imessage.send"), "media_urls": payload.get("media_urls", [])})
 
 
 def inkbox_list_imessage_conversations(args: dict, **kwargs) -> str:
@@ -1422,6 +1422,23 @@ def inkbox_place_call(
             return _json({"error": "This identity can't place calls: it has no dedicated phone number and iMessage is not enabled. Provision a number or enable iMessage first."})
 
         hosted = cfg.voice_stack is VoiceStack.INKBOX_VOICE_AI
+        on_voicemail = args.get("on_voicemail")
+        voicemail_message = args.get("voicemail_message")
+        aliases = {"enabled": "hang_up", "disabled": "ignore"}
+        if on_voicemail is not None and on_voicemail not in {"leave_message", "hang_up", "ignore"}:
+            raise ValueError("on_voicemail must be leave_message, hang_up or ignore")
+        if on_voicemail and voicemail_detection and on_voicemail != aliases[voicemail_detection]:
+            raise ValueError("on_voicemail conflicts with voicemail_detection")
+        if on_voicemail == "leave_message" and not hosted:
+            raise ValueError("leave_message requires Inkbox Voice AI")
+        if voicemail_message is not None and (
+                not isinstance(voicemail_message, str) or not 1 <= len(voicemail_message) <= 1000
+                or on_voicemail != "leave_message"):
+            raise ValueError("voicemail_message requires leave_message and 1–1000 characters")
+        voicemail_options = ({"on_voicemail": on_voicemail} if on_voicemail else
+                             {"voicemail_detection": voicemail_detection or cfg.voicemail_detection})
+        if voicemail_message is not None:
+            voicemail_options["voicemail_message"] = voicemail_message
         token = ""
         decorated_ws_url = ""
         if not hosted:
@@ -1465,14 +1482,14 @@ def inkbox_place_call(
                     origination=origination,
                     mode="hosted_agent",
                     reason=_hosted_call_reason(args),
-                    voicemail_detection=cfg.voicemail_detection,
+                    **voicemail_options,
                 )
             return identity.place_call(
                 to_number=to_number,
                 origination=origination,
                 client_websocket_url=decorated_ws_url,
                 mode="client_websocket",
-                voicemail_detection=cfg.voicemail_detection,
+                **voicemail_options,
             )
 
         try:
@@ -1493,6 +1510,7 @@ def inkbox_place_call(
             "call_id": str(getattr(call_record, "id", "")),
             "status": object_summary(getattr(call_record, "status", None)),
             "to_number": to_number,
+            "on_voicemail": object_summary(getattr(call_record, "on_voicemail", None)) or on_voicemail or aliases[voicemail_detection or cfg.voicemail_detection],
             "origination": origination,
             "mode": object_summary(
                 getattr(call_record, "mode", None)
@@ -1650,6 +1668,8 @@ SEND_EMAIL_SCHEMA = {
             "cc": {"type": "array", "items": {"type": "string"}},
             "bcc": {"type": "array", "items": {"type": "string"}},
             "in_reply_to_message_id": {"type": "string", "description": "RFC 5322 Message-ID for threading replies."},
+            "attachments": ATTACHMENTS,
+            "idempotency_key": REQUEST_KEY,
         },
         "required": [],
     },
@@ -1668,6 +1688,7 @@ SEND_SMS_SCHEMA = {
             "conversationId": {"type": "string", "description": "Existing Inkbox text conversation UUID from inkbox_list_text_conversations. Preferred for replies and group chats. Mutually exclusive with `to`."},
             "text": {"type": "string", "description": "Message body, max 1600 chars."},
             "mediaUrls": {"type": "array", "items": {"type": "string"}, "maxItems": 10, "description": "Optional public MMS media URLs."},
+            "idempotency_key": REQUEST_KEY,
         },
         "required": ["text"],
     },
@@ -1776,6 +1797,7 @@ SEND_IMESSAGE_SCHEMA = {
                 ],
             },
             "text": {"type": "string", "maxLength": IMESSAGE_MAX_LENGTH, "description": "Message body, max 18995 chars."},
+            "idempotency_key": REQUEST_KEY,
             "mediaUrls": {
                 "type": "array",
                 "items": {"type": "string", "format": "uri"},
@@ -1871,6 +1893,10 @@ def place_call_schema(voice_stack: VoiceStack | None) -> dict[str, Any]:
     hosted = voice_stack is VoiceStack.INKBOX_VOICE_AI
     unresolved = voice_stack is None
     properties: dict[str, Any] = {
+        "on_voicemail": {
+            "type": "string", "enum": ["leave_message", "hang_up", "ignore"] if hosted else ["hang_up", "ignore"],
+            "description": "Explicit voicemail action. Omit to retain the configured voicemail behavior.",
+        },
         "to_number": {
             "type": "string",
             "description": "Recipient phone number in E.164 format.",
@@ -1910,6 +1936,9 @@ def place_call_schema(voice_stack: VoiceStack | None) -> dict[str, Any]:
             ),
         },
     }
+    if hosted:
+        properties["voicemail_message"] = {"type": "string", "minLength": 1, "maxLength": 1000,
+                                           "description": "What Voice AI should leave on voicemail; requires on_voicemail=leave_message."}
     if not hosted and not unresolved:
         properties["client_websocket_url"] = {
             "type": "string",
@@ -2249,6 +2278,8 @@ A2A_GET_SENT_TASK_SCHEMA = {
 
 
 def register_tools(ctx) -> None:
+    from .communication_tools import register as register_communications
+    register_communications(ctx, _configured)
     from .whatsapp_tools import register as register_whatsapp
     register_whatsapp(ctx, _configured)
     from .extended_tools import register

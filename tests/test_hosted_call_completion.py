@@ -192,6 +192,28 @@ def test_hosted_completion_fetches_full_transcript_and_enqueues_one_turn(
     assert "contact-1" not in instance._last_inbound_modality
 
 
+@pytest.mark.parametrize("inline", [False, True])
+def test_hosted_completion_preserves_speaker_attribution_and_connections(tmp_path, inline):
+    row = types.SimpleNamespace(party="remote", phone_number="+15555550102", text="Conference guest here.")
+    instance, events = _adapter(tmp_path, transcript_rows=[] if inline else [row])
+    payload = _payload()
+    payload["data"]["transcript"]["entries"] = [vars(row)]
+    payload["data"]["call"]["connections"] = [{"kind": "conference", "status": "completed", "phone_number": "+15555550102"}]
+    payload["data"]["call"]["forwardings"] = [{"phone_number": "+15555550199"}]
+    assert asyncio.run(instance._on_call_ended(payload)).status == 200
+    assert "remote (+15555550102): Conference guest here." in events[0].text
+    assert '"kind": "conference"' in events[0].text
+    assert "+15555550199" not in events[0].text
+
+
+def test_empty_connections_do_not_restore_legacy_forwarding_history(tmp_path):
+    instance, events = _adapter(tmp_path)
+    payload = _payload()
+    payload["data"]["call"].update(connections=[], forwardings=[{"phone_number": "+15555550199"}])
+    assert asyncio.run(instance._on_call_ended(payload)).status == 200
+    assert "+15555550199" not in events[0].text
+
+
 def test_hosted_completion_marks_current_remote_number_as_authoritative(
     tmp_path,
     monkeypatch,

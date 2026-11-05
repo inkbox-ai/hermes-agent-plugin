@@ -19,7 +19,7 @@ Use this skill whenever the user asks for **multi-step outbound communication** 
 - `inkbox_list_text_conversations` — check whether the recipient has replied to past SMS
 - `inkbox_get_text_conversation` — inspect a specific SMS thread when the conversation id is known
 
-Hermes does not expose historical email-read, note, vCard export/import, or email-forwarding tools. Use contact lookup/list/get or literal email addresses/phone numbers supplied by the user. If a named recipient lookup is ambiguous or does not include a usable destination, ask the user for the concrete destination before starting.
+Use contact lookup/list/get or literal email addresses/phone numbers supplied by the user. Email history and forwarding tools are available; note and vCard export/import tools are not. If a named recipient lookup is ambiguous or does not include a usable destination, ask the user for the concrete destination before starting.
 
 ## Workflow
 

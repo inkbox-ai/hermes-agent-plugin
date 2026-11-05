@@ -2,6 +2,10 @@
 
 ## 0.2.22
 
+- Expose WhatsApp tools only for identities with WhatsApp configured, with cached availability checks.
+- Add email listing, message/thread reads, attachment downloads, forwarding, call history/transcript reads, hangup, and read-only message-send recovery tools.
+- Add email attachments and inline images, retain email/SMS/iMessage request keys for recovery, and expose explicit voicemail actions and messages.
+- Preserve speaker phone-number attribution and connection history in hosted post-call context.
 - Require published Inkbox SDK `>=0.7.27,<1.0.0`, replacing the temporary Git source override and source-candidate CI installs.
 
 ## 0.2.21

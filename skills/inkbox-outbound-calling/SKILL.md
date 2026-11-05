@@ -44,6 +44,8 @@ explicitly only to override that default.
    - `origination` — usually omit it; it auto-follows the conversation's channel (and the only available line). Set it explicitly only to override.
    - `opening_message` — include when the user told you what to say first.
    - `context` — concise background the voice agent may need during the call.
+   - `on_voicemail`: choose `hang_up` or `ignore`, or `leave_message` with Inkbox Voice AI. Omit to retain configured behavior.
+   - `voicemail_message`: optional text for Voice AI to leave when `on_voicemail=leave_message`.
 4. Do not invent or request `client_websocket_url`. In Inkbox Voice AI mode no
    media WebSocket is used; in OpenAI Realtime and Inkbox TTS/STT modes the
    plugin supplies the active bridge.

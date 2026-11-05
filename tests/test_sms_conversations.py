@@ -74,7 +74,7 @@ def test_send_sms_tool_prefers_conversation_id(monkeypatch):
     }))
 
     assert out["ok"] is True
-    assert identity.sent_texts == [{"text": "hello", "conversation_id": "conv-123"}]
+    assert identity.sent_texts == [{"text": "hello", "conversation_id": "conv-123", "idempotency_key": out["idempotency_key"]}]
 
 
 def test_send_sms_tool_rejects_text_over_limit(monkeypatch):
@@ -112,7 +112,10 @@ def test_send_sms_tool_preserves_safe_failure_metadata(monkeypatch):
         "text": "hello",
     }))
 
-    assert out == {
+    assert out["idempotency_key"]
+    assert out["operation"] == "text.send"
+    assert "Look up" in out["recovery"]
+    assert {key: out[key] for key in ("error", "status_code", "error_code", "rule")} == {
         "error": "message rejected",
         "status_code": 422,
         "error_code": "message_blocked_spam_filter",

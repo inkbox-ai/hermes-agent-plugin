@@ -531,6 +531,12 @@ Hermes direct tools:
 
 - `inkbox_whoami`
 - `inkbox_send_email`
+- `inkbox_list_emails`
+- `inkbox_get_email`
+- `inkbox_get_email_thread`
+- `inkbox_download_email_attachment`
+- `inkbox_forward_email`
+- `inkbox_lookup_message_send`
 - `inkbox_send_sms`
 - `inkbox_list_text_conversations`
 - `inkbox_get_text_conversation`
@@ -546,6 +552,10 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_list_calls`
+- `inkbox_get_call`
+- `inkbox_get_call_transcripts`
+- `inkbox_hangup_call`
 - `inkbox_a2a_call`
 - `inkbox_a2a_check`
 - `inkbox_a2a_reply`
@@ -562,6 +572,14 @@ Hermes direct tools:
 - `inkbox_create_contact`
 - `inkbox_update_contact`
 - `inkbox_delete_contact`
+
+Email listing supports direction and date bounds, plus unread and sender/subject/snippet filtering within each bounded page. Follow `next_offset` even when a page has no matches; this is not full-body search. Narrow date bounds if the scan limit is reached. Thread reads return chronological message summaries; use `inkbox_get_email` for full bodies. Reading a single inbound email marks it read; thread and attachment reads do not. Attachments download to generated local paths, with a 25 MiB limit.
+
+Email sends and reply-all accept `attachments: [{"path": "/path/to/file"}]`; inline images additionally use `content_id` and an HTML `cid:` reference. Forwarding includes original attachments by default and accepts additional local attachments. Local uploads use the host's media-path validation.
+
+Email, SMS, and iMessage sends accept `idempotency_key` and return it on success or send failure. Reuse the original key only with identical arguments. For an uncertain result, use `inkbox_lookup_message_send` with the returned `operation` and key before retrying; a missing lookup does not prove the send failed. Send acceptance is not delivery confirmation. For iMessage media recovery, retain the returned `media_urls` instead of uploading the same file again.
+
+Call tools expose history, details, transcripts, and asynchronous hangup. Transcript results and hosted post-call context preserve available speaker phone numbers and connection history. `inkbox_place_call` accepts `on_voicemail: "hang_up" | "ignore"`; Voice AI additionally supports `"leave_message"` and an optional `voicemail_message`. Omitting the action retains the configured voicemail behavior.
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
 After durable binding, the plugin immediately sends a non-terminal receipt that
@@ -582,7 +600,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.11 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.27 or
 newer.
 
 Realtime-only call tools:
@@ -646,7 +664,7 @@ Task streaming is detected automatically through the connection's capabilities a
 
 ### Dedicated WhatsApp
 
-WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. `inkbox_get_whatsapp_status` reads current readiness without sending a message. No extra local feature flag is required.
+WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. The 15 WhatsApp tools are exposed only when the configured identity reports `whatsapp_configured=true`, including when sending is temporarily unavailable so history and recovery remain usable. The shared availability lookup is cached for 60 seconds, refreshes when credentials or identity change, and hides the tools if the lookup fails. `inkbox_get_whatsapp_status` reads current readiness without sending a message. No extra local feature flag is required.
 
 Signed direct messages enter the existing Hermes session and authorization flow, with a durable channel/conversation/author boundary for approvals, Stop, and text bursts. Permissions, approvals and Stop remain scoped to the actual sender. New final replies, media deliveries, and same-conversation tool sends are plain messages by default. Quote selectively with an explicit `reply_to_message_id` when referring to an older message, distinguishing multiple requests, or identifying a specific attachment. Omitting a tool destination selects the active conversation. Explicit destinations remain authoritative, and an authorized quote target can be selected explicitly. Caller-supplied recovery keys retain the supplied request instead of acquiring a new quote. Rejected or uncertain sends are never replaced by automatic plain messages. Existing durable replies keep their original payload. Native voice calls, remote read receipts, typing, and Companion activation are not exposed. Delivery updates do not wake the model or resend an answer. A confirmed send with unknown delivery is not a failed send.
 

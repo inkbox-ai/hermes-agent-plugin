@@ -456,7 +456,8 @@ def test_email_tool_stored_reply_parent_preserves_audience(monkeypatch):
     monkeypatch.setattr(plugin_tools, "_client_and_identity", lambda: (None, None, identity))
     result = json.loads(plugin_tools.inkbox_send_email({"reply_to_message_id": uid(3), "body_text": "Hello group"}))
     assert result["ok"]
-    identity.reply_all_email.assert_called_once_with(uid(3), subject=None, body_text="Hello group", body_html=None)
+    identity.reply_all_email.assert_called_once_with(uid(3), subject=None, body_text="Hello group", body_html=None,
+                                                   attachments=None, idempotency_key=result["idempotency_key"])
     result = json.loads(plugin_tools.inkbox_send_email({"reply_to_message_id": uid(3), "to": ["stranger@example.com"]}))
     assert "error" in result
     assert identity.reply_all_email.call_count == 1

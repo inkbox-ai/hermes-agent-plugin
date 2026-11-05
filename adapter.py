@@ -8479,6 +8479,10 @@ class InkboxAdapter(BasePlatformAdapter):
             or "Unknown caller"
         )
 
+        def speaker(party, phone):
+            role = str(getattr(party, "value", party) or "unknown")
+            return f"{role} ({phone})" if phone else role
+
         transcript: list[tuple[str, str]] = []
         transcript_fetch_failed = False
         try:
@@ -8488,14 +8492,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 rows = await asyncio.to_thread(list_transcripts, call_id)
                 transcript = [
                     (
-                        str(
-                            getattr(
-                                getattr(row, "party", ""),
-                                "value",
-                                getattr(row, "party", ""),
-                            )
-                            or "unknown"
-                        ),
+                        speaker(getattr(row, "party", None), getattr(row, "phone_number", None)),
                         str(getattr(row, "text", "") or ""),
                     )
                     for row in (rows or [])
@@ -8518,7 +8515,7 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             transcript = [
                 (
-                    str(entry.get("party") or "unknown"),
+                    speaker(entry.get("party"), entry.get("phone_number")),
                     str(entry.get("text") or ""),
                 )
                 for entry in (entries or [])
@@ -8569,6 +8566,9 @@ class InkboxAdapter(BasePlatformAdapter):
         ])
         if hangup_reason:
             body_parts.append(f"Hangup reason: {hangup_reason}")
+        connections = call.get("connections") if "connections" in call else call.get("forwardings")
+        if connections:
+            body_parts.append("Call connection history: " + _escape_contact_memory_tokens(json.dumps(connections, ensure_ascii=False)))
         if remote_phone:
             body_parts.extend([
                 "Remote party phone number: "
