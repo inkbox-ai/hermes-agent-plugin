@@ -198,7 +198,8 @@ class FakeInkboxClient:
 
 
 @pytest.fixture(autouse=True)
-def fake_web(monkeypatch):
+def fake_web(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(
         adapter_mod,
         "web",

@@ -7365,6 +7365,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     email_context[field] = recovery_route[route_field]
             email_context["from_address"] = target or ""
             recovery_route["inkbox_recovery_target"]["email_context"] = email_context
+        message_id = f"delivery-failure:{mode}:{uuid.uuid4().hex}"
         source = self.build_source(
             chat_id=str(chat_id),
             chat_name=str(target or chat_id),
@@ -7373,7 +7374,7 @@ class InkboxAdapter(BasePlatformAdapter):
             user_name=str(target or chat_id),
             user_id_alt=str(target or "") or None,
             thread_id=thread_id or None,
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
+            message_id=message_id,
         )
         event = MessageEvent(
             text=text,
@@ -7386,12 +7387,14 @@ class InkboxAdapter(BasePlatformAdapter):
                 "error_code": error_code or "",
                 "attempt": attempts,
             },
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
+            message_id=message_id,
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
-            metadata={"inkbox_reply_route": recovery_route},
+            metadata={"inkbox_prepared": True, "inkbox_reply_route": recovery_route},
         )
+        event.allow_gateway_control = False
         try:
+            self._conversation_state().remember(str(chat_id), message_id, recovery_route)
             await self._enqueue(event)
             logger.warning(
                 "[Inkbox] Woke agent about failed outbound %s (attempt %d/%d, stage=%s, error=%s)",

@@ -2,6 +2,7 @@
 
 ## 0.2.22
 
+- Restore delivery-failure follow-ups through Hermes v0.22.5 while retaining their original destinations and retry limits.
 - Accept inbound messages when the API origin comes from SDK defaults or configuration, without requiring an explicit URL override.
 - Make SMS, Slack, WhatsApp, and Vault tool visibility follow their available capabilities while retaining useful discovery, history, and recovery tools.
 - Add `/inkbox refresh` and `inkbox_refresh_capabilities` to recheck capabilities and refresh live host tool catalogs without a gateway restart.
