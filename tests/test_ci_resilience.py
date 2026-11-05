@@ -138,6 +138,40 @@ def test_live_identity_resolution_uses_the_configured_api(monkeypatch):
     assert calls == [{"api_key": "test-key", "base_url": "https://example.com"}]
 
 
+def test_native_fixture_accepts_capability_reads_but_rejects_secrets_and_writes(monkeypatch):
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    import httpx
+    from inkbox_plugin import capabilities
+    from inkbox_plugin.config import InkboxPluginConfig
+    from tests.ci.check_native_install import LocalAPI
+
+    monkeypatch.setattr(LocalAPI, "requests", [])
+    monkeypatch.setattr(LocalAPI, "unexpected", [])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LocalAPI)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(capabilities, "read_runtime_config", lambda: InkboxPluginConfig(
+        api_key="offline-fixture-only", identity="offline-smoke", base_url=base))
+    monkeypatch.setattr(capabilities, "_CACHE_KEY", None)
+    monkeypatch.setattr(capabilities, "_SNAPSHOT", {})
+    monkeypatch.setattr(capabilities, "_EXPIRES", 0.0)
+    try:
+        assert capabilities.snapshot(force=True)["vault_exists"] is False
+        assert LocalAPI.requests == ["/api/v1/identities/offline-smoke", "/api/v1/vault/info"]
+        assert LocalAPI.unexpected == []
+        with httpx.Client(base_url=base, timeout=5) as client:
+            assert client.get("/api/v1/vault/secrets").status_code == 404
+            assert client.post("/api/v1/vault/unlock").status_code == 405
+        assert LocalAPI.unexpected == ["/api/v1/vault/secrets", "mutation"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="exercises the POSIX Bash installer")
 def test_installer_retries_a_hung_attempt_without_waiting_for_job_timeout(tmp_path):
     import subprocess
