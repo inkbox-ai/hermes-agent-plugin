@@ -20,7 +20,8 @@ _EVENT_TYPES = {"message.received", "text.received", "imessage.received", "imess
 
 
 def identity_scope(adapter):
-    values = [getattr(adapter, name, None) for name in ("_base_url", "_identity_handle", "_identity_id")]
+    origin = getattr(adapter, "_base_url", None) or getattr(getattr(adapter, "_inkbox", None), "_base_url", None)
+    values = [origin, getattr(adapter, "_identity_handle", None), getattr(adapter, "_identity_id", None)]
     if not all(isinstance(value, str) and value for value in values):
         return None
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()

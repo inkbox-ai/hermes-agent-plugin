@@ -2,6 +2,7 @@
 
 ## 0.2.22
 
+- Accept inbound messages when the API origin comes from SDK defaults or configuration, without requiring an explicit URL override.
 - Make SMS, Slack, WhatsApp, and Vault tool visibility follow their available capabilities while retaining useful discovery, history, and recovery tools.
 - Add `/inkbox refresh` and `inkbox_refresh_capabilities` to recheck capabilities and refresh live host tool catalogs without a gateway restart.
 - Run scheduled full-stack CI once daily at noon Pacific time, following daylight saving time.
