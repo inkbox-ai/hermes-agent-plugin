@@ -2,6 +2,7 @@
 
 ## 0.2.22
 
+- Run scheduled full-stack CI once daily at noon Pacific time, following daylight saving time.
 - Pin real-host CI checkouts and installation to Hermes v0.22.5.
 - Support Hermes v0.22.5 event admission, routing restoration, and cancelled-delivery cleanup while preserving queued-message recovery.
 - Expose WhatsApp tools only for identities with WhatsApp configured, with cached availability checks.
