@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import re
 import sys
 import tomllib
 
@@ -19,14 +18,11 @@ import tomllib
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, type=Path)
-    parser.add_argument("--wheel", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
-    host, wheel, out = args.host.resolve(), args.wheel.resolve(), args.out.absolute()
+    host, out = args.host.resolve(), args.out.absolute()
     if not (host / "pm" / "build_env.py").is_file() or not (host / "uv.lock").is_file():
         parser.error("the real Hermes checkout and its committed lock are required")
-    if not wheel.is_file():
-        parser.error("the reviewed SDK candidate wheel is required")
     if out.exists() or out.is_symlink():
         parser.error("the independent environment output must not already exist")
 
@@ -40,13 +36,8 @@ def main() -> None:
                     if line.strip() and not line.lstrip().startswith("#")]
     plugin = Path(__file__).resolve().parents[2]
     project = tomllib.loads((plugin / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    dependencies = list(project["dependencies"])
-    sdk = [spec for spec in dependencies if re.match(r"^inkbox(?=[\s<>=!~;\[@]|$)", spec, re.I)]
-    if len(sdk) != 1:
-        parser.error("exactly one SDK dependency must be replaced by the reviewed candidate")
-    requirements.extend(spec for spec in dependencies if spec not in sdk)
+    requirements.extend(project["dependencies"])
     requirements.extend(project["optional-dependencies"]["test"])
-    requirements.append("inkbox @ " + wheel.as_uri())
     interpreter = pm.build_requirements_environment(
         requirements, out=out, lock=host / "uv.lock", explicit=True,
     )

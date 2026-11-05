@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.22
+
+- Require published Inkbox SDK `>=0.7.27,<1.0.0`, replacing the temporary Git source override and source-candidate CI installs.
+
 ## 0.2.21
 
 - Recognize case-equivalent WhatsApp conversation IDs as source replies, preserving automatic quotes and preventing duplicate final responses without changing retained request payloads.

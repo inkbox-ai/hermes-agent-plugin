@@ -40,9 +40,8 @@ jobs:
 
       - name: Build test deps with the real Hermes main lock
         run: |
-          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
           "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
-            --host "$GITHUB_WORKSPACE/.upstream-hermes" --wheel "$WHEEL" \
+            --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
       - name: Complete offline suite vs real Hermes main

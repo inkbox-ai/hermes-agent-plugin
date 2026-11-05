@@ -622,7 +622,7 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The base SDK floor is **0.7.24** for Slack file upload and operation APIs. Dedicated WhatsApp additionally requires the reviewed 0.7.26 source candidate until a WhatsApp-capable SDK release is published. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The SDK floor is **0.7.27**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
 ### Slack setup and replies
 
@@ -689,7 +689,7 @@ A superseding instruction denies unresolved permission requests without clearing
 
 ## Development Commands
 
-The normal dependency is Inkbox SDK `>=0.7.24,<1.0.0`. Until a WhatsApp-capable SDK release is published, the UV source override and lockfile pin the reviewed public SDK candidate. PR checks build that exact candidate and retain separate historical compatibility lanes. Before release, remove the UV source override and regenerate the registry lock after a WhatsApp-capable SDK release is available, updating the dependency floor to that release; source-candidate checks do not claim a published-package installation.
+The dependency is published Inkbox SDK `>=0.7.27,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:
