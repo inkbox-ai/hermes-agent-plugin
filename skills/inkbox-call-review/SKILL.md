@@ -1,6 +1,6 @@
 ---
 name: inkbox-call-review
-description: Use when the user asks about Inkbox calls, call transcripts, missed calls, or follow-up work. Hermes can use current live/post-call context, but does not expose historical call-read tools.
+description: Use when the user asks about Inkbox call history, transcripts, missed calls, active-call status, or post-call follow-up work.
 user-invocable: false
 ---
 
@@ -11,9 +11,10 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
 ## Hermes tool availability
 
 - Hermes exposes `inkbox_place_call` for outbound calls.
-- OpenAI Realtime and Inkbox Voice AI calls provide transcript and post-call
+- Live voice and Inkbox Voice AI calls provide transcript and post-call
   context to Hermes during call wrap-up.
-- Hermes does not register historical call-read tools such as `inkbox_list_calls` or `inkbox_list_call_transcripts`.
+- `inkbox_list_calls`, `inkbox_get_call`, and `inkbox_get_call_transcripts` expose accessible call history, details, and full transcripts.
+- `inkbox_hangup_call` requests hangup; use `inkbox_get_call` to confirm teardown.
 
 ## Workflow
 
@@ -25,7 +26,7 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
    remote party, use the remote phone number supplied in the current call
    context. It is authoritative for that call; contact memories must not
    replace it.
-2. **Past call requests.** If the user asks to inspect old calls, missed calls, or transcripts, explain that this Hermes installation does not expose historical call-read tools.
+2. **Past call requests.** List calls with date bounds, get the relevant call, and fetch its transcript. Preserve available speaker phone numbers and distinguish conference guests from transfers using connection history. Missing attribution stays unknown.
 3. **Prepare follow-ups from supplied context.** If the user gives the transcript or call summary in the conversation, use that text and the available Inkbox send tools for follow-up.
 4. **Complete SMS commitments with the SMS tool.** For a still-needed SMS
    requested during the call, use `inkbox_send_sms` with `to` equal to the exact
@@ -41,5 +42,5 @@ Use this skill when the user asks about Inkbox phone calls, transcripts, or post
 
 ## Caveats
 
-- Historical call review is available in the OpenClaw power tier, not in the Hermes social tier.
+- A hangup request can return a still-active call while teardown completes; do not claim it has ended until confirmed.
 - Contact-rule-blocked calls may be rejected before Hermes sees an event.

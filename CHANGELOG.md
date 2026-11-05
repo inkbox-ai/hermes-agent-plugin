@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.22
+
+- Restore delivery-failure follow-ups through Hermes v0.22.5 while retaining their original destinations and retry limits.
+- Accept inbound messages when the API origin comes from SDK defaults or configuration, without requiring an explicit URL override.
+- Make SMS, Slack, WhatsApp, and Vault tool visibility follow their available capabilities while retaining useful discovery, history, and recovery tools.
+- Add `/inkbox refresh` and `inkbox_refresh_capabilities` to recheck capabilities and refresh live host tool catalogs without a gateway restart.
+- Run scheduled full-stack CI once daily at noon Pacific time, following daylight saving time.
+- Pin real-host CI checkouts and installation to Hermes v0.22.5.
+- Support Hermes v0.22.5 event admission, routing restoration, and cancelled-delivery cleanup while preserving queued-message recovery.
+- Add email listing, message/thread reads, attachment downloads, forwarding, call history/transcript reads, hangup, and read-only message-send recovery tools.
+- Add email attachments and inline images, retain email/SMS/iMessage request keys for recovery, and expose explicit voicemail actions and messages.
+- Preserve speaker phone-number attribution and connection history in hosted post-call context.
+- Require published Inkbox SDK `>=0.7.27,<1.0.0`, replacing the temporary Git source override and source-candidate CI installs.
+
 ## 0.2.21
 
 - Recognize case-equivalent WhatsApp conversation IDs as source replies, preserving automatic quotes and preventing duplicate final responses without changing retained request payloads.

@@ -89,12 +89,15 @@ def handle_cli(args) -> None:
     print("Usage: hermes inkbox <setup|bootstrap|doctor|whoami>")
 
 
-def slash_handler(raw_args: str) -> str:
+def slash_handler(raw_args: str, *, session_id="", **_kwargs) -> str:
     command = (raw_args or "").strip().lower()
+    if command == "refresh":
+        from .capabilities import refresh
+        return json.dumps(refresh(session_id=session_id), indent=2, sort_keys=True)
     if command in {"", "doctor", "status"}:
         return json.dumps(run_doctor(), indent=2, sort_keys=True)
     if command == "whoami":
         return json.dumps(json.loads(inkbox_whoami({})), indent=2, sort_keys=True)
     if command == "setup":
         return "Run setup from a terminal: hermes inkbox setup"
-    return "Usage: /inkbox [doctor|whoami]"
+    return "Usage: /inkbox [doctor|whoami|refresh]"

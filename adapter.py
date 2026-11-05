@@ -2191,7 +2191,7 @@ class InkboxAdapter(BasePlatformAdapter):
             args = (*args[:5], delivery_callback(event, args[5]), *args[6:])
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
-            with delivery_scope(self, event):
+            async with delivery_scope(self, event):
                 return await super()._send_final_text(event, *args, **kwargs)
         finally:
             _host_final_reply.reset(token)
@@ -2200,13 +2200,13 @@ class InkboxAdapter(BasePlatformAdapter):
         from .native_envelope import delivery_scope, delivery_callback
         if "record_delivery" in kwargs:
             kwargs["record_delivery"] = delivery_callback(event, kwargs["record_delivery"])
-        with delivery_scope(self, event):
+        async with delivery_scope(self, event):
             return await super()._deliver_attachments(event, *args, **kwargs)
 
     async def _extract_response_content(self, response, event, session_key, **kwargs):
         from .native_envelope import delivery_scope
         native = getattr(self, "_native_turns", None)
-        with delivery_scope(self, event):
+        async with delivery_scope(self, event):
             if native and getattr(event, "_inkbox_producer_execution", False):
                 native.capture_result(event, response)
             extracted = await super()._extract_response_content(response, event, session_key, **kwargs)
@@ -7365,6 +7365,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     email_context[field] = recovery_route[route_field]
             email_context["from_address"] = target or ""
             recovery_route["inkbox_recovery_target"]["email_context"] = email_context
+        message_id = f"delivery-failure:{mode}:{uuid.uuid4().hex}"
         source = self.build_source(
             chat_id=str(chat_id),
             chat_name=str(target or chat_id),
@@ -7373,7 +7374,7 @@ class InkboxAdapter(BasePlatformAdapter):
             user_name=str(target or chat_id),
             user_id_alt=str(target or "") or None,
             thread_id=thread_id or None,
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
+            message_id=message_id,
         )
         event = MessageEvent(
             text=text,
@@ -7386,12 +7387,14 @@ class InkboxAdapter(BasePlatformAdapter):
                 "error_code": error_code or "",
                 "attempt": attempts,
             },
-            message_id=f"delivery-failure:{mode}:{int(time.time() * 1000)}",
+            message_id=message_id,
             channel_prompt=channel_prompt,
             auto_skill=auto_skill,
-            metadata={"inkbox_reply_route": recovery_route},
+            metadata={"inkbox_prepared": True, "inkbox_reply_route": recovery_route},
         )
+        event.allow_gateway_control = False
         try:
+            self._conversation_state().remember(str(chat_id), message_id, recovery_route)
             await self._enqueue(event)
             logger.warning(
                 "[Inkbox] Woke agent about failed outbound %s (attempt %d/%d, stage=%s, error=%s)",
@@ -8479,6 +8482,10 @@ class InkboxAdapter(BasePlatformAdapter):
             or "Unknown caller"
         )
 
+        def speaker(party, phone):
+            role = str(getattr(party, "value", party) or "unknown")
+            return f"{role} ({phone})" if phone else role
+
         transcript: list[tuple[str, str]] = []
         transcript_fetch_failed = False
         try:
@@ -8488,14 +8495,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 rows = await asyncio.to_thread(list_transcripts, call_id)
                 transcript = [
                     (
-                        str(
-                            getattr(
-                                getattr(row, "party", ""),
-                                "value",
-                                getattr(row, "party", ""),
-                            )
-                            or "unknown"
-                        ),
+                        speaker(getattr(row, "party", None), getattr(row, "phone_number", None)),
                         str(getattr(row, "text", "") or ""),
                     )
                     for row in (rows or [])
@@ -8518,7 +8518,7 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             transcript = [
                 (
-                    str(entry.get("party") or "unknown"),
+                    speaker(entry.get("party"), entry.get("phone_number")),
                     str(entry.get("text") or ""),
                 )
                 for entry in (entries or [])
@@ -8569,6 +8569,9 @@ class InkboxAdapter(BasePlatformAdapter):
         ])
         if hangup_reason:
             body_parts.append(f"Hangup reason: {hangup_reason}")
+        connections = call.get("connections") if "connections" in call else call.get("forwardings")
+        if connections:
+            body_parts.append("Call connection history: " + _escape_contact_memory_tokens(json.dumps(connections, ensure_ascii=False)))
         if remote_phone:
             body_parts.extend([
                 "Remote party phone number: "

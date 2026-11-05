@@ -281,7 +281,7 @@ def register(ctx) -> None:
         "inkbox",
         slash_handler,
         description="Show Inkbox plugin status.",
-        args_hint="[doctor|whoami]",
+        args_hint="[doctor|whoami|refresh]",
     )
     _register_skills(ctx)
     logger.info("Inkbox Hermes plugin registered")

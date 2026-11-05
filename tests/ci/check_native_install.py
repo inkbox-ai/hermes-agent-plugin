@@ -36,6 +36,9 @@ class LocalAPI(BaseHTTPRequestHandler):
             }
         elif path == '/api/v1/identities/offline-smoke/a2a/tasks':
             data = {'items': [], 'next_cursor': None}
+        elif path == '/api/v1/vault/info':
+            self.send_error(404)
+            return
         elif path in {'/api/v1/models', '/v1/models', '/models', '/api/tags', '/v1/props', '/props', '/version'}:
             # Native provider detection probes these optional metadata routes.
             # There is deliberately no model server in this startup-only fixture.

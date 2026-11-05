@@ -1,26 +1,32 @@
 ---
 name: inkbox-email-triage
-description: Use for inbound email and user-requested outbound email. Hermes supports new messages and replies using the active inbound thread, but does not expose mailbox queue/read/forward/archive tools.
+description: Use for email triage, unread mail, historical messages and threads, attachments, forwarding, and user-requested outbound email.
 user-invocable: false
 ---
 
 # Inkbox email triage
 
-Hermes gives the agent a working Inkbox mailbox and current inbound email context. This social-tier plugin does not register historical mailbox queue/read, forward, or mark-read tools.
+Use the configured identity's mailbox and current inbound email context.
 
 ## Hermes tool availability
 
-- `inkbox_send_email` — send or reply to email from the configured Inkbox identity.
-- There is no `inkbox_list_unread_emails`, `inkbox_get_email`, `inkbox_get_email_thread`, `inkbox_forward_email`, or `inkbox_mark_emails_read` tool in Hermes.
+- `inkbox_list_emails`: list a bounded page with date/direction filters and optional unread or sender/subject/snippet matching.
+- `inkbox_get_email` and `inkbox_get_email_thread`: read full messages or chronological thread summaries.
+- `inkbox_download_email_attachment`: save a stored attachment locally.
+- `inkbox_send_email` and `inkbox_forward_email`: send, reply-all, or forward with attachments.
+- `inkbox_lookup_message_send`: recover a message ID after an uncertain send.
 
 ## Workflow
 
-1. **Current inbound email.** Use the email body, sender, subject, thread id, and message id supplied in the current turn. Do not claim to have fetched additional mailbox history.
+1. **Current inbound email.** Use supplied context; fetch the message or thread when additional history is needed.
 2. **Reply — write vs. call the tool.** These are different, and mixing them double-sends:
    - **Replying to the email that just woke you** (this turn carries an `[inkbox:email …]` marker): **just write your reply.** It is delivered automatically as a threaded email reply to that sender. Do **NOT** also call `inkbox_send_email` for that reply — the tool would send the same message a second time.
    - **Emailing a different thread or recipient:** use `inkbox_send_email` with the reply/thread metadata when available so mail clients group the response correctly.
 3. **New outbound email.** If the user provides a recipient address, subject, and body, use `inkbox_send_email`.
-4. **Queue/read/forward/archive requests.** If the user asks to triage the unread queue, inspect old threads, forward a stored email, or mark messages read, explain that this Hermes installation does not expose those mailbox tools.
+4. **Unread/history requests.** Use `inkbox_list_emails` with `unread_only` or `q` as appropriate. These filters apply within each scanned page; follow `next_offset` even when no messages matched. Search does not include full bodies. Narrow date bounds for large mailboxes.
+5. **Read and forward.** Get thread summaries by thread UUID and full bodies by message UUID. Reading one inbound email marks it read; reading a thread does not. Forward a stored message with `inkbox_forward_email`, which includes original attachments by default.
+6. **Attachments.** Send approved local files with `attachments: [{"path": "/path/to/file"}]`. Inline images need a unique `content_id` and a matching `cid:` reference in `body_html`. Download stored attachments by their exact metadata filename.
+7. **Uncertain sends.** Retain `idempotency_key` and `operation`, then inspect `inkbox_lookup_message_send`. Retry only with the same key and unchanged content. A missing lookup is not proof of failure, and acceptance is not confirmed delivery.
 
 ## Reply hygiene
 

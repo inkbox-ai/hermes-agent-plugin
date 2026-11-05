@@ -63,7 +63,7 @@ def dispatch(name, args, *, session_id="", **_kwargs):
             if name == "inkbox_list_vault_secrets" and args.get("secret_type") not in {None, "login", "api_key", "key_pair", "ssh_key", "other"}:
                 raise ValueError("Invalid secret_type")
             if name != "inkbox_list_vault_secrets" and not os.getenv("INKBOX_HERMES_VAULT_KEY"):
-                raise ValueError("Vault is locked. Set INKBOX_HERMES_VAULT_KEY locally and restart; never send the key in chat.")
+                raise ValueError("Vault is locked. Set INKBOX_HERMES_VAULT_KEY in the host environment, reload that environment, then run /inkbox refresh; never send the key in chat.")
             client = Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url))
             identity = client.get_identity(cfg.identity)
         else:
@@ -151,14 +151,10 @@ def dispatch(name, args, *, session_id="", **_kwargs):
 
 
 def register(ctx, configured):
+    from .capabilities import check
     specs = [*VAULT_TOOLS, *THREAD_TOOLS,
              *[{"name": item["name"], "description": item["description"], "parameters": item["inputSchema"]} for item in SLACK_TOOLS]]
-    thread_names = {tool["name"] for tool in THREAD_TOOLS}
     for spec in specs:
         def handler(args, _name=spec["name"], **kwargs):
             return dispatch(_name, args, **kwargs)
-        def available(_name=spec["name"]):
-            cfg = read_runtime_config()
-            return bool(configured() and (not _name.startswith("inkbox_slack_") or cfg.slack_enabled)
-                        and (_name not in thread_names or cfg.imessage_threaded_replies))
-        ctx.register_tool(spec["name"], "inkbox", spec, handler, check_fn=available)
+        ctx.register_tool(spec["name"], "inkbox", spec, handler, check_fn=check(spec["name"]))

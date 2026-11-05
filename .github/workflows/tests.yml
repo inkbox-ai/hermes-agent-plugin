@@ -38,9 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv venv --python ${{ matrix.python-version }}
-          uv pip install \
-            'audioop-lts>=0.2.1; python_version >= "3.13"' "$(bash tests/ci/candidate_sdk.sh)" \
-            'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8' 'ruff>=0.11.0,<0.16'
+          uv sync --extra test --frozen
 
       - name: Lint
         run: .venv/bin/ruff check .
@@ -48,20 +46,18 @@ jobs:
       - name: Run unit tests
         run: .venv/bin/python -m pytest -v
 
-  # Contract suite against the REAL Hermes host at main. This is the lane that
-  # catches upstream interface drift (a renamed register_platform kwarg, a moved
-  # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
-  # Same suite the canary runs on a schedule; this is the per-PR gate version.
+  # Exercise the pinned Hermes host and its locked dependencies.
   contract-pr:
     runs-on: blacksmith-2vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .upstream-hermes
           fetch-depth: 1
 
@@ -79,14 +75,13 @@ jobs:
           cache-python: 'false'
           cache-node: 'false'
 
-      - name: Build test deps with the real Hermes main lock
+      - name: Build test deps with the Hermes v0.22.5 lock
         run: |
-          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
           "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
-            --host "$GITHUB_WORKSPACE/.upstream-hermes" --wheel "$WHEEL" \
+            --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
-      - name: Contract tests vs real Hermes main
+      - name: Contract tests vs Hermes v0.22.5
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
@@ -137,11 +132,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v8.1.0
-      - name: Prepare and install the real SDK candidate
+      - name: Install published SDK dependencies
         shell: bash
         run: |
-          WHEEL="$(bash tests/ci/candidate_sdk.sh)"
-          uv lock --find-links "$(dirname "$WHEEL")" --python 3.12
           uv sync --extra test --frozen --python 3.12
       - name: Run native Windows unit tests
         run: uv run --frozen python -m pytest -v
@@ -156,10 +149,11 @@ jobs:
       - uses: astral-sh/setup-uv@v8.1.0
       - name: Set up isolated runtime
         run: echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .hermes/hermes-agent
           fetch-depth: 1
       - name: Install actual Hermes
@@ -172,8 +166,6 @@ jobs:
             --source "$GITHUB_WORKSPACE" --runtime-home "$HERMES_HOME" --temp-root "$RUNNER_TEMP")"
           mkdir -p "$HERMES_HOME/plugins"
           ln -sfn "$PLUGIN_SOURCE" "$HERMES_HOME/plugins/inkbox"
-          WHEEL="$(bash "$GITHUB_WORKSPACE/tests/ci/candidate_sdk.sh")"
-          export UV_FIND_LINKS="$(dirname "$WHEEL")"
           hermes plugins enable inkbox
           python3 "$GITHUB_WORKSPACE/tests/ci/hermes_python.py" \
             "$GITHUB_WORKSPACE/tests/ci/restrict_hermes_tools.py"
@@ -181,7 +173,7 @@ jobs:
             "$GITHUB_WORKSPACE/tests/ci/check_hermes_runtime.py")"
           uv venv --python 3.12 "$RUNNER_TEMP/inkbox-live-runner"
           uv pip install --python "$RUNNER_TEMP/inkbox-live-runner/bin/python" --no-sources \
-            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$WHEEL" "$SDK_REQUIREMENT" \
+            --requirements "$GITHUB_WORKSPACE/pyproject.toml" "$SDK_REQUIREMENT" \
             pytest pyyaml fastapi 'uvicorn[standard]'
           "$RUNNER_TEMP/inkbox-live-runner/bin/pytest" tests/test_ci_import_isolation.py -q
           "$RUNNER_TEMP/inkbox-live-runner/bin/python" \

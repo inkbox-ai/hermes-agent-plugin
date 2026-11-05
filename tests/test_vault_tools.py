@@ -43,7 +43,7 @@ def test_metadata_without_unlock_or_payload(vault, monkeypatch, key):
 def test_locked_key_guidance_without_request(vault, name):
     result = call(name, secret_id=LOGIN_ID)
     assert "INKBOX_HERMES_VAULT_KEY" in result["error"]
-    assert "restart" in result["error"]
+    assert "/inkbox refresh" in result["error"]
     assert not vault.requests
 
 

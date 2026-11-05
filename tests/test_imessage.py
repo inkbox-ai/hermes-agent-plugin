@@ -117,7 +117,7 @@ def test_send_imessage_tool_prefers_conversation_id(monkeypatch):
     }))
 
     assert out["ok"] is True
-    assert identity.sent_imessages == [{"text": "hello", "conversation_id": "imconv-123"}]
+    assert identity.sent_imessages == [{"text": "hello", "conversation_id": "imconv-123", "idempotency_key": out["idempotency_key"]}]
 
 
 def test_send_imessage_tool_starts_group_on_dedicated_outbound_line(monkeypatch):
@@ -133,6 +133,7 @@ def test_send_imessage_tool_starts_group_on_dedicated_outbound_line(monkeypatch)
     assert identity.sent_imessages == [{
         "text": "Dinner at 7?",
         "to": ["+15555550101", "+15555550102"],
+        "idempotency_key": out["idempotency_key"],
     }]
 
 
@@ -149,6 +150,7 @@ def test_send_imessage_tool_keeps_recipient_first_one_to_one_send(monkeypatch):
     assert identity.sent_imessages == [{
         "text": "hello",
         "to": "+15555550101",
+        "idempotency_key": out["idempotency_key"],
     }]
 
 
@@ -207,6 +209,7 @@ def test_send_imessage_tool_uploads_local_media_path(monkeypatch, tmp_path):
         "text": "Here is the chart.",
         "conversation_id": "imconv-123",
         "media_urls": ["https://media.inkbox.test/uploaded/chart.png"],
+        "idempotency_key": out["idempotency_key"],
     }]
 
 

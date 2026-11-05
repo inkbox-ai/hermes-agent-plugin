@@ -129,6 +129,11 @@ def test_host_path_policy_and_missing_file(local_file):
 def test_connection_and_identity_ownership(client, local_file, tool, field, value):
     setattr(client.slack.list_connections.return_value.connections[0], field, value)
     args = arguments(local_file) if tool == "upload_file" else {"connection_id": CONNECTION, "operation_id": OPERATION}
+    if field == "status" and tool == "get_operation":
+        run_tool(client, "agent", "inkbox_slack_get_operation", args)
+        client.slack.get_operation.assert_called_once()
+        client.slack.upload_file.assert_not_called()
+        return
     with pytest.raises((ValueError, PermissionError)):
         run_tool(client, "agent", "inkbox_slack_" + tool, args)
     client.slack.upload_file.assert_not_called()

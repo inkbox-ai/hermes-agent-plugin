@@ -307,6 +307,8 @@ def invoke(operation, args, session_id=""):
 
 
 def register(ctx, check_fn):
+    from .capabilities import check
+
     def string(description):
         return {"type": "string", "description": description}
 
@@ -427,4 +429,4 @@ def register(ctx, check_fn):
             "description": description,
             "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
         }
-        ctx.register_tool(name, "inkbox", schema, handler, check_fn=check_fn)
+        ctx.register_tool(name, "inkbox", schema, handler, check_fn=check(name))

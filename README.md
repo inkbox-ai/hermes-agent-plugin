@@ -530,7 +530,14 @@ after that built-in guidance; no extra configuration is required to enable it.
 Hermes direct tools:
 
 - `inkbox_whoami`
+- `inkbox_refresh_capabilities`
 - `inkbox_send_email`
+- `inkbox_list_emails`
+- `inkbox_get_email`
+- `inkbox_get_email_thread`
+- `inkbox_download_email_attachment`
+- `inkbox_forward_email`
+- `inkbox_lookup_message_send`
 - `inkbox_send_sms`
 - `inkbox_list_text_conversations`
 - `inkbox_get_text_conversation`
@@ -546,6 +553,10 @@ Hermes direct tools:
 - `inkbox_send_imessage_reaction`
 - `inkbox_mark_imessage_conversation_read`
 - `inkbox_place_call`
+- `inkbox_list_calls`
+- `inkbox_get_call`
+- `inkbox_get_call_transcripts`
+- `inkbox_hangup_call`
 - `inkbox_a2a_call`
 - `inkbox_a2a_check`
 - `inkbox_a2a_reply`
@@ -562,6 +573,14 @@ Hermes direct tools:
 - `inkbox_create_contact`
 - `inkbox_update_contact`
 - `inkbox_delete_contact`
+
+Email listing supports direction and date bounds, plus unread and sender/subject/snippet filtering within each bounded page. Follow `next_offset` even when a page has no matches; this is not full-body search. Narrow date bounds if the scan limit is reached. Thread reads return chronological message summaries; use `inkbox_get_email` for full bodies. Reading a single inbound email marks it read; thread and attachment reads do not. Attachments download to generated local paths, with a 25 MiB limit.
+
+Email sends and reply-all accept `attachments: [{"path": "/path/to/file"}]`; inline images additionally use `content_id` and an HTML `cid:` reference. Forwarding includes original attachments by default and accepts additional local attachments. Local uploads use the host's media-path validation.
+
+Email, SMS, and iMessage sends accept `idempotency_key` and return it on success or send failure. Reuse the original key only with identical arguments. For an uncertain result, use `inkbox_lookup_message_send` with the returned `operation` and key before retrying; a missing lookup does not prove the send failed. Send acceptance is not delivery confirmation. For iMessage media recovery, retain the returned `media_urls` instead of uploading the same file again.
+
+Call tools expose history, details, transcripts, and asynchronous hangup. Transcript results and hosted post-call context preserve available speaker phone numbers and connection history. `inkbox_place_call` accepts `on_voicemail: "hang_up" | "ignore"`; Voice AI additionally supports `"leave_message"` and an optional `voicemail_message`. Omitting the action retains the configured voicemail behavior.
 
 Inbound A2A tasks use isolated context sessions and a durable task registry.
 After durable binding, the plugin immediately sends a non-terminal receipt that
@@ -582,7 +601,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.11 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.27 or
 newer.
 
 Realtime-only call tools:
@@ -622,7 +641,22 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The base SDK floor is **0.7.24** for Slack file upload and operation APIs. Dedicated WhatsApp additionally requires the reviewed 0.7.26 source candidate until a WhatsApp-capable SDK release is published. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The SDK floor is **0.7.27**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+
+### Capability visibility and refresh
+
+| Capability | Send or secret-access tools | History, recovery, and discovery |
+|---|---|---|
+| SMS | Active number with SMS ready | Text reads remain available while that number exists, including during sending restrictions |
+| Slack | Local Slack opt-in and a connected workspace | Retained connections keep history/recovery; connection listing stays available when Slack is opted in |
+| WhatsApp | Configured and enabled channel | Configured channels keep history/recovery; readiness lookup stays available |
+| Vault | Existing Vault and a locally configured `INKBOX_HERMES_VAULT_KEY` | Metadata listing stays available without unlocking |
+
+Discovery uses one shared 60-second cache, separated by profile, API key, API origin, identity, and Slack configuration. Failed remote checks are reported as unknown and do not remove potentially usable tools; known missing prerequisites still hide their dependent tools. Invocation always rechecks access through the API. No secret payloads are read or decrypted during discovery. Hermes also caches tool definitions, so use explicit refresh to update an existing catalog after capabilities change.
+
+After connecting or disconnecting a channel, run **`/inkbox refresh` in the active chat** to update the profile's open sessions, or call **`inkbox_refresh_capabilities`** to update only the calling session. Both bypass the discovery cache and use Hermes's native tool-refresh helpers without restarting the gateway. Existing toolset restrictions still apply. Results count the sessions actually refreshed and report partial failures; a missing live session is reported instead of claiming another process was refreshed.
+
+For a newly configured Vault key, first reload the host environment locally, then refresh capabilities. Never pass the key in chat or as a refresh-tool argument. Configuration changes to the channel transport itself still follow the setup wizard's guidance.
 
 ### Slack setup and replies
 
@@ -646,7 +680,7 @@ Task streaming is detected automatically through the connection's capabilities a
 
 ### Dedicated WhatsApp
 
-WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. `inkbox_get_whatsapp_status` reads current readiness without sending a message. No extra local feature flag is required.
+WhatsApp is available only after access is approved for an identity with a dedicated iMessage number. Use **Request Access** in the Inkbox console when it is not enabled; local settings cannot enable or provision it. `inkbox_get_whatsapp_status` remains available for readiness checks. Sending, uploads, and reactions require an enabled channel; history and recovery remain available for configured channels during sending restrictions. No extra local feature flag is required.
 
 Signed direct messages enter the existing Hermes session and authorization flow, with a durable channel/conversation/author boundary for approvals, Stop, and text bursts. Permissions, approvals and Stop remain scoped to the actual sender. New final replies, media deliveries, and same-conversation tool sends are plain messages by default. Quote selectively with an explicit `reply_to_message_id` when referring to an older message, distinguishing multiple requests, or identifying a specific attachment. Omitting a tool destination selects the active conversation. Explicit destinations remain authoritative, and an authorized quote target can be selected explicitly. Caller-supplied recovery keys retain the supplied request instead of acquiring a new quote. Rejected or uncertain sends are never replaced by automatic plain messages. Existing durable replies keep their original payload. Native voice calls, remote read receipts, typing, and Companion activation are not exposed. Delivery updates do not wake the model or resend an answer. A confirmed send with unknown delivery is not a failed send.
 
@@ -689,7 +723,11 @@ A superseding instruction denies unresolved permission requests without clearing
 
 ## Development Commands
 
-The normal dependency is Inkbox SDK `>=0.7.24,<1.0.0`. Until a WhatsApp-capable SDK release is published, the UV source override and lockfile pin the reviewed public SDK candidate. PR checks build that exact candidate and retain separate historical compatibility lanes. Before release, remove the UV source override and regenerate the registry lock after a WhatsApp-capable SDK release is available, updating the dependency floor to that release; source-candidate checks do not claim a published-package installation.
+Scheduled full-stack CI runs once daily at **12:00 PM Pacific time** (`America/Los_Angeles`), following daylight saving time.
+
+All CI jobs that use a real Hermes host pin **v0.22.5** (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). Contract checks, native installation, the reusable canary, and live suites share this revision. The installer script is fetched from the same commit and receives an explicit commit pin. This CI pin does not change an existing user's Hermes installation.
+
+The dependency is published Inkbox SDK `>=0.7.27,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:

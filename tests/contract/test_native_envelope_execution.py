@@ -39,6 +39,15 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
         adapter._slack_enabled = True
         adapter._imessage_threaded_replies = True
         adapter._base_url = "https://example.test"
+        sdk_client = None
+        if scenario == "sdk_default_origin":
+            from inkbox import Inkbox
+            monkeypatch.delenv("INKBOX_BASE_URL", raising=False)
+            monkeypatch.delenv("INKBOX_VAULT_KEY", raising=False)
+            monkeypatch.setattr("inkbox._config._CONFIG_PATH", tmp_path / "missing-sdk-config")
+            sdk_client = Inkbox(api_key="synthetic-key")
+            adapter._base_url = ""
+            adapter._inkbox = sdk_client
         adapter._identity_id = "00000000-0000-0000-0000-000000000001"
         runner = GatewayRunner(GatewayConfig())
         runner.adapters = {adapter.platform: adapter}
@@ -239,7 +248,7 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 await adapter.handle_message(original)
                 record = adapter._conversation_state().row(source.chat_id)["native_admissions"][original.message_id]
                 receipt = authority._receipt(get_session_admission(authority.db, admission_id=record["receipt"]["id"]))
-                authority.producer_turns.clear()  # Simulate lost process-local producer bracket.
+                getattr(authority, "producer_turns", {}).clear()  # Older hosts have no process-local producer bracket.
                 if scenario == "recovered_later_guard":
                     later_event = copy.deepcopy(original)
                     later_event.message_id = "later-event"
@@ -289,6 +298,8 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                     assert outcomes == ["success"]
                     assert not journal.row(source.chat_id)["quiet"]
                 assert not adapter._post_delivery_callbacks
+                assert not adapter._inkbox_receipt_tasks
+                assert not any(waiter.cancelled() for waiter in authority.waiters.values())
                 return
             if scenario == "group_interrupt":
                 await asyncio.wait_for(started.wait(), 3)
@@ -397,7 +408,14 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
             from gateway.session_runtime_workers import mutation_tasks
             await asyncio.gather(*mutation_tasks(authority))
             authority.db.close()
+            if sdk_client is not None:
+                sdk_client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["email", "sms"])
+def test_default_sdk_origin_delivers_through_real_authority(tmp_path, monkeypatch, mode):
+    test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeypatch, mode, "sdk_default_origin")
 
 
 def test_internal_a2a_uses_original_event_with_active_authority(tmp_path, monkeypatch):
