@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 
 import pytest
 
@@ -7,6 +8,19 @@ from tests.ci.restrict_hermes_tools import restrict_inkbox_platform
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HERMES_COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
+
+
+def test_every_host_checkout_matches_the_pinned_installer():
+    checkouts = 0
+    for workflow in ROOT.joinpath(".github", "workflows").glob("*.yml"):
+        for block in re.findall(r"repository: NousResearch/hermes-agent\n((?: +[^\n]*\n)*)", workflow.read_text()):
+            assert f"ref: {HERMES_COMMIT} # v0.22.5" in block, workflow.name
+            checkouts += 1
+    assert checkouts == 7
+    installer = ROOT.joinpath("tests", "ci", "install_hermes.sh").read_text()
+    assert f'hermes_commit="{HERMES_COMMIT}"' in installer
+    assert '${hermes_commit}/scripts/install.sh' in installer
 
 
 def test_every_live_workflow_uses_retrying_installer():
@@ -161,7 +175,7 @@ INSTALL
 def test_live_installer_arguments_match_current_host_cli(tmp_path, workflow_name):
     """Execute each workflow's actual arguments through the download/retry wrapper.
 
-    Hermes main's installer accepts non-interactive/browser flags, but rejects
+    The pinned installer accepts non-interactive/browser flags, but rejects
     the retired --no-skills flag before installing anything. Keep that strict
     argument boundary; don't silently discard unsupported caller arguments.
     """
@@ -179,13 +193,15 @@ def test_live_installer_arguments_match_current_host_cli(tmp_path, workflow_name
 cat > "$RUNNER_TEMP/hermes-install.sh" <<'INSTALL'
 #!/bin/bash
 set -eu
-for argument in "$@"; do
-  case "$argument" in
-    --non-interactive|--skip-browser) ;;
-    *) echo "unknown option: $argument" >&2; exit 1 ;;
+arguments=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --non-interactive|--skip-browser) shift ;;
+    --commit) [ "$2" = "bf0203a794a07aac3ff764972ab9087baa4e4f4e" ]; shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
-printf '%s\\n' "$@" > "$RUNNER_TEMP/accepted-arguments"
+printf '%s\\n' "${arguments[@]}" > "$RUNNER_TEMP/accepted-arguments"
 INSTALL
 ''')
     curl.chmod(0o755)
@@ -197,5 +213,5 @@ INSTALL
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "accepted-arguments").read_text().splitlines() == [
-        "--non-interactive", "--skip-browser",
+        "--non-interactive", "--skip-browser", "--commit", HERMES_COMMIT,
     ]

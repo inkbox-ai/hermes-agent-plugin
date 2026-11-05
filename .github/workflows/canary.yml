@@ -1,8 +1,6 @@
-name: Canary — plugin vs Hermes main
+name: Canary — plugin vs Hermes v0.22.5
 
-# Hermes main moves ~14 commits/day, so it can break us even when we don't push.
-# This reusable check runs the host-interface contract tests against the latest
-# host revision before full-stack suites.
+# Check the pinned host before full-stack suites.
 on:
   workflow_call:
   workflow_dispatch: {}
@@ -22,10 +20,11 @@ jobs:
         with:
           version: "latest"
 
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .upstream-hermes
           fetch-depth: 1
 
@@ -38,13 +37,13 @@ jobs:
           cache-python: 'false'
           cache-node: 'false'
 
-      - name: Build test deps with the real Hermes main lock
+      - name: Build test deps with the Hermes v0.22.5 lock
         run: |
           "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
             --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
-      - name: Complete offline suite vs real Hermes main
+      - name: Complete offline suite vs Hermes v0.22.5
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes

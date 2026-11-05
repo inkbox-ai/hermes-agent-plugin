@@ -707,6 +707,8 @@ A superseding instruction denies unresolved permission requests without clearing
 
 ## Development Commands
 
+All CI jobs that use a real Hermes host pin **v0.22.5** (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). Contract checks, native installation, the reusable canary, and live suites share this revision. The installer script is fetched from the same commit and receives an explicit commit pin. This CI pin does not change an existing user's Hermes installation.
+
 The dependency is published Inkbox SDK `>=0.7.27,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform

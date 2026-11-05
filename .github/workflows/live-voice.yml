@@ -71,10 +71,11 @@ jobs:
           echo "DRIVER_LOG=$RUNNER_TEMP/driver.log" >> "$GITHUB_ENV"
           echo "DRIVER_STATE=$RUNNER_TEMP/driver_state.json" >> "$GITHUB_ENV"
 
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .hermes/hermes-agent
           fetch-depth: 1
 

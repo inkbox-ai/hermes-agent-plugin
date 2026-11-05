@@ -46,20 +46,18 @@ jobs:
       - name: Run unit tests
         run: .venv/bin/python -m pytest -v
 
-  # Contract suite against the REAL Hermes host at main. This is the lane that
-  # catches upstream interface drift (a renamed register_platform kwarg, a moved
-  # symbol, a dropped MessageEvent/SendResult field) before it reaches a user.
-  # Same suite the canary runs on a schedule; this is the per-PR gate version.
+  # Exercise the pinned Hermes host and its locked dependencies.
   contract-pr:
     runs-on: blacksmith-2vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .upstream-hermes
           fetch-depth: 1
 
@@ -77,13 +75,13 @@ jobs:
           cache-python: 'false'
           cache-node: 'false'
 
-      - name: Build test deps with the real Hermes main lock
+      - name: Build test deps with the Hermes v0.22.5 lock
         run: |
           "${{ steps.host-pm.outputs.python-path }}" tests/ci/build_contract_environment.py \
             --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
-      - name: Contract tests vs real Hermes main
+      - name: Contract tests vs Hermes v0.22.5
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
@@ -151,10 +149,11 @@ jobs:
       - uses: astral-sh/setup-uv@v8.1.0
       - name: Set up isolated runtime
         run: echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
-      - name: Check out Hermes main
+      - name: Check out Hermes v0.22.5
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
+          ref: bf0203a794a07aac3ff764972ab9087baa4e4f4e # v0.22.5
           path: .hermes/hermes-agent
           fetch-depth: 1
       - name: Install actual Hermes

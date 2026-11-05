@@ -2,6 +2,7 @@
 
 ## 0.2.22
 
+- Pin real-host CI checkouts and installation to Hermes v0.22.5.
 - Expose WhatsApp tools only for identities with WhatsApp configured, with cached availability checks.
 - Add email listing, message/thread reads, attachment downloads, forwarding, call history/transcript reads, hangup, and read-only message-send recovery tools.
 - Add email attachments and inline images, retain email/SMS/iMessage request keys for recovery, and expose explicit voicemail actions and messages.
