@@ -341,8 +341,11 @@ class NativeTurns(CompanionReceiver):
                 turn["source_ids"].extend(candidate["source_ids"])
                 for key in ("imessage_event_ids", "imessage_sources"):
                     turn["route"].setdefault(key, []).extend(next_route.get(key, []))
-                if route["mode"] == "whatsapp" and next_route.get("whatsapp_reply_target"):
-                    turn["route"]["whatsapp_reply_target"] = next_route["whatsapp_reply_target"]
+                if route["mode"] == "whatsapp":
+                    turn["route"].setdefault("whatsapp_sources", []).extend(copy.deepcopy(next_route.get("whatsapp_sources", [])))
+                    turn["route"]["agent_mentioned"] = route.get("agent_mentioned") is True or next_route.get("agent_mentioned") is True
+                    if next_route.get("whatsapp_reply_target"):
+                        turn["route"]["whatsapp_reply_target"] = next_route["whatsapp_reply_target"]
                 turn["event"]["metadata"]["inkbox_reply_route"] = copy.deepcopy(turn["route"])
                 turn["last_at"] = candidate["last_at"]
                 row["turns"].remove(candidate)

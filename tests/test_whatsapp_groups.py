@@ -90,6 +90,8 @@ def test_group_receipt_isolated_and_no_contact_memory(factory, tmp_path, native,
                 assert route['remote_number'] is None and route['is_group'] is True
                 assert route['agent_mentioned'] is native
                 assert '@sample-agent' in event.text
+                assert 'phone_number' in event.text and 'original_text' in event.text
+                assert route['whatsapp_sources'][0]['message_id'] == uid(1)
         finally:
             await value.queue.close()
             client.close()
@@ -175,3 +177,31 @@ def test_standalone_explicit_group_send_preserves_server_authority(factory, monk
         assert client.whatsapp._http.post.call_args.kwargs['headers']['Idempotency-Key'] == 'standalone-group-request'
     finally:
         client.close()
+
+
+def test_burst_preserves_each_source_mention_context(factory, tmp_path):
+    from tests.test_native_turns import settle
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.queue.quiet_seconds = .1
+        value.queue.max_burst_seconds = 1
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            for number, token, agent in [(1, '@234', False), (2, '@123', True)]:
+                source = inbound(**{**group(), 'id': uid(number)}, direction='inbound', sender_number='+15555550101',
+                                 content='Hello ' + token, agent_mentioned=agent, mentions=[
+                    {'text': token, 'phone_number': '+15555550102' if not agent else '+15555550100', 'is_agent': agent}])
+                assert (await receive(value.adapter, source)).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 1
+            route = value.inputs[0].metadata['inkbox_reply_route']
+            assert route['agent_mentioned'] is True
+            assert [item['original_text'] for item in route['whatsapp_sources']] == ['Hello @234', 'Hello @123']
+            assert '@Saved contact' in value.inputs[0].text and '@sample-agent' in value.inputs[0].text
+            assert all(source['message_id'] in value.inputs[0].text for source in route['whatsapp_sources'])
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
