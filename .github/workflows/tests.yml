@@ -46,6 +46,21 @@ jobs:
       - name: Run unit tests
         run: .venv/bin/python -m pytest -v
 
+  whatsapp-groups-sdk:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v8.1.0
+      - name: Install compatible WhatsApp SDK and test dependencies
+        run: |
+          uv venv --python 3.12
+          uv pip install 'inkbox @ git+https://github.com/inkbox-ai/inkbox.git@6f9fad715abbae8022789cfc1028a0335bf23212#subdirectory=sdk/python' 'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8'
+      - name: Verify group contracts and native delivery lifecycle
+        run: .venv/bin/python -m pytest -q tests/test_whatsapp_groups.py tests/test_whatsapp_companion_parity.py tests/test_whatsapp.py tests/test_companion.py
+
   # Exercise the pinned Hermes host and its locked dependencies.
   contract-pr:
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -81,10 +96,18 @@ jobs:
             --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
+      - name: Check out compatible WhatsApp SDK source
+        uses: actions/checkout@v7
+        with:
+          repository: inkbox-ai/inkbox
+          ref: 6f9fad715abbae8022789cfc1028a0335bf23212
+          path: .whatsapp-sdk
+          fetch-depth: 1
+
       - name: Contract tests vs Hermes v0.22.5
         working-directory: ${{ runner.temp }}
         env:
-          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
+          PYTHONPATH: ${{ github.workspace }}/.whatsapp-sdk/sdk/python:${{ github.workspace }}/.upstream-hermes
           # This caller-owned test environment is not PM's application store.
           HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
           HERMES_RUNTIME_DIR: ''

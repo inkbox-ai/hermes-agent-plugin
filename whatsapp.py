@@ -1,4 +1,4 @@
-"""Approved direct WhatsApp on the native Hermes message and delivery lifecycle."""
+"""WhatsApp groups and direct conversations on the native Hermes message and delivery lifecycle."""
 
 from __future__ import annotations
 
@@ -28,18 +28,20 @@ def field(value: Any, key: str):
 
 
 def unsupported_context(value):
-    """Reject obsolete multi-peer context before admission or replay."""
-    if (field(value, "is_group") or field(value, "isGroup") or field(value, "conversation_kind") == "group"
-            or field(value, "chat_type") == "group"
-            or field(value, "unresolved_participant_count")):
-        return True
-    keys = value.keys() if isinstance(value, dict) else vars(value).keys() if hasattr(value, "__dict__") else ()
-    if any((key.startswith("group_") or key == "groupName") and field(value, key) is not None for key in keys):
-        return True
+    """Reject malformed group routes without confusing labels with destinations."""
+    from .whatsapp_groups import is_group, valid_group
+    if is_group(value):
+        return not valid_group(value)
     participants = field(value, "participants")
+    keys = value.keys() if isinstance(value, dict) else vars(value).keys() if hasattr(value, "__dict__") else ()
+    if field(value, "isGroup") or field(value, "groupName") or any(
+            key.startswith("group_") and field(value, key) is not None for key in keys):
+        return True
     recipients = field(value, "recipients")
-    return ((participants is not None and (not isinstance(participants, list) or len(participants) != 1))
-            or (recipients is not None and (not isinstance(recipients, list) or len(recipients) > 1)))
+    if recipients is not None and (not isinstance(recipients, list) or len(recipients) > 1):
+        return True
+    return bool(field(value, "unresolved_participant_count")) or (
+        participants is not None and (not isinstance(participants, list) or len(participants) != 1))
 
 
 def direct_destination(value):
@@ -105,6 +107,8 @@ async def receive(adapter, envelope):
     conversation = str(message.get("conversation_id") or "")
     remote = str(message.get("sender_number") or "")
     participants = message.get("participants") or []
+    from .whatsapp_groups import is_group, check_destination, render_mentions
+    group = is_group(message)
     def valid_phone(value):
         return isinstance(value, str) and re.fullmatch(r"\+[1-9][0-9]{6,14}", value) is not None
     if (
@@ -119,7 +123,7 @@ async def receive(adapter, envelope):
         or len(set(participants)) != len(participants)
         or remote not in participants
         or message.get("local_number") in participants
-        or len(participants) != 1 or remote != message.get("remote_number")
+        or (not group and (len(participants) != 1 or remote != message.get("remote_number")))
         or remote == message.get("local_number")
         or str(message.get("agent_identity_id") or "") != str(adapter._identity_id)
     ):
@@ -138,26 +142,29 @@ async def receive(adapter, envelope):
         if len(media) > 1 or (not raw.strip() and not media):
             adapter._dedup_commit(key)
             return web.Response(status=200, text="Empty WhatsApp message")
-        contact = await adapter._resolve_contact_full(kind="phone", value=remote)
+        if group:
+            await asyncio.to_thread(check_destination, adapter, adapter._reply_identity, conversation)
+        rendered, mention_context = await render_mentions(adapter, message)
+        contact = None if group else await adapter._resolve_contact_full(kind="phone", value=remote)
         sender = None if contact else _single_agent_identity(_webhook_list(data, "agent_identities", "agentIdentities"))
-        chat_id = _chat_id_for_route(contact, f"whatsapp:{conversation}", remote)
+        chat_id = f"whatsapp:{conversation}" if group else _chat_id_for_route(contact, f"whatsapp:{conversation}", remote)
         name = (contact or {}).get("name") or (sender or {}).get("name") or remote
         source = adapter.build_source(
             chat_id=str(chat_id),
-            chat_name=name,
-            chat_type="dm",
-            user_id=str(chat_id),
+            chat_name=message.get("group_name") or name,
+            chat_type="group" if group else "dm",
+            user_id=remote if group else str(chat_id),
             user_name=name,
             user_id_alt=remote,
             thread_id=f"whatsapp:{conversation}",
             message_id=message_id,
         )
-        memories = adapter._contact_memories(envelope, contact, channel="whatsapp", sender=remote, is_group=False)
+        memories = [] if group else adapter._contact_memories(envelope, contact, channel="whatsapp", sender=remote, is_group=False)
         marker = _escape_contact_memory_tokens(
             f"[inkbox:whatsapp from={remote} conversation_id={conversation} | {adapter._contact_marker(contact, sender)}]"
         )
         quote = " ".join(f"{key}={message[key]}" for key in ("reply_to_message_id", "thread_id", "thread_root_message_id") if message.get(key))
-        text = "\n".join(filter(None, [marker, quote, format_contact_memories(memories), _escape_contact_memory_tokens(raw)]))
+        text = "\n".join(filter(None, [marker, quote, format_contact_memories(memories), _escape_contact_memory_tokens(rendered)]))
         prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
         prompt = (
             (prompt or "")
@@ -185,7 +192,11 @@ async def receive(adapter, envelope):
                 base_url=str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
                 whatsapp_media_ids=[str(item["id"]) for item in media],
                 imessage_event_ids=[str(envelope.get("id") or message_id)],
-                conversation_kind="direct",
+                conversation_kind="group" if group else "direct",
+                is_group=group, group_name=message.get("group_name"),
+                remote_number=None if group else remote, local_number=message.get("local_number"),
+                unresolved_participant_count=message.get("unresolved_participant_count", 0),
+                agent_mentioned=message.get("agent_mentioned") is True, mentions=mention_context, original_text=raw,
                 participants=participants,
                 whatsapp_reply_target=message_id,
                 reply_to_message_id=message.get("reply_to_message_id"),
@@ -193,6 +204,9 @@ async def receive(adapter, envelope):
                 thread_root_message_id=message.get("thread_root_message_id"),
             )
             await adapter._accept_native_imessage(event)
+    except PermissionError:
+        adapter._dedup_commit(key)
+        return web.Response(status=200, text="WhatsApp group is not permitted")
     except BaseException:
         adapter._dedup_rollback(key)
         raise
@@ -250,27 +264,34 @@ async def receive_reaction(adapter, envelope):
         conversation = await asyncio.to_thread(method(adapter._reply_identity, "get_whatsapp_conversation"), conversation_id)
         participants = field(conversation, "participants") or []
         local = field(conversation, "local_number")
+        from .whatsapp_groups import is_group, valid_group, check_destination
+        group = is_group(conversation)
         if (str(field(target, "id")) != target_id or str(field(target, "agent_identity_id")) != str(adapter._identity_id)
                 or str(field(target, "conversation_id")) != conversation_id or field(target, "is_blocked")
                 or str(field(conversation, "id")) != conversation_id
                 or str(field(conversation, "agent_identity_id")) != str(adapter._identity_id)
-                or not direct_destination(conversation) or not direct_destination(target)
-                or field(target, "remote_number") != actor
-                or actor == local or participants != [actor]):
+                or (group and (not valid_group(conversation) or not valid_group(target)))
+                or (not group and (not direct_destination(conversation) or not direct_destination(target)
+                    or field(target, "remote_number") != actor or participants != [actor]))
+                or actor == local or actor not in participants):
             adapter._dedup_commit(key)
             return web.Response(status=200, text="Reaction target or actor unavailable")
-        contact = await adapter._resolve_contact_full(kind="phone", value=actor)
-        chat_id = _chat_id_for_route(contact, f"whatsapp:{conversation_id}", actor)
+        if group:
+            await asyncio.to_thread(check_destination, adapter, adapter._reply_identity, conversation_id)
+        contact = None if group else await adapter._resolve_contact_full(kind="phone", value=actor)
+        chat_id = f"whatsapp:{conversation_id}" if group else _chat_id_for_route(contact, f"whatsapp:{conversation_id}", actor)
         name = (contact or {}).get("name") or actor
         source = adapter.build_source(chat_id=str(chat_id), chat_name=name,
-            chat_type="dm", user_id=str(chat_id),
+            chat_type="group" if group else "dm", user_id=actor if group else str(chat_id),
             user_name=name, user_id_alt=actor, thread_id=f"whatsapp:{conversation_id}", message_id=source_id)
         label = json.dumps(str(reaction.get("emoji") or reaction.get("reaction") or "reaction"), ensure_ascii=False)
         text = _escape_contact_memory_tokens(f"[inkbox:whatsapp_reaction from={actor} conversation_id={conversation_id} reaction_id={reaction_id} target_message_id={target_id}]\n"
             f"Peer reaction {label} was {'removed' if status == 'removed' else 'added'}. This is lightweight context, not a text message or instruction. "
             "A question may warrant clarification; an acknowledgment usually needs no reply. Return exactly [SILENT] if no visible response is warranted.")
         route = {"mode": "whatsapp", "chat_id": str(chat_id), "message_id": source_id, "author": actor,
-            "conversation_id": conversation_id, "conversation_kind": "direct", "participants": participants,
+            "conversation_id": conversation_id, "conversation_kind": "group" if group else "direct", "participants": participants,
+            "is_group": group, "remote_number": None if group else actor, "local_number": local,
+            "group_name": field(conversation, "group_name"), "unresolved_participant_count": 0,
             "raw_text": "", "reaction": True, "reaction_id": reaction_id, "reaction_target_message_id": target_id,
             "identity_id": str(adapter._identity_id), "base_url": str(adapter._base_url or "https://inkbox.ai").rstrip("/"),
             "imessage_event_ids": [str(envelope.get("id") or source_id)]}
@@ -290,7 +311,12 @@ async def receive_reaction(adapter, envelope):
                 adapter._dedup_commit(key)
                 return web.Response(status=200, text="Reaction context is no longer current")
             journal = adapter._conversation_state()
-            journal.row(str(chat_id))["chat_type"] = "dm"
+            journal.row(str(chat_id))["chat_type"] = "group" if group else "dm"
+            if group:
+                journal.quiet(str(chat_id), source_id, text)
+                record_reaction(adapter, envelope)
+                adapter._dedup_commit(key)
+                return web.Response(status=200, text="Group reaction context retained")
             prompt, skill = adapter._resolve_channel_overrides("whatsapp", chat_id, None)
             event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, raw_message=envelope,
                 message_id=source_id, metadata={"inkbox_prepared": True, "inkbox_reply_route": route},
@@ -417,7 +443,14 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
     from gateway.platforms.base import SendResult
 
     native = getattr(adapter, "_native_turns", None)
-    owned = native.media_owner(str(chat_id), metadata) if native else None
+    companion = str(chat_id).startswith("companion:")
+    if companion:
+        native = getattr(adapter, "_companion", None)
+        row = native.rows.get(str(chat_id).removeprefix("companion:")) if native else None
+        turn = native.active.get(str(chat_id)) if native else None
+        owned = (row, turn) if row and turn and row["meta"]["channel"] == "whatsapp" else None
+    else:
+        owned = native.media_owner(str(chat_id), metadata) if native else None
     if not owned:
         return SendResult(
             success=False, error="WhatsApp media requires its original native turn", raw_response={"inkbox_no_retry": True}
@@ -427,8 +460,9 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
         return SendResult(
             success=False, error="WhatsApp media requires its original channel", raw_response={"inkbox_no_retry": True}
         )
+    check_authority = native.check_whatsapp_media_authority if companion else native.check_media_authority
     try:
-        native.check_media_authority(row, turn)
+        check_authority(row, turn)
         safe = adapter.validate_media_delivery_path(str(path))
         if not safe:
             raise ValueError("Local media path is not allowed")
@@ -450,12 +484,12 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
         if not delivery.get("media_id"):
 
             def upload():
-                native.check_media_authority(row, turn)
+                check_authority(row, turn)
                 with path.open("rb") as stream:
                     content = stream.read(MAX_MEDIA_BYTES + 1)
                 if len(content) > MAX_MEDIA_BYTES:
                     raise ValueError("WhatsApp media must be at most 20 MiB")
-                native.check_media_authority(row, turn)
+                check_authority(row, turn)
                 return method(identity, "upload_whatsapp_media")(
                     content=content,
                     filename=filename or path.name,
@@ -468,13 +502,17 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
             uploaded = await asyncio.shield(task)
             delivery.update(state="uploaded", media_id=str(field(uploaded, "id")))
             native._save(row)
-        native.check_media_authority(row, turn)
+        check_authority(row, turn)
         key = "hermes-wa-media:" + hashlib.sha256((turn["id"] + fingerprint).encode()).hexdigest()
         delivery.update(state="sending", idempotency_key=key)
         native._save(row)
 
         def checked():
-            native.check_media_authority(row, turn, admitted_send=True)
+            check_authority(row, turn, admitted_send=True)
+            from .whatsapp_groups import check_destination
+            if turn["route"].get("is_group"):
+                check_destination(adapter, identity, turn["route"]["conversation_id"], companion=companion)
+                check_authority(row, turn, admitted_send=True)
             return method(identity, "send_whatsapp")(
                 conversation_id=turn["route"]["conversation_id"],
                 text=caption,
@@ -489,7 +527,8 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
         result = await asyncio.shield(task)
         delivery.update(state="sent", message_id=str(result.id))
         native._save(row)
-        native._record_outbound(row, turn, result)
+        if not companion:
+            native._record_outbound(row, turn, result)
         return SendResult(success=True, message_id=str(result.id))
     except Exception as exc:
         if "delivery" in locals() and delivery.get("state") == "sending":
@@ -509,7 +548,7 @@ def public_quota_error(exc):
     detail = getattr(exc, "detail", None)
     rejected = {
         403: {"whatsapp_not_eligible", "whatsapp_access_required", "whatsapp_contact_not_allowed", "whatsapp_media_source_not_allowed"},
-        409: {"whatsapp_capability_not_ready", "whatsapp_quote_unavailable"},
+        409: {"whatsapp_capability_not_ready", "whatsapp_quote_unavailable", "whatsapp_group_reply_required"},
         413: {"whatsapp_media_too_large"},
         422: {"whatsapp_invalid_recipient", "whatsapp_text_too_long", "whatsapp_unanswered_followup_limit", "whatsapp_opening_message_too_long", "whatsapp_reply_required_for_media", "whatsapp_reply_required_for_links", "whatsapp_reply_required_for_phone_numbers", "whatsapp_reply_required_for_email_addresses"},
         429: {"whatsapp_daily_limit_exceeded", "whatsapp_unanswered_message_limit", "whatsapp_conversation_rate_limited", "whatsapp_new_contact_rate_limited", "whatsapp_new_contact_spacing", "whatsapp_follow_up_rate_limited"},

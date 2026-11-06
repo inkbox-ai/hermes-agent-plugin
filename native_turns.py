@@ -36,7 +36,7 @@ def _unsupported_whatsapp_turn(turn):
     route = turn.get("route", {})
     if route.get("mode") != "whatsapp":
         return False
-    if unsupported_context(route) or unsupported_context(turn.get("event", {}).get("source", {})):
+    if unsupported_context(route) or (turn.get("event", {}).get("source", {}).get("chat_type") == "group" and not route.get("is_group")):
         return True
     for attempt in _whatsapp_attempt_rows(turn):
         payload = attempt.get("payload", {})
@@ -576,7 +576,7 @@ class NativeTurns(CompanionReceiver):
                         attempts[attempt["key"]] = copy.deepcopy(attempt)
                         turn["whatsapp_send_attempt"] = copy.deepcopy(attempt)
                         self._save(row)
-                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "whatsapp_send_attempts": copy.deepcopy(turn.get("whatsapp_send_attempts", {})), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only)})
+                    bind_context(turn["session_id"], {**turn["route"], "turn_id": turn["id"], "record_explicit": record, "explicit_delivery_state": tool_state, "record_whatsapp_attempt": tool_request, "whatsapp_send_attempt": copy.deepcopy(turn.get("whatsapp_send_attempt")), "whatsapp_send_attempts": copy.deepcopy(turn.get("whatsapp_send_attempts", {})), "authorize_whatsapp": lambda read_only=False: self.check_whatsapp_tool_authority(row, turn, read_only=read_only), "authorize_whatsapp_destination": lambda identity, conversation: self.check_whatsapp_destination(row, turn, identity, conversation)})
         else:
             from .host_fencing import completed_worker_proof
             proof = completed_worker_proof(self._host_owner(), event)
@@ -733,10 +733,21 @@ class NativeTurns(CompanionReceiver):
         if not self._host_owner()._is_user_authorized(self._event_from_turn(row, turn).source):
             raise PermissionError("Original WhatsApp sender is no longer allowed")
 
+    def check_whatsapp_destination(self, row, turn, identity, conversation):
+        from .whatsapp_groups import check_destination
+        self.check_whatsapp_tool_authority(row, turn)
+        result = check_destination(self.adapter, identity, conversation)
+        self.check_whatsapp_tool_authority(row, turn)
+        return result
+
     def checked_whatsapp_send(self, row, turn, identity, payload):
         from .whatsapp import method
         try:
             self.check_media_authority(row, turn, admitted_send=True)
+            if turn["route"].get("is_group"):
+                from .whatsapp_groups import check_destination
+                check_destination(self.adapter, identity, payload["conversation_id"])
+                self.check_media_authority(row, turn, admitted_send=True)
         except Exception:
             raise ReplyPreflightError("Original WhatsApp ownership changed; no send attempted") from None
         return method(identity, "send_whatsapp")(**payload)
