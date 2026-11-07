@@ -601,7 +601,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.27 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.29 or
 newer.
 
 Realtime-only call tools:
@@ -641,7 +641,7 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The SDK floor is **0.7.27**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The SDK floor is **0.7.29**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
 ### Capability visibility and refresh
 
@@ -688,11 +688,17 @@ Tools: `inkbox_send_whatsapp`, `inkbox_list_whatsapp_conversations`, `inkbox_get
 
 Automatic replies and attachments retain the original route, answer, media ID, and stable idempotency key before delivery. Outside an active host turn, sends require an explicit stable `idempotency_key` for the logical message; this avoids treating identical text in separate deliberate sends as one permanent operation. Explicit sends return their key and media ID; preserve both on an uncertain result and use `inkbox_lookup_whatsapp_send` to inspect the original attempt. Reuse the original key only with the exact original payload. Do not upload again or send a new message to recover an ambiguous result.
 
-WhatsApp supports direct messages only. Pass exactly one E.164 string in `to`, or use `conversation_id` for an existing direct conversation. Arrays (including one-element arrays), comma-separated recipients, group creation, and group discovery are not supported. Message participants and delivery recipients remain singleton direct-message facts. Unsupported inbound group events stay silent. Retained group requests are not replayed or converted into direct messages.
+WhatsApp supports direct messages and existing groups after another participant sends an inbound message. Group names are display labels; address groups by stable `conversation_id`, never a name or participant phone number. Group creation and membership management are not supported. Unknown participant numbers remain unknown; unresolved rosters and explicit blocks prevent group replies. Group sessions stay separate from direct chats and other groups, without importing direct-contact memories. Within active host turns, group sends recheck the current roster against host policy. Explicit standalone sends use the existing API authorization rules and require a stable request key; they never borrow a Companion grant.
+
+The existing `group_reply_mode=auto` default lets the agent decide contextually whether to answer or remain silent. Optional `mention` mode accepts the current message's verified native agent mention or typed agent handle; mentioning someone else never wakes it. Verified native mentions in both groups and direct messages render as the configured agent handle, a visible contact name, a known phone number, or an unresolved label. URLs remain unchanged, and conflicting mention tokens stay explicitly unresolved. Original text and mention metadata remain intact; mentioned contacts' notes and memories are not imported.
+
+WhatsApp groups use the existing Companion configuration and Safe/Relaxed modes. Safe mode keeps sponsored messages as context; Relaxed mode may answer them, subject to current scope, sponsor and participant authorization. Sponsorship never grants direct-message or cross-group access. The published Inkbox SDK 0.7.29 includes the required group metadata and WhatsApp Companion models.
+
+Incoming inline replies in direct and group chats show the quoted parent’s author, text excerpt, and attachment metadata upfront. Parent lookup is best effort: the current message still arrives if the parent cannot be read. Temporary lookup failures and unavailable parents are identified explicitly, retaining the parent ID for an authorized history lookup rather than guessing its contents. Only the current message’s mentions control mention-mode wake-up; quoted mentions and commands remain context, not new instructions.
 
 For an explicit quote, provide `reply_to_message_id` together with the original conversation. Thread reads preserve their opaque cursor and never invent inaccessible parent content. Native quote chains do not split the host's ordinary conversation session.
 
-Whole-message reactions accept `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, or `eyes`, or an exclusive custom emoji. Each add/remove requires an explicit stable idempotency key. Keep queued/uncertain receipts separate from applied reactions; removing an old receipt must not remove a newer replacement. Authorized peer reaction additions/removals enter a lightweight contextual turn at most once per revision, with the real actor and visible target. Self echoes, delivery notifications, unresolved actors and hidden targets stay quiet. Reactions cannot execute commands or satisfy permission prompts.
+Whole-message reactions accept `love`, `like`, `dislike`, `laugh`, `emphasize`, `question`, or `eyes`, or an exclusive custom emoji. Each add/remove requires an explicit stable idempotency key. Keep queued/uncertain receipts separate from applied reactions; removing an old receipt must not remove a newer replacement. Authorized direct-chat peer reaction additions/removals enter a lightweight contextual turn at most once per revision, with the real actor and visible target. Group reactions are retained as context without waking a turn. Self echoes, delivery notifications, unresolved actors and hidden targets stay quiet. Reactions cannot execute commands or satisfy permission prompts.
 
 ### Native iMessage replies
 
@@ -727,7 +733,7 @@ Scheduled full-stack CI runs once daily at **12:00 PM Pacific time** (`America/L
 
 All CI jobs that use a real Hermes host pin **v0.22.5** (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). Contract checks, native installation, the reusable canary, and live suites share this revision. The installer script is fetched from the same commit and receives an explicit commit pin. This CI pin does not change an existing user's Hermes installation.
 
-The dependency is published Inkbox SDK `>=0.7.27,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
+The dependency is published Inkbox SDK `>=0.7.29,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:

@@ -30,8 +30,10 @@ from inkbox_plugin.adapter import InkboxAdapter
 from inkbox_plugin.companion import CompanionReceiver
 
 
-@pytest.mark.parametrize("channel", ["mail", "phone", "imessage"])
-@pytest.mark.parametrize("scenario", ["complete", "close", "sponsor_denied", "delivery_failure"])
+@pytest.mark.parametrize("channel,scenario", [
+    (channel, scenario) for channel in ("mail", "phone", "imessage", "whatsapp")
+    for scenario in ("complete", "close", "sponsor_denied", "delivery_failure")
+])
 def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario):
     async def run():
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -109,8 +111,12 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
                 item.update(sender_phone_number=author, conversation_id=meta["conversation_id"], text="Live group message")
             else:
                 item.update(sender_number=author, remote_number=None, conversation_id=meta["conversation_id"], content="Live group message")
+            if channel == "whatsapp":
+                item.update(agent_identity_id=adapter._identity_id, is_group=True, conversation_kind="group",
+                            local_number="+15555550100", unresolved_participant_count=0, media=[],
+                            participants=[sponsor, "+15555550102", "+15555550103"], agent_mentioned=True, mentions=[])
             return {
-                "event_type": {"mail": "message.received", "phone": "text.received", "imessage": "imessage.received"}[channel],
+                "event_type": {"mail": "message.received", "phone": "text.received", "imessage": "imessage.received", "whatsapp": "whatsapp.received"}[channel],
                 "data": {"text_message" if channel == "phone" else "message": item},
                 "companion": {**meta, "sequence": number, "phase": "initialization" if number == 3 else "live"},
             }
@@ -122,7 +128,9 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             return copy.deepcopy(pages[0] if cursor is None else pages[1])
 
         identity = types.SimpleNamespace(**{name: Mock(return_value=types.SimpleNamespace(id=str(UUID(int=800))))
-                                           for name in ("reply_all_email", "send_text", "send_imessage")})
+                                           for name in ("reply_all_email", "send_text", "send_imessage", "send_whatsapp")})
+        identity.id = adapter._identity_id
+        identity.get_whatsapp_conversation = Mock(return_value={**incoming["data"].get("message", {}), "id": meta["conversation_id"]})
         adapter._inkbox = types.SimpleNamespace(
             companion=CompanionResource(types.SimpleNamespace(get=get)), get_identity=Mock(return_value=identity),
         )
@@ -176,7 +184,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             await asyncio.sleep(0)
             assert checkpoint.read_bytes() == paused
             assert len(submissions) == 1 and count.call_count == 1
-            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage):
+            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage, identity.send_whatsapp):
                 method.assert_not_called()
             await recovered.close()
             return
@@ -189,7 +197,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             await asyncio.sleep(0.01)
         if scenario == "sponsor_denied":
             assert len(submissions) == 1 and count.call_count == 1
-            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage):
+            for method in (identity.reply_all_email, identity.send_text, identity.send_imessage, identity.send_whatsapp):
                 method.assert_not_called()
             row = next(iter(receiver.rows.values()))
             assert row["state"] == "paused" and row["turns"][1]["state"] == "pending"
@@ -212,7 +220,8 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             else:
                 failed.update(conversation_id=meta["conversation_id"], remote_number=sponsor, content="Failed group output")
             event_types = {"mail": ["message.bounced", "message.failed"], "phone": ["text.delivery_failed"],
-                           "imessage": ["imessage.delivery_failed"]}[channel]
+                           "imessage": ["imessage.delivery_failed"],
+                           "whatsapp": ["whatsapp.delivery_failed", "whatsapp.delivery_unconfirmed"]}[channel]
             provider = types.SimpleNamespace(name="inkbox", verify=Mock(return_value=False))
             monkeypatch.setattr(adapter_module, "match_provider", lambda _headers: provider)
             adapter._resolve_contact_full.reset_mock()
@@ -221,7 +230,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             runner.session_store.get_or_create_session = Mock(wraps=store.get_or_create_session)
             checkpoint = next(receiver.root.glob("*.json"))
             before = checkpoint.read_bytes()
-            send_calls = [method.call_count for method in (identity.reply_all_email, identity.send_text, identity.send_imessage)]
+            send_calls = [method.call_count for method in (identity.reply_all_email, identity.send_text, identity.send_imessage, identity.send_whatsapp)]
             for event_type in event_types:
                 failure = {"event_type": event_type, "data": {"text_message" if channel == "phone" else "message": failed}}
                 request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(failure).encode()),
@@ -249,7 +258,7 @@ def test_real_host_companion_lifecycle(tmp_path, monkeypatch, channel, scenario)
             await asyncio.sleep(0)
             assert checkpoint.read_bytes() == saved
             assert len(submissions) == 2 and count.call_count == 2
-            assert [method.call_count for method in (identity.reply_all_email, identity.send_text, identity.send_imessage)] == send_calls
+            assert [method.call_count for method in (identity.reply_all_email, identity.send_text, identity.send_imessage, identity.send_whatsapp)] == send_calls
             adapter._resolve_contact_full.assert_not_called()
             adapter._note_outbound_delivery_failure.assert_not_called()
             runner.session_store.get_or_create_session.assert_not_called()

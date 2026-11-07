@@ -26,7 +26,7 @@ def _destination(payload, owner):
     phone = payload.get("to")
     if not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
         raise ValueError("WhatsApp requires one E.164 recipient")
-    if owner and phone == owner.get("author"):
+    if owner and owner.get("conversation_kind") == "direct" and phone == owner.get("author"):
         return ("conversation", str(uuid.UUID(str(owner.get("conversation_id")))))
     return ("recipient", phone)
 
@@ -45,9 +45,32 @@ def _same_destination(left, right, identity, owner):
     if (str(field(details, "id")) != conversation[1]
             or str(field(details, "agent_identity_id")) != str(identity.id)):
         raise ValueError("WhatsApp destination ownership could not be verified")
+    from .whatsapp_groups import is_group
+    if is_group(details):
+        return False
     if not direct_destination(details):
         raise ValueError("WhatsApp direct destination could not be verified")
     return recipients[1] == field(details, "remote_number")
+
+
+def _check_group_destination(identity, conversation_id, owner):
+    from .whatsapp_groups import is_group, require_metadata, valid_group
+    if owner and owner.get("conversation_kind") == "direct" and _same_uuid(conversation_id, owner.get("conversation_id")):
+        return
+    details = method(identity, "get_whatsapp_conversation")(conversation_id)
+    if field(details, "remote_number") is None:
+        require_metadata(details)
+    if not _same_uuid(field(details, "id"), conversation_id) or not _same_uuid(field(details, "agent_identity_id"), identity.id):
+        raise PermissionError("WhatsApp destination ownership changed")
+    if is_group(details):
+        if not valid_group(details):
+            raise PermissionError("WhatsApp group participants are unavailable")
+        if owner is None:
+            return
+        guard = (owner or {}).get("authorize_whatsapp_destination")
+        if not callable(guard):
+            raise PermissionError("WhatsApp group sends require an active authorized conversation")
+        guard(identity, conversation_id)
 
 
 def invoke(operation, args, session_id=""):
@@ -80,7 +103,7 @@ def invoke(operation, args, session_id=""):
                 and "conversation_id" not in args and "to" not in args):
             args["conversation_id"] = owner["conversation_id"]
         conversation, recipient = args.get("conversation_id"), args.get("to")
-        if (owner and owner.get("mode") == "whatsapp" and recipient == owner.get("author")
+        if (owner and owner.get("mode") == "whatsapp" and owner.get("conversation_kind") != "group" and recipient == owner.get("author")
                 and isinstance(recipient, str) and re.fullmatch(r"\+[1-9][0-9]{6,14}", recipient)):
             conversation, recipient = owner.get("conversation_id"), None
         if (operation == "send_whatsapp" and owner and owner.get("mode") == "whatsapp" and recipient is None
@@ -119,7 +142,7 @@ def invoke(operation, args, session_id=""):
             elif operation == "send_whatsapp":
                 selector = {name: args[name] for name in ("to", "conversation_id") if name in args}
                 if len(selector) != 1 or not (str(args.get("text") or "").strip() or args.get("media_id")):
-                    raise ValueError("Use one E.164 recipient or a direct conversation, with text or an owned media ID")
+                    raise ValueError("Use one E.164 recipient or an existing conversation, with text or an owned media ID")
                 payload = {
                     **selector,
                     **({"text": args["text"]} if "text" in args else {}),
@@ -213,6 +236,8 @@ def invoke(operation, args, session_id=""):
                         conflicts({item["key"]: item for item in pending})
                         baseline = current
                         continue
+                    if payload.get("conversation_id"):
+                        _check_group_destination(identity, payload["conversation_id"], owner)
                     authorize()
                     with turn_lock():
                         current = snapshot_attempts()
@@ -258,6 +283,9 @@ def invoke(operation, args, session_id=""):
                 if not isinstance(key, str) or not key.strip():
                     raise ValueError("Reaction writes require an explicit stable idempotency key")
                 authorize()
+                target = method(identity, "get_whatsapp_message")(args["message_id"]) if operation == "send_whatsapp_reaction" else method(identity, "get_whatsapp_reaction")(args["reaction_id"])
+                _check_group_destination(identity, str(field(target, "conversation_id")), owner)
+                authorize()
                 try:
                     result = method(identity, operation)(**args)
                 except Exception as exc:
@@ -285,7 +313,7 @@ def invoke(operation, args, session_id=""):
         if str(exc) == "WhatsApp sends outside an active turn require an explicit stable idempotency_key":
             result["error"] = str(exc)
         if "WhatsApp requires Inkbox SDK" in str(exc):
-            result["error"] = "WhatsApp requires Inkbox SDK 0.7.26 or newer"
+            result["error"] = str(exc)
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             result["status_code"] = status
@@ -323,11 +351,11 @@ def register(ctx, check_fn):
         ),
         (
             "inkbox_send_whatsapp",
-            "Send requested direct WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Sends are plain by default. Set reply_to_message_id only when a quote helps identify an older message, distinguish multiple requests, or identify a specific attachment; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
+            "Send requested WhatsApp text and one owned media ID. Omit the destination to reply in the active conversation. Sends are plain by default. Set reply_to_message_id only when a quote helps identify an older message, distinguish multiple requests, or identify a specific attachment; explicit destinations and authorized quote targets remain authoritative. Normal final replies are automatic; do not duplicate them with this tool. Preserve the key and media ID after uncertainty. Outside an active host turn, provide an explicit stable idempotency_key.",
             {
                 "to": {**string("One E.164 recipient; arrays are not supported"), "pattern": r"^\+[1-9][0-9]{6,14}$"},
                 "reply_to_message_id": string("Optional authorized message UUID to quote selectively; omit for an ordinary unquoted message. Requires a conversation."),
-                "conversation_id": string("Existing direct conversation, mutually exclusive with to"),
+                "conversation_id": string("Existing conversation, mutually exclusive with to"),
                 "text": {**string("Message text"), "maxLength": 4000},
                 "media_id": string("Owned attachment ID"),
                 "idempotency_key": string("Optional original key when recovering the same logical send"),

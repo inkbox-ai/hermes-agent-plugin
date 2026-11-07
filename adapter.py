@@ -3123,6 +3123,10 @@ class InkboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Slack file delivery failed or could not be confirmed: {exc}", raw_response={"inkbox_no_retry": True})
 
     def _is_whatsapp_media_route(self, chat_id, metadata):
+        if str(chat_id).startswith("companion:"):
+            receiver = getattr(self, "_companion", None)
+            row = receiver.rows.get(str(chat_id).removeprefix("companion:")) if receiver else None
+            return bool(row and row["meta"]["channel"] == "whatsapp")
         origin = reply_route.get() or {}
         route = origin if origin.get("chat_id") == str(chat_id) else (metadata or {}).get("inkbox_reply_route", metadata or {})
         return route.get("mode") == "whatsapp" or (not route.get("mode") and getattr(self, "_last_inbound_modality", {}).get(str(chat_id)) == "whatsapp")
@@ -4218,8 +4222,6 @@ class InkboxAdapter(BasePlatformAdapter):
         if str(envelope.get("event_type") or "").startswith("whatsapp."):
             if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
                 return web.Response(status=401, text="WhatsApp requires an authenticated Inkbox webhook")
-            if envelope.get("companion") is not None:
-                return web.Response(status=400, text="Unsupported WhatsApp event")
         if str(envelope.get("event_type") or "").startswith("slack."):
             if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
                 return web.Response(status=401, text="Slack requires an authenticated Inkbox webhook")
@@ -9827,6 +9829,9 @@ class InkboxAdapter(BasePlatformAdapter):
         author = str(item.get("from_address") or item.get("sender_phone_number") or item.get("sender_number")
                      or item.get("remote_phone_number") or item.get("remote_number") or "")
         text = raw_text(item) if not reaction else ""
+        if channel == "whatsapp":
+            from .whatsapp_groups import control_text as whatsapp_control_text, attention_text
+            text = whatsapp_control_text(item, self._identity_handle)
         route = {"chat_id": str(event.source.chat_id), "mode": channel, "author": author,
                  "message_id": str(event.message_id or ""), "thread_id": event.source.thread_id,
                  "conversation_id": str(item.get("conversation_id") or item.get("conversationId") or ""),
@@ -9847,8 +9852,9 @@ class InkboxAdapter(BasePlatformAdapter):
         wrong_approval = pending and not asked and approval_reply(text) is not None
         native = getattr(self, "_native_turns", None)
         retry_control = channel in {"imessage", "whatsapp"} and native is not None and str(event.message_id) in native.unconfirmed_controls
-        quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage"} and response_mode(self, "group_reply_mode") == "mention"
-                and not mentions(text, self._identity_handle) and not command and answer is None))
+        quiet = not retry_control and (wrong_approval or (group and channel in {"sms", "imessage", "whatsapp"} and response_mode(self, "group_reply_mode") == "mention"
+                and not (channel == "whatsapp" and item.get("agent_mentioned") is True)
+                and not mentions(attention_text(item) if channel == "whatsapp" else text, self._identity_handle) and not command and answer is None))
         if quiet:
             journal.quiet(key, str(event.message_id), event.text)
             return False

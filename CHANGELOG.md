@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.23
+
+- Show authorized inline-reply parent authors, text excerpts and attachment metadata upfront, including retained context-only messages; temporary lookup failures and unavailable parents stay explicit without blocking the current message.
+- Require published Inkbox SDK `>=0.7.29,<1.0.0` for the complete WhatsApp group and Companion interfaces.
+- Preserve URLs when displaying native mentions, bound contact-name labels, and keep conflicting mention tokens explicitly unresolved.
+
+- Support existing inbound-admitted WhatsApp groups with isolated sessions, media, reactions and explicit quoted replies; group names remain labels, with no group creation.
+- Render verified native mentions in direct chats and groups while preserving source text, current-message attention and contact-memory boundaries.
+- Extend existing Companion delivery, scoped authorization, Safe/Relaxed behavior and durable recovery to WhatsApp groups.
+- Preserve the default contextual Automatic reply mode; native agent mentions also work when Mention required is selected.
+
 ## 0.2.22
 
 - Restore delivery-failure follow-ups through Hermes v0.22.5 while retaining their original destinations and retry limits.

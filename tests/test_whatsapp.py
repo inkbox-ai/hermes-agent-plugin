@@ -89,6 +89,14 @@ def real_identity(adapter):
     client.whatsapp._http.post.return_value = {"message": WIRE}
     client.whatsapp._http.post_multipart.return_value = MEDIA
     client.whatsapp._http.get.return_value = MEDIA
+    def get_resource(path, **kwargs):
+        configured = client.whatsapp._http.get.return_value
+        if path.startswith("/conversations/") and configured is MEDIA:
+            return conversation_wire(path.split("/")[2], remote_number="+15555550101", participants=["+15555550101"])
+        if path.startswith("/messages/") and configured is MEDIA:
+            return {**WIRE, "id": path.split("/")[2]}
+        return configured
+    client.whatsapp._http.get.side_effect = get_resource
     adapter._reply_identity = identity
     adapter._base_url = "http://127.0.0.1:9"
     adapter._last_inbound_modality = {}
@@ -869,7 +877,8 @@ def test_reaction_tools_keep_stable_keys_and_exact_receipts_and_allow_read_only_
         "direction": "outbound", "remote_number": "+15555550100", "reaction": "like", "custom_emoji": None,
         "emoji": "👍", "status": "uncertain", "revision": 1, "created_at": TIME, "updated_at": TIME, "removed_at": None}
     client.whatsapp._http.post.return_value = {"reaction": item}
-    client.whatsapp._http.get.return_value = {"reaction": item}
+    client.whatsapp._http.get.side_effect = lambda path, **kw: (
+        {"reaction": item} if "/reactions/" in path else WIRE if "/messages/" in path else conversation_wire(uid(30)))
     client.whatsapp._http.delete_with_response.return_value = {"reaction": {**item, "status": "superseded"}}
     guard = Mock()
     session = str(tmp_path)
@@ -1136,7 +1145,7 @@ def test_reaction_admission_serializes_only_matching_actor_target(factory, tmp_p
             assert (await asyncio.wait_for(newer, 2)).status == 202
             assert (await asyncio.wait_for(older, 2)).status == 200
             await settle(value.queue)
-            assert len(value.inputs) == 2
+            assert len(value.inputs) == 2, [(turn["state"], turn.get("error"), turn.get("preflight_failure")) for row in value.queue.rows.values() for turn in row["turns"]]
             related = [event for event in value.inputs if event.metadata["inkbox_reply_route"]["reaction_id"] == uid(901)]
             assert len(related) == 1 and "was removed" in related[0].text
             assert not value.adapter._whatsapp_reaction_admission_locks
@@ -1738,7 +1747,9 @@ def test_legacy_automatic_quote_rejection_never_downgrades_or_replays(factory, t
             await settle(value.queue)
             row = next(iter(value.queue.rows.values()))
             turn = row["turns"][0]
-            assert turn["state"] == "uncertain"
+            assert turn["state"] == ("done" if status == 409 else "uncertain")
+            if status == 409:
+                assert turn["reply_delivery_state"] == "rejected"
             assert not (await value.queue._send(row, turn, "Replacement")).success
             client.whatsapp._http.post.assert_called_once()
             assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(1)
@@ -2324,23 +2335,28 @@ def test_rejected_alias_requires_owned_direct_conversation_evidence(factory, tmp
     details = conversation_wire(uid(99))
     details.update({"wrong_identity": {"agent_identity_id": uid(999)}, "wrong_conversation": {"id": uid(999)},
         "missing_phone": {"remote_number": None}, "group": {"participants": ["+15555550102", "+15555550103"], "remote_number": None}}.get(evidence, {}))
-    client.whatsapp._http.get.return_value = details
-    if evidence == "unavailable":
-        client.whatsapp._http.get.side_effect = InkboxAPIError(404, "Conversation unavailable")
+    client.whatsapp._http.get.return_value = conversation_wire(uid(99))
     try:
         client.whatsapp._http.post.side_effect = InkboxAPIError(409, {"error": "whatsapp_quote_unavailable"})
         assert "error" in json.loads(invoke("send_whatsapp", original, session))
         saved = json.loads(json.dumps(active_context(session)["whatsapp_send_attempt"]))
+        client.whatsapp._http.get.return_value = details
+        if evidence == "unavailable":
+            client.whatsapp._http.get.side_effect = InkboxAPIError(404, "Conversation unavailable")
         client.whatsapp._http.post.side_effect = None
         result = json.loads(invoke("send_whatsapp", {
             "to": "+15555550102", "text": "Answer", "idempotency_key": "replacement"}, session))
         assert "error" in result
         assert client.whatsapp._http.post.call_count == 1
         assert active_context(session)["whatsapp_send_attempts"]["original"] == saved
+        client.whatsapp._http.get.side_effect = None
+        client.whatsapp._http.get.return_value = conversation_wire(uid(99))
         assert json.loads(invoke("send_whatsapp", original, session))["ok"]
         assert client.whatsapp._http.post.call_args == client.whatsapp._http.post.call_args_list[0]
-        client.whatsapp._http.get.assert_called_once_with(
-            f"/conversations/{uid(99)}", params={"agent_identity_id": uid(100)})
+        reads = client.whatsapp._http.get.call_args_list
+        assert len(reads) == 3  # Initial preflight, rejected alias proof, exact-request recovery.
+        assert all(call.args == (f"/conversations/{uid(99)}",) and
+                   call.kwargs == {"params": {"agent_identity_id": uid(100)}} for call in reads)
     finally:
         clear_context(session, uid(1))
         client.close()
