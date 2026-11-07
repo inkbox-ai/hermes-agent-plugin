@@ -369,3 +369,37 @@ def test_definitive_group_reply_rejection_does_not_block_next_turn(factory, tmp_
             await value.queue.close()
             client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("known", [True, False])
+def test_media_policy_rejection_is_not_unknown_delivery(factory, tmp_path, known):
+    from inkbox import InkboxAPIError
+    from tests.test_native_turns import settle
+    from inkbox_plugin.whatsapp import send_media
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='Help please'))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            turn = row['turns'][0]
+            path = tmp_path / 'picture.png'
+            path.write_bytes(b'png')
+            value.adapter.validate_media_delivery_path = lambda path: path
+            client.whatsapp._http.post.reset_mock()
+            client.whatsapp._http.post.side_effect = InkboxAPIError(409, {'error': 'whatsapp_group_reply_required'}) if known else TimeoutError('unknown delivery')
+            result = await send_media(value.adapter, row['chat_id'], path, 'Picture', {'inkbox_reply_route': turn['route']})
+            assert not result.success and result.raw_response['inkbox_no_retry']
+            assert next(iter(turn['media_deliveries'].values()))['state'] == ('rejected' if known else 'uncertain')
+            assert turn['state'] == ('done' if known else 'uncertain')
+            again = await send_media(value.adapter, row['chat_id'], path, 'Picture', {'inkbox_reply_route': turn['route']})
+            assert not again.success
+            client.whatsapp._http.post.assert_called_once()
+            client.whatsapp._http.post_multipart.assert_called_once()
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())

@@ -485,6 +485,9 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
         prior = deliveries.get(fingerprint)
         if prior and prior["state"] == "sent":
             return SendResult(success=True, message_id=prior["message_id"])
+        if prior and prior["state"] == "rejected":
+            return SendResult(success=False, error="WhatsApp media rejected by current policy",
+                              raw_response={"inkbox_no_retry": True, **prior.get("policy_error", {})})
         if prior and prior["state"] in {"sending", "uncertain"}:
             return SendResult(
                 success=False,
@@ -555,6 +558,12 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
             return SendResult(success=False, error="WhatsApp media authorization unavailable; no send attempted",
                               raw_response={"inkbox_no_retry": True, "inkbox_preflight_failure": True, "retryable": exc.retryable})
         if "delivery" in locals() and delivery.get("state") == "sending":
+            rejected = public_quota_error(exc)
+            if rejected:
+                delivery.update(state="rejected", policy_error=rejected)
+                native._save(row)
+                return SendResult(success=False, error="WhatsApp media rejected by current policy",
+                                  raw_response={"inkbox_no_retry": True, **rejected})
             delivery["state"] = "uncertain"
             turn["state"] = "uncertain"
             native._save(row)
