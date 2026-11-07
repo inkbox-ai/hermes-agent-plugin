@@ -2531,3 +2531,12 @@ def test_context_headers_filter_to_the_inkbox_namespace():
     )
 
     assert selected == {"x-inkbox-example": "kept"}
+
+
+def test_hosted_startup_does_not_discover_unadmitted_tasks(monkeypatch):
+    monkeypatch.setenv('INKBOX_HOSTED_ACTIVATION_ID', 'activation-example')
+    gateway = object.__new__(InkboxAdapter)
+    def forbidden():
+        raise AssertionError('Hosted work must come through durable admission')
+    gateway._read_a2a_registry = forbidden
+    asyncio.run(gateway._catch_up_a2a_tasks())

@@ -3,6 +3,8 @@
 ## 0.2.23
 
 - Add durable, bounded webhook acceptance and retain uncertain outcomes without automatic replay.
+- Preserve all message receipts through debounce batching, serialize conversation admission, and separate completed receipts from pending capacity.
+- Limit hosted startup work to authorized deliveries and support explicit quarantine without replay.
 - Track asynchronous replies through completion and expose supervised activity and admission fences so configuration changes wait for active work.
 - Preserve standalone gateway behavior.
 - Support durable inbox ownership on Windows as well as Unix.

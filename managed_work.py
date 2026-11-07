@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
+from weakref import WeakKeyDictionary
 
 _current = ContextVar('managed_deliveries', default=())
+_owners = WeakKeyDictionary()
 
 
 class DeliveryWork:
@@ -45,10 +47,12 @@ def scope(work):
 
 def spawn(coroutine, **kwargs):
     task = asyncio.create_task(coroutine, **kwargs)
-    owners = _current.get()
+    owners = list(_current.get())
+    _owners[task] = owners
     for work in owners:
         work.add(task)
     def finished(done):
+        _owners.pop(done, None)
         success = not done.cancelled() and done.exception() is None
         for work in owners:
             work.finish(done, success=success)
@@ -60,3 +64,42 @@ def spawn(coroutine, **kwargs):
 def background(coroutine, **kwargs):
     with scope(()):
         return asyncio.create_task(coroutine, **kwargs)
+
+
+def _take(task):
+    if task is None:
+        return ()
+    owners = _owners.pop(task, [])
+    transferred = tuple(owners)
+    owners.clear()
+    for work in transferred:
+        work.parts.discard(task)
+    return transferred
+
+
+def replace(coroutine, previous):
+    owners = tuple(dict.fromkeys((*_current.get(), *_take(previous))))
+    with scope(owners):
+        task = spawn(coroutine)
+    if previous is not None and not previous.done():
+        previous.cancel()
+    return task
+
+
+@contextmanager
+def adopt(previous):
+    if previous is asyncio.current_task():
+        yield
+        return
+    owners = tuple(dict.fromkeys((*_current.get(), *_take(previous))))
+    part = object()
+    for work in owners:
+        work.add(part)
+    success = False
+    try:
+        with scope(owners):
+            yield
+        success = True
+    finally:
+        for work in owners:
+            work.finish(part, success=success)

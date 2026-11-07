@@ -72,6 +72,11 @@ class ManagedInbox:
                 );
                 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(activation,state,received);
             ''')
+            columns = {row[1] for row in self.db.execute('PRAGMA table_info(deliveries)')}
+            for name, kind in (('boot_id', 'TEXT'), ('settled_at', 'REAL')):
+                if name not in columns:
+                    self.db.execute(f'ALTER TABLE deliveries ADD COLUMN {name} {kind}')
+            self.db.execute("UPDATE deliveries SET boot_id=? WHERE boot_id IS NULL AND state!='completed'", (boot_id(),))
             # A vanished process cannot establish whether its external effects completed.
             self.db.execute("UPDATE deliveries SET state='unknown' WHERE state='dispatching'")
         except BaseException:
@@ -115,7 +120,7 @@ class ManagedInbox:
         content = {'event_type': envelope.get('event_type'), 'hosted_delivery': metadata}
         digest = hashlib.sha256(json.dumps(content, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         with self.transaction():
-            self.db.execute("DELETE FROM deliveries WHERE state='completed' AND finished<?",
+            self.db.execute("DELETE FROM deliveries WHERE (state='completed' OR settled_at IS NOT NULL) AND finished<?",
                             (time.time() - RECEIPT_RETENTION,))
             row = self.db.execute('SELECT receipt,state,digest FROM deliveries WHERE activation=? AND event_id=?',
                                   (self.activation_id, metadata['event_id'])).fetchone()
@@ -123,22 +128,22 @@ class ManagedInbox:
                 if row[2] != digest:
                     raise InboxError('Conflicting delivery content')
                 return self.receipt(metadata['event_id'], row[0], row[1])
-            count, used = self.db.execute('SELECT count(*),coalesce(sum(bytes),0) FROM deliveries').fetchone()
+            count, used = self.db.execute("SELECT count(*),coalesce(sum(bytes),0) FROM deliveries WHERE state != 'completed' AND settled_at IS NULL").fetchone()
             if count >= MAX_EVENTS or used + size > MAX_BYTES:
                 raise InboxFull('Delivery inbox is full')
             receipt = uuid4().hex
-            self.db.execute('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?, ?,NULL)',
+            self.db.execute('INSERT INTO deliveries(activation,event_id,receipt,digest,payload,bytes,state,received,finished) VALUES(?,?,?,?,?,?,?, ?,NULL)',
                             (self.activation_id, metadata['event_id'], receipt, digest, payload, size, 'pending', time.time()))
             return self.receipt(metadata['event_id'], receipt, 'pending')
 
     def claim(self, *, protocol_only: bool = False) -> tuple[str, dict] | None:
         with self.transaction():
-            row = self.db.execute("SELECT event_id,payload FROM deliveries WHERE activation=? AND state='pending' AND json_extract(payload, '$.hosted_delivery.starts_agent')=? ORDER BY received,event_id LIMIT 1",
+            row = self.db.execute("SELECT d.event_id,d.payload FROM deliveries d WHERE d.activation=? AND d.state='pending' AND json_extract(d.payload, '$.hosted_delivery.starts_agent')=? AND (json_extract(d.payload, '$.hosted_delivery.starts_agent')=0 OR NOT EXISTS(SELECT 1 FROM deliveries busy WHERE busy.activation=d.activation AND busy.state IN ('dispatching','unknown') AND busy.settled_at IS NULL AND json_extract(busy.payload,'$.companion.scope_id')=json_extract(d.payload,'$.companion.scope_id'))) ORDER BY d.received,d.event_id LIMIT 1",
                                   (self.activation_id, not protocol_only)).fetchone()
             if row is None:
                 return None
-            self.db.execute("UPDATE deliveries SET state='dispatching' WHERE activation=? AND event_id=?",
-                            (self.activation_id, row[0]))
+            self.db.execute("UPDATE deliveries SET state='dispatching',boot_id=? WHERE activation=? AND event_id=?",
+                            (boot_id(), self.activation_id, row[0]))
             return row[0], json.loads(row[1])
 
     def finish(self, event_id: str, *, completed: bool) -> bool:
@@ -150,8 +155,22 @@ class ManagedInbox:
                                    self.activation_id, event_id))
             return row.rowcount == 1
 
+    def quarantine(self, event_id: str) -> dict:
+        current = boot_id()
+        with self.transaction():
+            row = self.db.execute("SELECT receipt,state,boot_id,settled_at FROM deliveries WHERE activation=? AND event_id=?",
+                                  (self.activation_id, event_id)).fetchone()
+            if row is None or row[1] != 'unknown':
+                raise InboxError('Only unknown outcomes may be quarantined')
+            if row[3] is None:
+                if current is None or row[2] is None or current == row[2]:
+                    raise InboxError('Cold restart required to confirm the previous execution has stopped')
+                self.db.execute("UPDATE deliveries SET settled_at=?,finished=?,payload=NULL,bytes=0 WHERE activation=? AND event_id=?",
+                                (time.time(), time.time(), self.activation_id, event_id))
+            return {'event_id': event_id, 'quarantined': True}
+
     def summary(self) -> dict:
-        counts = dict(self.db.execute('SELECT state,count(*) FROM deliveries WHERE activation=? GROUP BY state',
+        counts = dict(self.db.execute('SELECT state,count(*) FROM deliveries WHERE activation=? AND settled_at IS NULL GROUP BY state',
                                       (self.activation_id,)))
         return {'pending': counts.get('pending', 0), 'active': counts.get('dispatching', 0),
                 'unknown': counts.get('unknown', 0)}
@@ -159,3 +178,10 @@ class ManagedInbox:
     def receipt(self, event_id: str, receipt: str, state: str) -> dict:
         return {'version': 1, 'activation_id': self.activation_id, 'event_id': event_id,
                 'receipt_id': receipt, 'state': state if state in {'completed', 'unknown'} else 'accepted'}
+
+
+def boot_id():
+    try:
+        return str(UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
+    except (OSError, ValueError):
+        return None

@@ -134,3 +134,78 @@ def test_protocol_receipts_have_separate_admission_from_agent_turns(tmp_path):
         assert inbox.claim()[0] == ordinary['id']
     finally:
         inbox.close()
+
+
+def test_completed_receipts_do_not_consume_pending_capacity(tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module(ManagedInbox.__module__)
+    monkeypatch.setattr(module, 'MAX_EVENTS', 1)
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        for number in range(1, 4):
+            value = event(activation, number)
+            inbox.accept(value)
+            assert inbox.claim()[0] == value['id']
+            inbox.finish(value['id'], completed=True)
+        assert inbox.accept(event(activation))['state'] == 'completed'
+        assert inbox.db.execute('SELECT count(*) FROM deliveries').fetchone()[0] == 3
+    finally:
+        inbox.close()
+
+
+def test_conversation_admission_is_serial_but_other_contacts_continue(tmp_path):
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        for number, contact in ((1, 'contact-a'), (2, 'contact-a'), (3, 'contact-b')):
+            inbox.accept(event(activation, number) | {'companion': {'scope_id': contact, 'sequence': number}})
+        assert inbox.claim()[0] == event(activation, 1)['id']
+        assert inbox.claim()[0] == event(activation, 3)['id']
+        assert inbox.claim() is None
+        inbox.finish(event(activation, 1)['id'], completed=True)
+        assert inbox.claim()[0] == event(activation, 2)['id']
+    finally:
+        inbox.close()
+
+
+def test_quarantine_requires_a_cold_restart_and_never_replays(tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module(ManagedInbox.__module__)
+    monkeypatch.setattr(module, 'boot_id', lambda: 'boot-one')
+    activation = str(uuid4())
+    path = tmp_path / 'inbox' / 'events.sqlite3'
+    inbox = ManagedInbox(path, activation)
+    value = event(activation)
+    inbox.accept(value)
+    inbox.claim()
+    inbox.finish(value['id'], completed=False)
+    with pytest.raises(InboxError, match='Cold restart'):
+        inbox.quarantine(value['id'])
+    inbox.close()
+    monkeypatch.setattr(module, 'boot_id', lambda: 'boot-two')
+    inbox = ManagedInbox(path, activation)
+    try:
+        assert inbox.summary()['unknown'] == 1
+        assert inbox.quarantine(value['id'])['quarantined']
+        assert inbox.summary()['unknown'] == 0
+        assert inbox.accept(value)['state'] == 'unknown'
+        assert inbox.claim() is None
+        assert inbox.quarantine(value['id'])['quarantined']
+    finally:
+        inbox.close()
+
+
+def test_control_event_can_cancel_an_active_conversation(tmp_path):
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        turn = event(activation) | {'companion': {'scope_id': 'contact-a', 'sequence': 1}}
+        control = event(activation, 2) | {'companion': {'scope_id': 'contact-a', 'sequence': 2}}
+        control['hosted_delivery']['starts_agent'] = False
+        inbox.accept(turn)
+        assert inbox.claim()[0] == turn['id']
+        inbox.accept(control)
+        assert inbox.claim(protocol_only=True)[0] == control['id']
+    finally:
+        inbox.close()

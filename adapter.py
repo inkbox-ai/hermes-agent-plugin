@@ -6098,6 +6098,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _catch_up_a2a_tasks(self) -> None:
         """Drain every submitted task through the same durable ingestion path."""
+        if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            return
         if self._inkbox is None:
             return
         try:
@@ -6955,10 +6957,8 @@ class InkboxAdapter(BasePlatformAdapter):
             return
 
         prior_task = self._pending_sms_text_batch_tasks.get(key)
-        if prior_task and not prior_task.done():
-            prior_task.cancel()
-        self._pending_sms_text_batch_tasks[key] = managed_work.spawn(
-            self._flush_sms_text_batch_after_delay(key)
+        self._pending_sms_text_batch_tasks[key] = managed_work.replace(
+            self._flush_sms_text_batch_after_delay(key), prior_task
         )
 
     async def _flush_sms_text_batch_after_delay(self, key: str) -> None:
@@ -6971,6 +6971,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 self._pending_sms_text_batch_tasks.pop(key, None)
 
     async def _flush_sms_text_batch_now(self, key: str) -> None:
+        with managed_work.adopt(self._pending_sms_text_batch_tasks.get(key)):
+            await self._flush_sms_text_batch_contents(key)
+
+    async def _flush_sms_text_batch_contents(self, key: str) -> None:
         current_task = asyncio.current_task()
         task = self._pending_sms_text_batch_tasks.get(key)
         if task is not None and task is not current_task and not task.done():
