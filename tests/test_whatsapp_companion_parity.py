@@ -281,7 +281,8 @@ def test_definitive_send_rejection_settles_only_original_answer(factory, status,
     asyncio.run(run())
 
 
-def test_companion_media_checks_off_loop_and_reuses_upload_after_late_read_failure(factory, tmp_path):
+@pytest.mark.parametrize("failed_read", [1, 2, 3, 4, 5])
+def test_companion_media_checks_off_loop_and_reuses_upload_after_late_read_failure(factory, tmp_path, failed_read):
     async def run():
         import threading
         from inkbox_plugin.whatsapp import send_media
@@ -303,23 +304,44 @@ def test_companion_media_checks_off_loop_and_reuses_upload_after_late_read_failu
         threads = []
         def proof(*args, **kwargs):
             threads.append(threading.get_ident())
-            if len(threads) == 5:
-                raise TimeoutError("late membership read")
+            if len(threads) == failed_read:
+                raise TimeoutError("membership read unavailable")
             return snapshot(item)
         instance.resource.activation_messages.side_effect = proof
         first = await send_media(instance.adapter, chat, picture, "Picture")
         assert not first.success and first.raw_response["inkbox_preflight_failure"]
         assert threads and loop_thread not in threads
         instance.identity.send_whatsapp.assert_not_called()
-        delivery = next(iter(turn["media_deliveries"].values()))
-        assert delivery["state"] == "uploaded"
+        delivery = next(iter(turn.get("media_deliveries", {}).values()), {})
+        assert delivery.get("state") == (None if failed_read == 1 else "uploaded" if failed_read >= 4 else "uploading")
+        assert instance.identity.upload_whatsapp_media.call_count == (1 if failed_read >= 4 else 0)
         assert turn["state"] == "completed"
-        key = delivery["idempotency_key"]
+        key = delivery.get("idempotency_key")
         second = await send_media(instance.adapter, chat, picture, "Picture")
         assert second.success
         assert loop_thread not in threads
         instance.identity.upload_whatsapp_media.assert_called_once()
         instance.identity.send_whatsapp.assert_called_once()
-        assert instance.identity.send_whatsapp.call_args.kwargs["idempotency_key"] == key
+        if key:
+            assert instance.identity.send_whatsapp.call_args.kwargs["idempotency_key"] == key
         await receiver.close()
+    asyncio.run(run())
+
+
+def test_rejected_explicit_quote_suppresses_only_captured_final_not_intermediate(factory):
+    async def run():
+        instance = factory("imessage")
+        item = setup(instance)
+        await instance.receiver.accept(item)
+        await idle(instance)
+        row = next(iter(instance.receiver.rows.values()))
+        turn = row["turns"][0]
+        turn.update(explicit_delivery_state="rejected", result_ready=True, result="Final answer")
+        intermediate = await instance.receiver.send("companion:" + row["key"], "Other body", turn["id"])
+        assert not intermediate.success and intermediate.raw_response["inkbox_no_retry"]
+        final = await instance.receiver.send("companion:" + row["key"], "Final answer", turn["id"])
+        assert final.success and final.raw_response["inkbox_suppressed"]
+        assert final.message_id is None
+        instance.identity.send_whatsapp.assert_not_called()
+        await instance.receiver.close()
     asyncio.run(run())

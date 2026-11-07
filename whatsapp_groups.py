@@ -119,6 +119,8 @@ def preflight_error(exc):
     """Separate failed authorization reads from uncertain outbound effects."""
     from httpx import TransportError
     from .imessage_state import ReplyPreflightError
+    if isinstance(exc, ReplyPreflightError):
+        return exc
     status = getattr(exc, 'status_code', None)
     retryable = (isinstance(exc, (TimeoutError, ConnectionError, TransportError))
                  or status in {408, 409, 429} or isinstance(status, int) and status >= 500)

@@ -1010,7 +1010,10 @@ class CompanionReceiver:
             if any(item.get("state") in {"sending", "uncertain"} for item in _whatsapp_attempt_rows(turn)):
                 return SendResult(success=False, error="Original WhatsApp send is unresolved; no automatic replacement", raw_response={"inkbox_no_retry": True})
             if turn.get("explicit_delivery_state") == "rejected":
-                return SendResult(success=True, raw_response={"inkbox_no_retry": True, "inkbox_suppressed": True})
+                if turn.get("result_ready") and turn.get("result") == content:
+                    return SendResult(success=True, raw_response={"inkbox_no_retry": True, "inkbox_suppressed": True})
+                return SendResult(success=False, error="Original WhatsApp request was rejected; no replacement reply",
+                                  raw_response={"inkbox_no_retry": True})
         explicit = next((item for item in turn.get("explicit_sends", []) if item["content"] == content), None)
         if explicit:
             return SendResult(success=True, message_id=explicit["message_id"])

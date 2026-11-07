@@ -403,3 +403,58 @@ def test_media_policy_rejection_is_not_unknown_delivery(factory, tmp_path, known
             await value.queue.close()
             client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("attachment_failure", ["transient", "permanent", "rejected"])
+def test_recovery_classifies_current_media_result_not_old_text_preflight(factory, tmp_path, attachment_failure):
+    from tests.test_native_turns import settle
+    from inkbox_plugin.whatsapp import send_media
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        identity = value.adapter._reply_identity
+        identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='Help please'))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            turn = row['turns'][0]
+            turn.pop('sent', None)
+            turn['state'] = 'answer_ready'
+            turn['preflight_failure'] = {'retryable': True, 'error': 'old text failure'}
+            turn['rendered'] = {'text_content': turn['answer']}
+            path = tmp_path / 'picture.png'
+            path.write_bytes(b'png')
+            value.adapter.validate_media_delivery_path = lambda path: path if attachment_failure != 'permanent' else None
+            async def attachments(event, rendered, extra, **kwargs):
+                if attachment_failure == 'rejected':
+                    from inkbox import InkboxAPIError
+                    client.whatsapp._http.post.side_effect = InkboxAPIError(409, {'error': 'whatsapp_group_reply_required'})
+                else:
+                    identity.get_whatsapp_conversation.side_effect = TimeoutError('temporary')
+                kwargs['record_delivery'](await send_media(value.adapter, row['chat_id'], path, 'Picture', {'inkbox_reply_route': turn['route']}))
+                identity.get_whatsapp_conversation.side_effect = None
+            value.adapter._deliver_attachments = attachments
+            client.whatsapp._http.post.reset_mock()
+            await value.queue._recover_answer(row, turn)
+            assert 'preflight_failure' not in turn
+            assert turn['state'] == {'transient': 'answer_ready', 'permanent': 'uncertain', 'rejected': 'done'}[attachment_failure]
+            assert client.whatsapp._http.post.call_count == (2 if attachment_failure == 'rejected' else 1)
+            if attachment_failure == 'transient':
+                async def healthy(event, rendered, extra, **kwargs):
+                    kwargs['record_delivery'](await send_media(value.adapter, row['chat_id'], path, 'Picture', {'inkbox_reply_route': turn['route']}))
+                value.adapter._deliver_attachments = healthy
+                await value.queue._recover_answer(row, turn)
+                assert turn['state'] == 'done'
+                assert client.whatsapp._http.post.call_count == 2
+                client.whatsapp._http.post_multipart.assert_called_once()
+            if attachment_failure == 'rejected':
+                await value.queue._recover_answer(row, turn)
+                assert turn['state'] == 'done'
+                assert client.whatsapp._http.post.call_count == 2
+            assert len(value.inputs) == 1
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())

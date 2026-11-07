@@ -473,7 +473,14 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
         return SendResult(
             success=False, error="WhatsApp media requires its original channel", raw_response={"inkbox_no_retry": True}
         )
-    check_authority = native.check_whatsapp_media_authority if companion else native.check_media_authority
+    authority = native.check_whatsapp_media_authority if companion else native.check_media_authority
+
+    def check_authority(row, turn, **kwargs):
+        from .whatsapp_groups import preflight_error
+        try:
+            authority(row, turn, **kwargs)
+        except Exception as exc:
+            raise preflight_error(exc) from exc
     try:
         await asyncio.to_thread(check_authority, row, turn)
         safe = adapter.validate_media_delivery_path(str(path))
@@ -487,7 +494,7 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
             return SendResult(success=True, message_id=prior["message_id"])
         if prior and prior["state"] == "rejected":
             return SendResult(success=False, error="WhatsApp media rejected by current policy",
-                              raw_response={"inkbox_no_retry": True, **prior.get("policy_error", {})})
+                              raw_response={"inkbox_no_retry": True, "inkbox_rejected": True, **prior.get("policy_error", {})})
         if prior and prior["state"] in {"sending", "uncertain"}:
             return SendResult(
                 success=False,
@@ -563,7 +570,7 @@ async def send_media(adapter, chat_id, path, caption, metadata=None, filename=No
                 delivery.update(state="rejected", policy_error=rejected)
                 native._save(row)
                 return SendResult(success=False, error="WhatsApp media rejected by current policy",
-                                  raw_response={"inkbox_no_retry": True, **rejected})
+                                  raw_response={"inkbox_no_retry": True, "inkbox_rejected": True, **rejected})
             delivery["state"] = "uncertain"
             turn["state"] = "uncertain"
             native._save(row)

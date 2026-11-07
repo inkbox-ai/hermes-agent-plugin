@@ -1747,7 +1747,9 @@ def test_legacy_automatic_quote_rejection_never_downgrades_or_replays(factory, t
             await settle(value.queue)
             row = next(iter(value.queue.rows.values()))
             turn = row["turns"][0]
-            assert turn["state"] == "uncertain"
+            assert turn["state"] == ("done" if status == 409 else "uncertain")
+            if status == 409:
+                assert turn["reply_delivery_state"] == "rejected"
             assert not (await value.queue._send(row, turn, "Replacement")).success
             client.whatsapp._http.post.assert_called_once()
             assert client.whatsapp._http.post.call_args.kwargs["json"]["reply_to_message_id"] == uid(1)
