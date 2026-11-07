@@ -704,12 +704,20 @@ class CompanionReceiver:
         if row["meta"]["channel"] != "whatsapp" or not envelope or not message(envelope).get("reply_to_message_id"):
             return ""
         if "whatsapp_quote" not in turn:
-            await self._authorized_source(row, turn)
-            if not getattr(self.adapter, "_reply_identity", None):
-                self.adapter._reply_identity = await asyncio.to_thread(self.adapter._inkbox.get_identity, self.adapter._identity_handle)
-            await asyncio.to_thread(self.authorize_whatsapp, row, turn, read_only=True)
-            from .whatsapp_groups import render_reply_context
-            turn["whatsapp_quote"] = await render_reply_context(self.adapter, message(envelope))
+            from .whatsapp_groups import render_reply_context, unavailable_reply_context
+            try:
+                await self._authorized_source(row, turn)
+                if not getattr(self.adapter, "_reply_identity", None):
+                    self.adapter._reply_identity = await asyncio.to_thread(self.adapter._inkbox.get_identity, self.adapter._identity_handle)
+                await asyncio.to_thread(self.authorize_whatsapp, row, turn, read_only=True)
+            except Exception as exc:
+                if not turn.get("context_only") and wakes(self.adapter, "whatsapp", message(envelope)):
+                    raise
+                # Quote enrichment must not make a quiet receipt block later turns.
+                # Waking turns still require source authorization again in _event.
+                turn["whatsapp_quote"] = unavailable_reply_context(message(envelope), exc)
+            else:
+                turn["whatsapp_quote"] = await render_reply_context(self.adapter, message(envelope))
         return turn["whatsapp_quote"]
 
     def _host_owner(self) -> Any:

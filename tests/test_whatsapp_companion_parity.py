@@ -580,3 +580,44 @@ def test_transient_parent_read_admits_current_turn_and_later_quote_can_recover(f
         finally:
             await instance.receiver.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure, expected', [(PermissionError('denied'), 'unavailable'),
+                                             (TimeoutError('temporary'), 'temporarily_unavailable')])
+@pytest.mark.parametrize('initial', [False, True])
+def test_quiet_quote_authorization_failure_does_not_block_later_wake(factory, failure, expected, initial):
+    async def run():
+        from unittest.mock import AsyncMock
+        instance = factory('imessage')
+        item = setup(instance)
+        instance.identity.get_whatsapp_message = Mock()
+        original = instance.receiver._authorized_source
+        try:
+            if not initial:
+                await instance.receiver.accept(item)
+                await idle(instance)
+            instance.adapter.config.extra['group_reply_mode'] = 'mention'
+            quiet = item if initial else whatsapp_event('live')
+            if not initial:
+                quiet['companion']['sequence'] = 4
+                quiet['data']['message']['id'] = uid(4)
+            quiet['data']['message'].update(content='That is odd', reply_to_message_id=uid(800),
+                                            agent_mentioned=False)
+            instance.receiver._authorized_source = AsyncMock(side_effect=failure)
+            await instance.receiver.accept(quiet)
+            await idle(instance)
+            row = next(iter(instance.receiver.rows.values()))
+            assert row['turns'][-1]['state'] == 'context_only'
+            assert f'"status": "{expected}"' in row['turns'][-1]['text']
+            instance.identity.get_whatsapp_message.assert_not_called()
+            instance.receiver._authorized_source = original
+            wake = whatsapp_event('live')
+            wake['companion']['sequence'] = 5
+            wake['data']['message'].update(id=uid(5), content='Please explain', agent_mentioned=True)
+            await instance.receiver.accept(wake)
+            await idle(instance)
+            assert len(instance.inputs) == (1 if initial else 2)
+            assert f'"status\\\": \\\"{expected}' in instance.inputs[-1].text
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
