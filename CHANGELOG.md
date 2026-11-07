@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.23
+
+- Refresh execution ownership for retried turns and replies; leave supervised post-call recovery to durable admission.
+- Keep stopped uncertain work isolated from unrelated activity and configuration changes.
+- Add durable, bounded webhook acceptance and retain uncertain outcomes without automatic replay.
+- Preserve all message receipts through debounce batching, serialize conversation admission, and separate completed receipts from pending capacity.
+- Limit hosted startup work to authorized deliveries and support explicit quarantine without replay.
+- Track asynchronous replies through completion and expose supervised activity and admission fences so configuration changes wait for active work.
+- Preserve standalone gateway behavior.
+- Support durable inbox ownership on Windows as well as Unix.
+
 ## 0.2.22
 
 - Restore delivery-failure follow-ups through Hermes v0.22.5 while retaining their original destinations and retry limits.

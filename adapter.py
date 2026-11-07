@@ -80,6 +80,10 @@ semantics).
 from __future__ import annotations
 
 import asyncio
+try:
+    from . import managed_work
+except ImportError:
+    import managed_work
 import hashlib
 import json
 import logging
@@ -2622,6 +2626,16 @@ class InkboxAdapter(BasePlatformAdapter):
         # The host publishes this as live runtime status. Catch-up can still
         # fail or be cancelled by its connection deadline, so publish only
         # once every awaited startup operation has finished.
+        if activation := os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            from .managed_ingress import ManagedIngress
+            try:
+                self._managed_receiver = ManagedIngress(self, activation)
+                self._managed_receiver.start()
+            except Exception:
+                logger.error("[Inkbox] Managed delivery recovery failed; gateway startup stopped")
+                await self._cleanup()
+                self._release_platform_lock()
+                return False
         self._mark_connected()
         logger.info(
             "[Inkbox] Connected: identity=%s public=%s listen=%s:%d",
@@ -2641,6 +2655,9 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        if receiver := getattr(self, "_managed_receiver", None):
+            await receiver.close()
+            self._managed_receiver = None
         self._a2a_closing = True
         receipt_tasks = [task for task in getattr(self, "_inkbox_receipt_tasks", {}).values()
                          if task is not asyncio.current_task() and not task.done()]
@@ -4180,7 +4197,20 @@ class InkboxAdapter(BasePlatformAdapter):
             return self._signing_key
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
 
+    def managed_status(self):
+        from .managed_lifecycle import status
+        return status(self)
+
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
+        if getattr(self, "_managed_draining", False):
+            return web.Response(status=503, text="temporarily unavailable")
+        self._managed_ingress = getattr(self, "_managed_ingress", 0) + 1
+        try:
+            return await self._accept_webhook(request)
+        finally:
+            self._managed_ingress -= 1
+
+    async def _accept_webhook(self, request: "web.Request") -> "web.Response":
         body = await request.read()
         try:
             envelope = json.loads(body or b"{}")
@@ -4214,6 +4244,35 @@ class InkboxAdapter(BasePlatformAdapter):
         # Trusted source label. ``None`` means no registered provider claimed
         # the request — an unknown/unverifiable third party.
         source = provider.name if provider is not None else None
+
+        if "hosted_delivery" in envelope:
+            import sqlite3
+            from .managed_inbox import InboxError, InboxFull
+
+            if source != "inkbox" or not provider.verify(
+                body=body, headers=dict(request.headers), url=str(request.url),
+                secret=self._provider_secret("inkbox"),
+            ):
+                return web.Response(status=401, text="Invalid signature")
+            receiver = getattr(self, "_managed_receiver", None)
+            if receiver is None or any(task.done() for task in receiver.tasks):
+                return web.Response(status=503, text="Temporarily unavailable")
+            try:
+                receipt = receiver.inbox.accept(envelope)
+            except InboxError:
+                return web.Response(status=409, text="Invalid or conflicting delivery")
+            except (InboxFull, OSError, sqlite3.Error):
+                return web.Response(status=503, text="Temporarily unavailable")
+            return web.json_response(receipt, status=202)
+
+        if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            # A legacy subscription must not bypass managed event selection.
+            if source != "inkbox" or not provider.verify(
+                body=body, headers=dict(request.headers), url=str(request.url),
+                secret=self._provider_secret("inkbox"),
+            ):
+                return web.Response(status=401, text="Invalid signature")
+            return web.json_response({"ok": True, "ignored": "managed-delivery-required"})
 
         if str(envelope.get("event_type") or "").startswith("whatsapp."):
             if source != "inkbox" or not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
@@ -4285,48 +4344,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 # can be Inkbox-signed too. Those don't match a known shape, so
                 # they fall through to the external branch below rather than
                 # getting swallowed here.
-                if event_type in SLACK_INCOMING_EVENTS or event_type == SLACK_STOP_EVENT:
-                    response = await self._on_slack_event(envelope)
-                elif event_type == "message.received":
-                    response = await self._on_mail_received(envelope)
-                elif event_type in ("message.bounced", "message.failed"):
-                    # Outbound mail died downstream — feed the
-                    # delivery-failure loop so the agent can react.
-                    response = await self._on_mail_delivery_failure(envelope)
-                elif event_type and event_type.startswith("message."):
-                    # Other outbound mail lifecycle (sent/delivered/forwarded) — log only.
-                    response = web.Response(status=200, text="ok")
-                elif event_type == "text.received":
-                    response = await self._on_text_received(envelope)
-                elif event_type and event_type.startswith("text."):
-                    response = await self._on_text_lifecycle(envelope)
-                elif event_type and event_type.startswith("a2a."):
-                    response = await self._on_a2a_event(
-                        envelope,
-                        headers=_a2a_context_headers(request.headers)
-                        if source is not None
-                        else None,
-                    )
-                elif event_type == "whatsapp.received":
-                    from .whatsapp import receive
-                    response = await receive(self, envelope)
-                elif event_type == "whatsapp.reaction_received":
-                    from .whatsapp import receive_reaction
-                    response = await receive_reaction(self, envelope)
-                elif event_type and event_type.startswith("whatsapp."):
-                    from .whatsapp import record_status
-                    record_status(self, envelope)
-                    response = web.Response(status=200, text="WhatsApp delivery status recorded")
-                elif event_type == "imessage.received":
-                    response = await self._on_imessage_received(envelope)
-                elif event_type == "imessage.reaction_received":
-                    response = await self._on_imessage_reaction(envelope)
-                elif event_type and event_type.startswith("imessage."):
-                    response = await self._on_imessage_lifecycle(envelope)
-                elif event_type == "call.ended":
-                    response = await self._on_call_ended(envelope)
-                else:
-                    response = await self._on_incoming_call(envelope)
+                response = await self._route_inkbox_event(
+                    event_type, envelope, headers=_a2a_context_headers(request.headers),
+                )
             elif source is not None and source != "inkbox":
                 # A verified third-party provider (registered + its secret set).
                 # That registration is the opt-in, so deliver regardless of the
@@ -4352,6 +4372,49 @@ class InkboxAdapter(BasePlatformAdapter):
             self._dedup_rollback(dedup_id)
             raise
         self._dedup_commit(dedup_id)
+        return response
+
+    async def _route_inkbox_event(self, event_type, envelope, headers=None):
+        if event_type in SLACK_INCOMING_EVENTS or event_type == SLACK_STOP_EVENT:
+            response = await self._on_slack_event(envelope)
+        elif event_type == "message.received":
+            response = await self._on_mail_received(envelope)
+        elif event_type in ("message.bounced", "message.failed"):
+            # Outbound mail died downstream — feed the
+            # delivery-failure loop so the agent can react.
+            response = await self._on_mail_delivery_failure(envelope)
+        elif event_type and event_type.startswith("message."):
+            # Other outbound mail lifecycle (sent/delivered/forwarded) — log only.
+            response = web.Response(status=200, text="ok")
+        elif event_type == "text.received":
+            response = await self._on_text_received(envelope)
+        elif event_type and event_type.startswith("text."):
+            response = await self._on_text_lifecycle(envelope)
+        elif event_type and event_type.startswith("a2a."):
+            response = await self._on_a2a_event(
+                envelope,
+                headers=headers,
+            )
+        elif event_type == "whatsapp.received":
+            from .whatsapp import receive
+            response = await receive(self, envelope)
+        elif event_type == "whatsapp.reaction_received":
+            from .whatsapp import receive_reaction
+            response = await receive_reaction(self, envelope)
+        elif event_type and event_type.startswith("whatsapp."):
+            from .whatsapp import record_status
+            record_status(self, envelope)
+            response = web.Response(status=200, text="WhatsApp delivery status recorded")
+        elif event_type == "imessage.received":
+            response = await self._on_imessage_received(envelope)
+        elif event_type == "imessage.reaction_received":
+            response = await self._on_imessage_reaction(envelope)
+        elif event_type and event_type.startswith("imessage."):
+            response = await self._on_imessage_lifecycle(envelope)
+        elif event_type == "call.ended":
+            response = await self._on_call_ended(envelope)
+        else:
+            response = await self._on_incoming_call(envelope)
         return response
 
     @staticmethod
@@ -4632,6 +4695,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _catch_up_hosted_call_completions(self) -> None:
         """Replay unfinished hosted-call turns owned by an earlier process."""
+        if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            return
         try:
             entries = list(self._read_hosted_call_registry().items())
         except Exception:
@@ -5259,7 +5324,7 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         stop_event = asyncio.Event()
         self._a2a_progress_stop_events[task_id] = stop_event
-        self._a2a_progress_tasks[task_id] = asyncio.create_task(
+        self._a2a_progress_tasks[task_id] = managed_work.background(
             self._run_a2a_progress_updates(
                 task_id=task_id,
                 message_id=message_id,
@@ -6035,6 +6100,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _catch_up_a2a_tasks(self) -> None:
         """Drain every submitted task through the same durable ingestion path."""
+        if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            return
         if self._inkbox is None:
             return
         try:
@@ -6892,10 +6959,8 @@ class InkboxAdapter(BasePlatformAdapter):
             return
 
         prior_task = self._pending_sms_text_batch_tasks.get(key)
-        if prior_task and not prior_task.done():
-            prior_task.cancel()
-        self._pending_sms_text_batch_tasks[key] = asyncio.create_task(
-            self._flush_sms_text_batch_after_delay(key)
+        self._pending_sms_text_batch_tasks[key] = managed_work.replace(
+            self._flush_sms_text_batch_after_delay(key), prior_task
         )
 
     async def _flush_sms_text_batch_after_delay(self, key: str) -> None:
@@ -6908,6 +6973,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 self._pending_sms_text_batch_tasks.pop(key, None)
 
     async def _flush_sms_text_batch_now(self, key: str) -> None:
+        with managed_work.adopt(self._pending_sms_text_batch_tasks.get(key)):
+            await self._flush_sms_text_batch_contents(key)
+
+    async def _flush_sms_text_batch_contents(self, key: str) -> None:
         current_task = asyncio.current_task()
         task = self._pending_sms_text_batch_tasks.get(key)
         if task is not None and task is not current_task and not task.done():
@@ -8137,7 +8206,7 @@ class InkboxAdapter(BasePlatformAdapter):
         existing = self._typing_tasks().get(conversation_id)
         if existing is not None and not existing.done():
             return  # already pulsing for this conversation
-        self._typing_tasks()[conversation_id] = asyncio.create_task(
+        self._typing_tasks()[conversation_id] = managed_work.background(
             self._imessage_typing_loop(conversation_id)
         )
 
@@ -9115,9 +9184,9 @@ class InkboxAdapter(BasePlatformAdapter):
                 if ev == "start" and not greeting_sent:
                     greeting_sent = True
                     if direction == "outbound":
-                        asyncio.create_task(_trigger_outbound_opening())
+                        managed_work.spawn(_trigger_outbound_opening())
                     else:
-                        asyncio.create_task(_send_static_greeting())
+                        managed_work.spawn(_send_static_greeting())
                     continue
                 if ev == "transcript" and payload.get("is_final"):
                     text = _escape_contact_memory_tokens(
@@ -9964,7 +10033,7 @@ class InkboxAdapter(BasePlatformAdapter):
         if not self._prepare_conversation_event(event):
             async def quiet() -> None:
                 return None
-            return asyncio.create_task(quiet())
+            return managed_work.spawn(quiet())
         route = (event.metadata or {}).get("inkbox_reply_route")
         control = (event.metadata or {}).get("inkbox_control") or (
             isinstance(event.raw_message, dict) and event.raw_message.get("_inkbox_companion_control")
@@ -9987,10 +10056,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 if not hasattr(self, "_group_dispatch_lanes"):
                     self._group_dispatch_lanes = {}
                 lane = self._group_dispatch_lanes.setdefault(lane_key, {"lock": asyncio.Lock(), "tasks": {}})
-                task = asyncio.create_task(self._dispatch_group_event(event, lane_key, lane))
+                task = managed_work.spawn(self._dispatch_group_event(event, lane_key, lane))
                 lane["tasks"][task] = event
             else:
-                task = asyncio.create_task(self.handle_message(event))
+                task = managed_work.spawn(self.handle_message(event))
         finally:
             reply_route.reset(token)
         self._background_tasks.add(task)
@@ -10019,7 +10088,7 @@ class InkboxAdapter(BasePlatformAdapter):
 
             # Native cancellation can wait for model/tool cleanup. Keep that
             # work off the signed webhook acknowledgement path.
-            interrupt_task = asyncio.create_task(interrupt_or_reject())
+            interrupt_task = managed_work.spawn(interrupt_or_reject())
             self._background_tasks.add(interrupt_task)
 
             def interrupt_finished(done: asyncio.Task) -> None:

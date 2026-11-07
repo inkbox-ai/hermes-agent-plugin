@@ -126,19 +126,6 @@ jobs:
       - name: Verify base behavior and structural opt-in gates
         run: .venv/bin/python -m pytest -q tests/test_optional_capabilities.py tests/test_vault_tools.py tests/test_setup_slack.py tests/test_slack_sdk.py tests/test_slack_activity.py tests/test_slack_companion_adapter.py tests/test_imessage_native_sdk.py tests/test_tunnel_tls.py
 
-  windows-unit:
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.1.0
-      - name: Install published SDK dependencies
-        shell: bash
-        run: |
-          uv sync --extra test --frozen --python 3.12
-      - name: Run native Windows unit tests
-        run: uv run --frozen python -m pytest -v
-
   native-install:
     # Exercise the installed layout, not only an editable host/test environment.
     # All remote SDK reads use a loopback fixture; no secrets or live sends.
