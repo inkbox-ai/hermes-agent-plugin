@@ -4207,7 +4207,7 @@ class InkboxAdapter(BasePlatformAdapter):
         from hermes_constants import get_hermes_home
         adapter = ChatAdapter(base_url, token)
         self._managed_chat = ChatRuntime(Path(get_hermes_home()) / "inkbox" / "chat.sqlite",
-            os.environ["INKBOX_MANAGED_OWNER_ID"], adapter.run, adapter.cancel)
+            os.environ["INKBOX_MANAGED_OWNER_ID"], adapter.run, adapter.cancel, adapter.settled)
         return self._managed_chat
 
     def managed_status(self):

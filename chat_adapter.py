@@ -15,6 +15,7 @@ class ChatAdapter:
         self.base_url, self.token = base_url, token
         self.runs = {}
         self.cancelled = set()
+        self.last_runs = {}
 
     async def request(self, method, path, data=None, headers=None):
         async with aiohttp.ClientSession(
@@ -31,14 +32,22 @@ class ChatAdapter:
         if run := self.runs.get(session_id):
             await self.request("POST", f"/v1/runs/{run}/stop", {})
 
+    async def settled(self, session_id):
+        run = self.last_runs.get(session_id)
+        if not run:
+            return False
+        value = await self.request("GET", f"/v1/runs/{run}")
+        return value.get("status") in {"completed", "cancelled", "failed"}
+
     async def run(self, spec, emit, ask):
         session = spec["session_id"]
         native_session = "session_" + session.replace("-", "")
         if session in self.cancelled:
             self.cancelled.discard(session)
             return {"text": "", "cancelled": True, "session_id": native_session}
-        from .managed_chat import file_instruction, safe_text
+        from .managed_chat import file_instruction, safe_text, failure_code
 
+        self.last_runs.pop(session, None)
         accepted = await self.request(
             "POST",
             "/v1/runs",
@@ -47,6 +56,7 @@ class ChatAdapter:
         )
         run = accepted["run_id"]
         self.runs[session] = run
+        self.last_runs[session] = run
         if session in self.cancelled:
             await self.cancel(session)
         try:
@@ -105,11 +115,17 @@ class ChatAdapter:
                                         + ["deny"],
                                     }
                                 )
+                                if answer.get("cancelled") or session in self.cancelled:
+                                    continue
                                 endpoint = "approval"
                                 body = {"choice": "once" if answer["decision"] == "approve_once" else "deny"}
                             else:
                                 choices = event.get("choices") or []
-                                if not isinstance(choices, list) or len(choices) > 32 or any(not isinstance(choice, str) for choice in choices):
+                                if (
+                                    not isinstance(choices, list)
+                                    or len(choices) > 32
+                                    or any(not isinstance(choice, str) for choice in choices)
+                                ):
                                     raise ValueError("Unsupported question choices")
                                 multiple = bool(event.get("multi_select")) and bool(choices)
                                 answer = await ask(
@@ -121,13 +137,22 @@ class ChatAdapter:
                                                 "id": "answer",
                                                 "label": safe_text(event.get("question") or "Answer the agent")[:2048],
                                                 "required": True,
-                                                "type": "multi_select" if multiple else "single_select" if choices else "text",
-                                                "choices": [{"id": str(i), "label": safe_text(label)[:256]} for i, label in enumerate(choices)],
+                                                "type": "multi_select"
+                                                if multiple
+                                                else "single_select"
+                                                if choices
+                                                else "text",
+                                                "choices": [
+                                                    {"id": str(i), "label": safe_text(label)[:256]}
+                                                    for i, label in enumerate(choices)
+                                                ],
                                                 "allow_free_text": not bool(choices),
                                             }
                                         ],
                                     }
                                 )
+                                if answer.get("cancelled") or session in self.cancelled:
+                                    continue
                                 endpoint = "clarify"
                                 selected = answer["answers"]["answer"]
                                 if multiple:
@@ -144,6 +169,7 @@ class ChatAdapter:
                                 "text": str(event.get("output") or ""),
                                 "cancelled": kind == "run.cancelled",
                                 "failed": kind == "run.failed",
+                                "error_code": failure_code(event),
                                 "session_id": native_session,
                             }
                         elif kind == "run.interrupted":

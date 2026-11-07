@@ -219,18 +219,165 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 def test_restart_emits_terminal_update_and_keeps_unfenced_conversation_busy(tmp_path):
-    path = tmp_path / 'chat.sqlite'
-    journal = Journal(path, 'owner')
+    path = tmp_path / "chat.sqlite"
+    journal = Journal(path, "owner")
     value = spec()
     journal.accept(value)
     journal.close()
-    journal = Journal(path, 'owner')
-    assert journal.events(value['run_id'], 0, 32)[-1]['payload']['status'] == 'outcome_unknown'
+    journal = Journal(path, "owner")
+    assert journal.events(value["run_id"], 0, 32)[-1]["payload"]["status"] == "outcome_unknown"
     try:
-        journal.accept(spec('second'))
+        journal.accept(spec("second"))
     except ValueError:
         pass
     else:
-        raise AssertionError('An unfenced owner may still be executing')
-    journal.accept(spec('other', 'different'))
+        raise AssertionError("An unfenced owner may still be executing")
+    journal.accept(spec("other", "different"))
     journal.close()
+
+
+class RecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_answer_cannot_win_after_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entered = asyncio.Event()
+            answers = []
+
+            async def run(value, emit, ask):
+                entered.set()
+                answers.append(
+                    await ask(
+                        {
+                            "kind": "approval",
+                            "title": "Run",
+                            "effective_scope": "operation",
+                            "decisions": ["approve_once", "deny"],
+                        }
+                    )
+                )
+                return {"text": ""}
+
+            async def cancel(_):
+                pass
+
+            runtime = ChatRuntime(Path(directory) / "chat.sqlite", "owner", run, cancel)
+            await runtime.control({"action": "chat_start", "spec": spec()})
+            await entered.wait()
+            card = runtime.journal.get("turn")["requests"][0]
+            await runtime.control(
+                {
+                    "action": "chat_respond",
+                    "run_id": "turn",
+                    "request_id": card["id"],
+                    "version": 1,
+                    "response": {"kind": "approval", "decision": "approve_once"},
+                }
+            )
+            await runtime.control({"action": "chat_cancel", "run_id": "turn"})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            self.assertEqual(answers, [{"cancelled": True}])
+            self.assertEqual(runtime.journal.get("turn")["state"], "cancelled")
+            self.assertTrue(runtime.journal.get("turn")["children_complete"])
+            self.assertTrue(runtime.journal.accept(spec("next")))
+            await runtime.close()
+
+    async def test_large_output_is_bounded_and_does_not_pin_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+
+            async def run(value, emit, ask):
+                for _ in range(40):
+                    emit("message.delta", {"text": "a" * 2048})
+                emit("tool.completed", {"id": "tool", "detail": "b" * 20000})
+                return {"text": "a" * 81920}
+
+            async def cancel(_):
+                pass
+
+            runtime = ChatRuntime(Path(directory) / "chat.sqlite", "owner", run, cancel)
+            await runtime.control({"action": "chat_start", "spec": spec()})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            receipt = runtime.journal.get("turn")
+            self.assertEqual(receipt["state"], "failed")
+            self.assertEqual(receipt["error_code"], "output_limit")
+            self.assertTrue(receipt["children_complete"])
+            self.assertTrue(runtime.journal.accept(spec("next")))
+            await runtime.close()
+
+    async def test_late_native_completion_releases_unknown_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = False
+
+            async def run(value, emit, ask):
+                raise RuntimeError("transport lost")
+
+            async def cancel(_):
+                pass
+
+            async def settled(_):
+                return stopped
+
+            runtime = ChatRuntime(Path(directory) / "chat.sqlite", "owner", run, cancel, settled)
+            await runtime.control({"action": "chat_start", "spec": spec()})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            self.assertFalse(runtime.journal.get("turn")["children_complete"])
+            stopped = True
+            result = await runtime.control({"action": "chat_events", "run_id": "turn", "after": 0})
+            self.assertEqual(result["receipt"]["state"], "outcome_unknown")
+            self.assertTrue(result["receipt"]["children_complete"])
+            self.assertTrue(runtime.journal.accept(spec("next")))
+            await runtime.close()
+
+    async def test_expiry_with_native_stop_acknowledgement_releases_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = asyncio.Event()
+
+            async def run(value, emit, ask):
+                answer = await ask(
+                    {
+                        "kind": "approval",
+                        "title": "Run command",
+                        "effective_scope": "operation",
+                        "decisions": ["approve_once", "deny"],
+                    }
+                )
+                self.assertEqual(answer, {"cancelled": True})
+                await stopped.wait()
+                return {"text": "", "cancelled": True}
+
+            async def cancel(_):
+                stopped.set()
+
+            runtime = ChatRuntime(Path(directory) / "chat.sqlite", "owner", run, cancel)
+            value = spec()
+            value["deadline_unix_ms"] = int(time.time() * 1000) + 50
+            await runtime.control({"action": "chat_start", "spec": value})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            receipt = runtime.journal.get("turn")
+            self.assertEqual(receipt["state"], "cancelled")
+            self.assertTrue(receipt["children_complete"])
+            self.assertTrue(runtime.journal.accept(spec("next")))
+            await runtime.close()
+
+    async def test_known_model_failure_has_key_recovery_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+
+            async def run(value, emit, ask):
+                return {"failed": True, "error_code": "model_key_invalid", "text": ""}
+
+            async def cancel(_):
+                pass
+
+            runtime = ChatRuntime(Path(directory) / "chat.sqlite", "owner", run, cancel)
+            await runtime.control({"action": "chat_start", "spec": spec()})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            events = runtime.journal.events("turn", 0)
+            blocker = next(e["payload"]["blocker"] for e in events if e["payload"].get("blocker"))
+            self.assertEqual(blocker["code"], "model_key_invalid")
+            self.assertIn("manage_model_key", blocker["actions"])
+            await runtime.close()
+
+
+def test_model_failure_classification_requires_native_error_evidence():
+    from inkbox_plugin.managed_chat import failure_code
+
+    assert failure_code({"error": "Error code: 401 - {'error': {'code': 'model_key_invalid'}}"}) == "model_key_invalid"
+    assert failure_code({"error": "An unrelated message mentioning model_key_invalid"}) is None
