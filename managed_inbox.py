@@ -73,6 +73,8 @@ class ManagedInbox:
                 CREATE INDEX IF NOT EXISTS deliveries_pending ON deliveries(activation,state,received);
             ''')
             columns = {row[1] for row in self.db.execute('PRAGMA table_info(deliveries)')}
+            if 'owner_id' not in columns:
+                self.db.execute('ALTER TABLE deliveries ADD COLUMN owner_id TEXT')
             for name, kind in (('boot_id', 'TEXT'), ('settled_at', 'REAL')):
                 if name not in columns:
                     self.db.execute(f'ALTER TABLE deliveries ADD COLUMN {name} {kind}')
@@ -142,8 +144,8 @@ class ManagedInbox:
                                   (self.activation_id, not protocol_only)).fetchone()
             if row is None:
                 return None
-            self.db.execute("UPDATE deliveries SET state='dispatching',boot_id=? WHERE activation=? AND event_id=?",
-                            (boot_id(), self.activation_id, row[0]))
+            self.db.execute("UPDATE deliveries SET state='dispatching',boot_id=?,owner_id=? WHERE activation=? AND event_id=?",
+                            (boot_id(), os.getenv('INKBOX_MANAGED_OWNER_ID'), self.activation_id, row[0]))
             return row[0], json.loads(row[1])
 
     def finish(self, event_id: str, *, completed: bool) -> bool:
@@ -172,8 +174,14 @@ class ManagedInbox:
     def summary(self) -> dict:
         counts = dict(self.db.execute('SELECT state,count(*) FROM deliveries WHERE activation=? AND settled_at IS NULL GROUP BY state',
                                       (self.activation_id,)))
-        return {'pending': counts.get('pending', 0), 'active': counts.get('dispatching', 0),
-                'unknown': counts.get('unknown', 0)}
+        review = self.review_required()
+        pending = self.db.execute("SELECT count(*) FROM deliveries d WHERE d.activation=? AND d.state='pending' AND (json_extract(d.payload,'$.hosted_delivery.starts_agent')=0 OR NOT EXISTS(SELECT 1 FROM deliveries busy WHERE busy.activation=d.activation AND busy.state='unknown' AND busy.settled_at IS NULL AND json_extract(busy.payload,'$.companion.scope_id')=json_extract(d.payload,'$.companion.scope_id')))", (self.activation_id,)).fetchone()[0]
+        return {'pending': pending, 'active': counts.get('dispatching', 0),
+                'unknown': counts.get('unknown', 0) - review, 'review_required': review}
+
+    def review_required(self) -> int:
+        rows = self.db.execute("SELECT boot_id,owner_id FROM deliveries WHERE activation=? AND state='unknown' AND settled_at IS NULL", (self.activation_id,))
+        return sum(execution_stopped(boot, owner) for boot, owner in rows)
 
     def receipt(self, event_id: str, receipt: str, state: str) -> dict:
         return {'version': 1, 'activation_id': self.activation_id, 'event_id': event_id,
@@ -185,3 +193,10 @@ def boot_id():
         return str(UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
     except (OSError, ValueError):
         return None
+
+
+def execution_stopped(previous_boot, previous_owner=None):
+    current_boot = boot_id()
+    current_owner = os.getenv('INKBOX_MANAGED_OWNER_ID')
+    return bool((current_boot and previous_boot and current_boot != previous_boot)
+                or (current_owner and previous_owner and current_owner != previous_owner))

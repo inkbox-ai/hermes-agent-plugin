@@ -3,6 +3,11 @@
 
 def _uncertain(value):
     if isinstance(value, dict):
+        from .managed_inbox import execution_stopped
+        if execution_stopped(value.get("execution_boot_id"), value.get("execution_owner_id")):
+            return False
+        if value.get("fenced"):
+            return False
         return value.get("state") in {"uncertain", "submitting", "control_submitting"} or any(_uncertain(v) for v in value.values())
     return isinstance(value, list) and any(_uncertain(v) for v in value)
 

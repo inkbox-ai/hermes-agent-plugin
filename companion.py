@@ -193,6 +193,11 @@ class CompanionReceiver:
         self._owner_file = handle
 
     def _save(self, row: dict) -> None:
+        from .managed_inbox import boot_id
+        for turn in row.get("turns", []):
+            if turn.get("state") in {"submitting", "submitted", "control_submitting"}:
+                turn.setdefault("execution_boot_id", boot_id())
+                turn.setdefault("execution_owner_id", os.getenv("INKBOX_MANAGED_OWNER_ID"))
         self._save_checkpoint(self.root / f"{row['key']}.json", row)
 
     def _save_checkpoint(self, path: Path, value: dict) -> None:

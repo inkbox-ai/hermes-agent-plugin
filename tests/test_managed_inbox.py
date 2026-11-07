@@ -40,7 +40,7 @@ os._exit(0)
     subprocess.run([sys.executable, '-c', code, str(path), activation, json.dumps(event(activation))], check=True)
     inbox = ManagedInbox(path, activation)
     try:
-        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 0}
+        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 0, 'review_required': 0}
         assert inbox.claim() == (event(activation)['id'], event(activation))
         assert inbox.claim() is None
         assert inbox.finish(event(activation)['id'], completed=True)
@@ -114,7 +114,7 @@ def test_old_completed_receipts_expire_without_dropping_unknown_or_pending(tmp_p
         inbox.finish(event(activation, 2)['id'], completed=False)
         inbox.db.execute('UPDATE deliveries SET finished=0')
         inbox.accept(event(activation, 3))
-        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 1}
+        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 1, 'review_required': 0}
         assert inbox.db.execute('SELECT count(*) FROM deliveries').fetchone()[0] == 2
     finally:
         inbox.close()
@@ -186,7 +186,8 @@ def test_quarantine_requires_a_cold_restart_and_never_replays(tmp_path, monkeypa
     monkeypatch.setattr(module, 'boot_id', lambda: 'boot-two')
     inbox = ManagedInbox(path, activation)
     try:
-        assert inbox.summary()['unknown'] == 1
+        assert inbox.summary()['unknown'] == 0
+        assert inbox.summary()['review_required'] == 1
         assert inbox.quarantine(value['id'])['quarantined']
         assert inbox.summary()['unknown'] == 0
         assert inbox.accept(value)['state'] == 'unknown'
@@ -209,3 +210,41 @@ def test_control_event_can_cancel_an_active_conversation(tmp_path):
         assert inbox.claim(protocol_only=True)[0] == control['id']
     finally:
         inbox.close()
+
+
+def test_previous_boot_unknown_blocks_only_its_scope(tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module(ManagedInbox.__module__)
+    monkeypatch.setattr(module, 'boot_id', lambda: 'old-boot')
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox.sqlite3', activation)
+    first = event(activation) | {'companion': {'scope_id': 'scope-a'}}
+    inbox.accept(first)
+    inbox.claim()
+    inbox.finish(first['id'], completed=False)
+    inbox.accept(event(activation, 2) | {'companion': {'scope_id': 'scope-a'}})
+    monkeypatch.setattr(module, 'boot_id', lambda: 'new-boot')
+    assert inbox.summary() == {'pending': 0, 'active': 0, 'unknown': 0, 'review_required': 1}
+    assert inbox.claim() is None
+    other = event(activation, 3) | {'companion': {'scope_id': 'scope-b'}}
+    inbox.accept(other)
+    assert inbox.claim()[0] == other['id']
+    assert inbox.accept(first)['state'] == 'unknown'
+    inbox.close()
+
+
+def test_fenced_owner_replacement_releases_pin_without_replay(tmp_path, monkeypatch):
+    monkeypatch.setenv('INKBOX_MANAGED_OWNER_ID', 'old-owner')
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox.sqlite3', activation)
+    first = event(activation)
+    inbox.accept(first)
+    inbox.claim()
+    inbox.finish(first['id'], completed=False)
+    assert inbox.summary()['unknown'] == 1
+    monkeypatch.setenv('INKBOX_MANAGED_OWNER_ID', 'new-owner')
+    assert inbox.summary()['unknown'] == 0
+    assert inbox.summary()['review_required'] == 1
+    assert inbox.claim() is None
+    assert inbox.accept(first)['state'] == 'unknown'
+    inbox.close()

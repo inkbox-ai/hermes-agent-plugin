@@ -29,3 +29,17 @@ def test_ingress_and_delivery_remain_active_until_finished():
         adapter._managed_ingress = 0
         assert status(adapter)["active"] == 0
     asyncio.run(scenario())
+
+
+def test_fenced_or_previous_boot_unknown_does_not_pin_unrelated_work(monkeypatch):
+    from inkbox_plugin import managed_inbox
+    monkeypatch.setattr(managed_inbox, 'boot_id', lambda: 'current-boot')
+    turn = {'state': 'uncertain', 'execution_boot_id': 'old-boot'}
+    receiver = SimpleNamespace(tasks={}, outbound=set(), rows={'contact': {'turns': [turn]}})
+    adapter = SimpleNamespace(is_connected=True, _native_turns=receiver)
+    assert status(adapter)['unknown'] is False
+    assert turn['state'] == 'uncertain'
+    turn['execution_boot_id'] = 'current-boot'
+    assert status(adapter)['unknown'] is True
+    turn['fenced'] = True
+    assert status(adapter)['unknown'] is False
