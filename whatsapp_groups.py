@@ -94,24 +94,32 @@ async def render_mentions(adapter, item):
     raw = str(item.get('content') or '')
     mentions = copy.deepcopy(current_mentions(item))
     replacements = {}
+    names = {}
     for mention in mentions:
         if mention['is_agent']:
             name = str(adapter._identity_handle).lstrip('@')
         else:
             phone = mention['phone_number']
-            contact = None
-            if phone:
+            if phone and phone not in names:
+                contact = None
                 try:
                     contact = await adapter._resolve_contact_full(kind='phone', value=phone)
                 except Exception:
                     pass
-            name = (contact or {}).get('name') or phone or 'unresolved mention'
+                value = (contact or {}).get('name')
+                names[phone] = ' '.join(re.sub(r'[\x00-\x1f\x7f]', ' ', value).split())[:160] if isinstance(value, str) else ''
+            name = names.get(phone) or None
         mention['display_name'] = name
         if mention['text']:
-            replacements[mention['text']] = '@' + name
+            label = name or mention['phone_number']
+            replacement = '@' + label if label else '@[unresolved mention]'
+            if mention['text'] in replacements and replacements[mention['text']] != replacement:
+                replacement = '@[unresolved mention]'
+            replacements[mention['text']] = replacement
     if replacements:
-        pattern = r'(?<![\w@])(?:' + '|'.join(re.escape(v) for v in sorted(replacements, key=len, reverse=True)) + r')(?![\w])'
-        rendered = re.sub(pattern, lambda match: replacements[match.group()], raw)
+        tokens = '|'.join(re.escape(v) for v in sorted(replacements, key=len, reverse=True))
+        pattern = re.compile(r'(?:https?://|www\.)\S+|(?<![\w@.+/-])(?P<mention>' + tokens + r')(?![\w-])(?!\.\w)', re.I)
+        rendered = pattern.sub(lambda match: replacements[match.group('mention')] if match.group('mention') else match.group(), raw)
     else:
         rendered = raw
     return rendered, mentions

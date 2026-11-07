@@ -28,7 +28,7 @@ def test_names_self_handle_and_unknown_numbers_do_not_change_raw_mentions():
             {'text': '@234', 'phone_number': '+15555550102', 'is_agent': False},
             {'text': '@345', 'phone_number': None, 'is_agent': False}]}
         text, mentions = await render_mentions(adapter, source)
-        assert text == '@sample-agent @1234 @Taylor @unresolved mention @sample-agent'
+        assert text == '@sample-agent @1234 @Taylor @[unresolved mention] @sample-agent'
         assert source['content'] == '@123 @1234 @234 @345 @123'
         assert 'private' not in repr(mentions)
         adapter._resolve_contact_full.assert_awaited_once_with(kind='phone', value='+15555550102')
@@ -731,3 +731,29 @@ def test_transient_parent_http_status_is_distinct_from_definitive_unavailability
     text = asyncio.run(render_reply_context(adapter, {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800)}))
     assert '"status": "temporarily_unavailable"' in text
     assert uid(800) in text
+
+
+def test_mention_display_preserves_urls_and_nonmention_identifiers():
+    adapter = NS(_identity_handle='sample-agent', _resolve_contact_full=AsyncMock())
+    raw = '@123 https://example.test/?user=@123 www.example.test/@123 name@123 @123.example @123-tail @123'
+    text, _ = asyncio.run(render_mentions(adapter, {'content': raw, 'mentions': [
+        {'text': '@123', 'phone_number': '+15555550100', 'is_agent': True}]}))
+    assert text == '@sample-agent https://example.test/?user=@123 www.example.test/@123 name@123 @123.example @123-tail @sample-agent'
+
+
+def test_conflicting_mention_tokens_do_not_guess_a_person():
+    adapter = NS(_identity_handle='sample-agent', _resolve_contact_full=AsyncMock(return_value={'name': 'Taylor'}))
+    text, _ = asyncio.run(render_mentions(adapter, {'content': '@123', 'mentions': [
+        {'text': '@123', 'phone_number': '+15555550100', 'is_agent': True},
+        {'text': '@123', 'phone_number': '+15555550102', 'is_agent': False}]}))
+    assert text == '@[unresolved mention]'
+
+
+def test_mention_names_are_bounded_cleaned_and_resolved_once():
+    adapter = NS(_identity_handle='sample-agent', _resolve_contact_full=AsyncMock(return_value={'name': '  Taylor\n\x00' + 'x' * 200}))
+    text, mentions = asyncio.run(render_mentions(adapter, {'content': '@123 @234', 'mentions': [
+        {'text': token, 'phone_number': '+15555550102', 'is_agent': False} for token in ('@123', '@234')]}))
+    expected = ('Taylor ' + 'x' * 200)[:160]
+    assert text == f'@{expected} @{expected}'
+    assert all(mention['display_name'] == expected for mention in mentions)
+    adapter._resolve_contact_full.assert_awaited_once_with(kind='phone', value='+15555550102')
