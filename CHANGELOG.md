@@ -5,6 +5,7 @@
 - Add durable, bounded webhook acceptance and retain uncertain outcomes without automatic replay.
 - Track asynchronous replies through completion and expose supervised activity and admission fences so configuration changes wait for active work.
 - Preserve standalone gateway behavior.
+- Support durable inbox ownership on Windows as well as Unix.
 
 ## 0.2.22
 

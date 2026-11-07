@@ -9,6 +9,19 @@ import pytest
 from inkbox_plugin.managed_inbox import InboxError, InboxFull, ManagedInbox
 
 
+def test_import_does_not_require_posix_locking():
+    code = '''import builtins
+original = builtins.__import__
+def portable_import(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ModuleNotFoundError("POSIX locking unavailable")
+    return original(name, *args, **kwargs)
+builtins.__import__ = portable_import
+import managed_inbox
+'''
+    subprocess.run([sys.executable, '-c', code], check=True)
+
+
 def event(activation, number=1):
     event_id = 'evt_' + f'{number:064x}'
     return {'id': event_id, 'event_type': 'message.received', 'data': {'body': 'Hello'},
@@ -66,7 +79,8 @@ def test_duplicate_identity_keeps_first_payload_despite_refreshed_projection(tmp
             inbox.accept(event(activation) | {'event_type': 'text.received'})
         with pytest.raises(InboxError):
             inbox.accept(event(str(uuid4())))
-        assert os.stat(path).st_mode & 0o077 == 0
+        if os.name != 'nt':
+            assert os.stat(path).st_mode & 0o077 == 0
         with pytest.raises(BlockingIOError):
             ManagedInbox(path, activation)
     finally:

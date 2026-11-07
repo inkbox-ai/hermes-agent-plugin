@@ -1,7 +1,6 @@
 """Bounded durable acceptance for supervised webhook delivery."""
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +15,7 @@ from uuid import UUID, uuid4
 MAX_BYTES = 32 * 1024 * 1024
 MAX_EVENTS = 4096
 RECEIPT_RETENTION = 7 * 86400
+_WINDOWS = os.name == 'nt'
 
 
 class InboxError(ValueError):
@@ -31,16 +31,31 @@ class ManagedInbox:
         self.activation_id = str(UUID(activation_id))
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = path.parent.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not stat.S_ISDIR(info.st_mode) or (not _WINDOWS and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
             raise InboxError("Private inbox directory required")
-        self.lock = os.open(str(path) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        lock_path = Path(str(path) + '.lock')
+        if path.is_symlink() or lock_path.is_symlink():
+            raise InboxError("Regular inbox files required")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+        self.lock = os.open(lock_path, flags, 0o600)
         self.db = None
         try:
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            if _WINDOWS:
+                import msvcrt
+                if os.fstat(self.lock).st_size == 0:
+                    os.write(self.lock, b'0')
+                os.lseek(self.lock, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(self.lock, msvcrt.LK_NBLCK, 1)
+                except OSError as error:
+                    raise BlockingIOError("Another receiver owns this inbox") from error
+            else:
+                import fcntl
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            descriptor = os.open(path, flags, 0o600)
             try:
                 info = os.fstat(descriptor)
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                if not stat.S_ISREG(info.st_mode) or (not _WINDOWS and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
                     raise InboxError("Private inbox file required")
             finally:
                 os.close(descriptor)
