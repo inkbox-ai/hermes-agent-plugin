@@ -2351,8 +2351,10 @@ def test_rejected_alias_requires_owned_direct_conversation_evidence(factory, tmp
         client.whatsapp._http.get.return_value = conversation_wire(uid(99))
         assert json.loads(invoke("send_whatsapp", original, session))["ok"]
         assert client.whatsapp._http.post.call_args == client.whatsapp._http.post.call_args_list[0]
-        client.whatsapp._http.get.assert_called_with(
-            f"/conversations/{uid(99)}", params={"agent_identity_id": uid(100)})
+        reads = client.whatsapp._http.get.call_args_list
+        assert len(reads) == 3  # Initial preflight, rejected alias proof, exact-request recovery.
+        assert all(call.args == (f"/conversations/{uid(99)}",) and
+                   call.kwargs == {"params": {"agent_identity_id": uid(100)}} for call in reads)
     finally:
         clear_context(session, uid(1))
         client.close()

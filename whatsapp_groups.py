@@ -13,9 +13,13 @@ def is_group(value):
     return field(value, 'is_group') is True or field(value, 'conversation_kind') == 'group'
 
 
+class UnsupportedGroupSDK(PermissionError):
+    """The installed response models cannot retain group ownership metadata."""
+
+
 def require_metadata(value):
     if not isinstance(value, dict) and not hasattr(value, 'is_group'):
-        raise RuntimeError('WhatsApp groups require Inkbox SDK 0.7.29 or newer')
+        raise UnsupportedGroupSDK('WhatsApp requires Inkbox SDK 0.7.29 or newer for groups')
 
 
 def valid_group(value):
@@ -109,3 +113,14 @@ async def render_mentions(adapter, item):
     else:
         rendered = raw
     return rendered, mentions
+
+
+def preflight_error(exc):
+    """Separate failed authorization reads from uncertain outbound effects."""
+    from httpx import TransportError
+    from .imessage_state import ReplyPreflightError
+    status = getattr(exc, 'status_code', None)
+    retryable = (isinstance(exc, (TimeoutError, ConnectionError, TransportError))
+                 or status in {408, 409, 429} or isinstance(status, int) and status >= 500)
+    return ReplyPreflightError('WhatsApp authorization unavailable; no send attempted',
+                               retryable=retryable, status_code=status)

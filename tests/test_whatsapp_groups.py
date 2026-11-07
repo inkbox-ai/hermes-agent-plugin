@@ -205,3 +205,167 @@ def test_burst_preserves_each_source_mention_context(factory, tmp_path):
             await value.queue.close()
             client.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('answer,expected', [('yes', '/approve'), ('/stop', '/stop')])
+def test_native_mention_controls_reach_current_host_turn(factory, tmp_path, monkeypatch, answer, expected):
+    from tests.test_native_turns import started
+    from inkbox_plugin.conversation import approval_reply
+    async def run():
+        gate = asyncio.Event()
+        value = await harness(factory, tmp_path, gate=gate)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound',
+                sender_number='+15555550101', content='Please act'))
+            await started(value)
+            value.adapter._pending_conversation_control = lambda source: answer == 'yes'
+            value.adapter._conversation_prompt_reply = lambda source, text: approval_reply(text)
+            forwarded = []
+            async def enqueue(event):
+                forwarded.append(event)
+                return asyncio.create_task(asyncio.sleep(0))
+            value.adapter._enqueue = enqueue
+            monkeypatch.setattr('inkbox_plugin.host_fencing.fence_turn', AsyncMock(return_value=True))
+            cancel = AsyncMock()
+            monkeypatch.setattr('inkbox_plugin.host_fencing.cancel_pending_permissions', cancel)
+            response = await receive(value.adapter, inbound(**{**group(), 'id': uid(2)}, direction='inbound',
+                sender_number='+15555550101', content='@123 ' + answer, agent_mentioned=True,
+                mentions=[{'text': '@123', 'phone_number': '+15555550100', 'is_agent': True}]))
+            assert response.status == 202
+            assert forwarded and forwarded[0].text == expected
+            assert forwarded[0].message_id == value.inputs[0].message_id
+            if answer == 'yes':
+                cancel.assert_not_awaited()
+        finally:
+            gate.set()
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_transient_group_roster_read_retries_saved_answer_without_model_replay(factory, tmp_path):
+    from tests.test_native_turns import settle
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(side_effect=[NS(**group()), TimeoutError('temporary'), NS(**group())])
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='Help please'))
+            await settle(value.queue)
+            assert len(value.inputs) == 1
+            assert '[SILENT]' in value.inputs[0].text
+            client.whatsapp._http.post.assert_called_once()
+            turn = next(iter(value.queue.rows.values()))['turns'][0]
+            assert turn['state'] == 'done' and not turn.get('reply_suppressed')
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_group_media_preflight_failure_is_unsent_and_reuses_upload(factory, tmp_path):
+    from tests.test_native_turns import settle
+    from inkbox_plugin.whatsapp import send_media
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='Help please'))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            turn = row['turns'][0]
+            path = tmp_path / 'picture.png'
+            path.write_bytes(b'png')
+            value.adapter.validate_media_delivery_path = lambda path: path
+            client.whatsapp._http.post.reset_mock()
+            value.adapter._reply_identity.get_whatsapp_conversation.side_effect = TimeoutError('temporary')
+            result = await send_media(value.adapter, row['chat_id'], path, 'A picture', {'inkbox_reply_route': turn['route']})
+            assert not result.success and result.raw_response['inkbox_preflight_failure']
+            client.whatsapp._http.post.assert_not_called()
+            assert turn['state'] == 'done'
+            assert next(iter(turn['media_deliveries'].values()))['state'] == 'uploaded'
+            value.adapter._reply_identity.get_whatsapp_conversation.side_effect = None
+            result = await send_media(value.adapter, row['chat_id'], path, 'A picture', {'inkbox_reply_route': turn['route']})
+            assert result.success
+            client.whatsapp._http.post_multipart.assert_called_once()
+            client.whatsapp._http.post.assert_called_once()
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_group_reaction_local_denial_acknowledges_without_host_turn(factory, tmp_path):
+    from inkbox_plugin.whatsapp import receive_reaction
+    from tests.test_whatsapp import peer_reaction, WIRE
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        event = peer_reaction()
+        reaction = event['data']['reaction']
+        client.whatsapp._http.get.side_effect = lambda path, **kw: (
+            {'reaction': reaction} if '/reactions/' in path else
+            {**WIRE, **group(), 'id': reaction['target_message_id'], 'conversation_id': uid(30)} if '/messages/' in path else group())
+        # Use typed-shaped sources also on the published direct-only SDK floor.
+        value.adapter._reply_identity.get_whatsapp_message = Mock(return_value=NS(**{**WIRE, **group(), 'id': reaction['target_message_id'], 'conversation_id': uid(30)}))
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        try:
+            assert (await receive_reaction(value.adapter, event)).status == 200
+            assert not value.inputs
+            client.whatsapp._http.post.assert_not_called()
+            assert (await receive_reaction(value.adapter, event)).status == 200
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_old_sdk_group_metadata_is_acknowledged_without_direct_fallback(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        legacy = group()
+        legacy.pop('is_group')
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**legacy))
+        try:
+            response = await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101'))
+            assert response.status == 200 and 'SDK upgrade' in response.text
+            assert not value.inputs
+            client.whatsapp._http.post.assert_not_called()
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_definitive_group_reply_rejection_does_not_block_next_turn(factory, tmp_path):
+    from inkbox import InkboxAPIError
+    from tests.test_native_turns import settle
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            client.whatsapp._http.post.side_effect = InkboxAPIError(409, {'error': 'whatsapp_group_reply_required'})
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='First'))
+            await settle(value.queue)
+            row = next(iter(value.queue.rows.values()))
+            assert row['turns'][0]['state'] == 'done'
+            assert row['turns'][0]['reply_delivery_state'] == 'rejected'
+            assert not row.get('blocked')
+            client.whatsapp._http.post.side_effect = None
+            await receive(value.adapter, inbound(**{**group(), 'id': uid(2)}, direction='inbound', sender_number='+15555550101', content='Now reply'))
+            await settle(value.queue)
+            assert len(value.inputs) == 2 and client.whatsapp._http.post.call_count == 2
+            assert row['turns'][1]['state'] == 'done'
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())

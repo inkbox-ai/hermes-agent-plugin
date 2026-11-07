@@ -184,7 +184,7 @@ class NativeTurns(CompanionReceiver):
         control_owner = (self.active.get(row["chat_id"]) or {}).get("id", source_id)
         if source_id in self.unconfirmed_controls and self.unconfirmed_controls[source_id] != (control_fingerprint, control_owner):
             raise RuntimeError("Unconfirmed control receipt changed; no native control attempted")
-        text = route.get("raw_text", event.text).strip()
+        text = self._control_text_for_route(route, event)
         command = conversation_control(text) or text.split(maxsplit=1)[:1] in [["/approve"], ["/deny"]]
         if await self.control(event, row):
             row.setdefault("controls", {})[source_id] = "consumed"
@@ -751,8 +751,9 @@ class NativeTurns(CompanionReceiver):
                 from .whatsapp_groups import check_destination
                 check_destination(self.adapter, identity, payload["conversation_id"])
                 self.check_media_authority(row, turn, admitted_send=True)
-        except Exception:
-            raise ReplyPreflightError("Original WhatsApp ownership changed; no send attempted") from None
+        except Exception as exc:
+            from .whatsapp_groups import preflight_error
+            raise preflight_error(exc) from exc
         return method(identity, "send_whatsapp")(**payload)
 
     def checked_imessage_send(self, row, turn, identity, payload):
@@ -942,10 +943,28 @@ class NativeTurns(CompanionReceiver):
                 turn["state"] = previous_state
             return self.preflight_failed(row, turn, exc)
         except Exception as exc:
+            if route["mode"] == "whatsapp":
+                from .whatsapp import public_quota_error
+                rejected = public_quota_error(exc)
+                if rejected:
+                    turn["state"] = "done"
+                    turn["reply_delivery_state"] = "rejected"
+                    turn["reply_suppressed"] = "policy_rejected"
+                    turn["reply_error"] = rejected
+                    self._save(row)
+                    return SendResult(success=False, error="WhatsApp reply rejected by current policy",
+                                      raw_response={"inkbox_no_retry": True, **rejected})
             turn["state"] = "uncertain"
             turn["reply_delivery_state"] = "uncertain"
             self._save(row)
             return SendResult(success=False, error=f"Native reply outcome is uncertain ({type(exc).__name__}); no plain resend", raw_response={"inkbox_no_retry": True})
+
+    def _control_text_for_route(self, route, event):
+        text = route.get("raw_text", event.text).strip()
+        if route.get("mode") == "whatsapp":
+            from .whatsapp_groups import control_text
+            return control_text({"content": text, "mentions": route.get("mentions", [])}, self.adapter._identity_handle)
+        return text
 
     @staticmethod
     def _same_control_scope(incoming, target):
@@ -968,7 +987,7 @@ class NativeTurns(CompanionReceiver):
             incoming.get(key) != route.get(key) for key in ("connection_id", "conversation_id", "thread_ts")
         )):
             return False
-        text = incoming.get("raw_text", event.text).strip()
+        text = self._control_text_for_route(incoming, event)
         prompted = self.adapter._pending_conversation_control(event.source)
         answer = self.adapter._conversation_prompt_reply(event.source, text) if prompted else None
         if not conversation_control(text) and answer is None:

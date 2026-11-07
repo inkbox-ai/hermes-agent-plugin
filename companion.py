@@ -1016,6 +1016,9 @@ class CompanionReceiver:
             return SendResult(success=True, message_id=explicit["message_id"])
         fingerprint = digest(content)
         prior = turn.get("delivery", {})
+        if prior.get("state") == "rejected":
+            return SendResult(success=True, raw_response={"inkbox_no_retry": True, "inkbox_suppressed": True,
+                                                           **prior.get("error", {})})
         if prior.get("fingerprint") == fingerprint:
             if prior.get("state") == "sent":
                 return SendResult(success=True, message_id=prior.get("message_id"))
@@ -1031,8 +1034,11 @@ class CompanionReceiver:
                 await self._authorize_slack(row, turn)
                 result = await self.dispatch_reply(row, turn, send_reply, self.adapter._inkbox, self._slack_route(turn), content)
             elif context["channel"] == "whatsapp":
+                key = "hermes:companion:" + digest(json.dumps([turn["id"], context["conversation_id"], content]))
+                turn["delivery"]["idempotency_key"] = key
+                self._save(row)
                 result = await self.dispatch_reply(row, turn, identity.send_whatsapp,
-                    conversation_id=context["conversation_id"], text=content)
+                    conversation_id=context["conversation_id"], text=content, idempotency_key=key)
             elif context["channel"] == "mail":
                 result = await self.dispatch_reply(row, turn, identity.reply_all_email, context["reply_to_message_id"], body_text=content)
             else:
@@ -1047,6 +1053,14 @@ class CompanionReceiver:
             self._save(row)
             return SendResult(success=True, message_id=str(result.id))
         except Exception as exc:
+            if row["meta"]["channel"] == "whatsapp" and turn["delivery"]["state"] == "sending":
+                from .whatsapp import public_quota_error
+                rejected = public_quota_error(exc)
+                if rejected:
+                    turn["delivery"].update(state="rejected", error=rejected)
+                    self._save(row)
+                    return SendResult(success=True, raw_response={"inkbox_no_retry": True,
+                                                                  "inkbox_suppressed": True, **rejected})
             if turn["delivery"]["state"] == "sending":
                 turn["delivery"]["state"] = "uncertain"
             self._save(row)
@@ -1143,13 +1157,12 @@ class CompanionReceiver:
             try:
                 await asyncio.to_thread(self.authorize_whatsapp, row, turn)
             except Exception as exc:
-                status = getattr(exc, "status_code", None)
-                retryable = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 409, 429} or isinstance(status, int) and status >= 500
-                turn["preflight_failure"] = {"error": "Companion WhatsApp authorization failed before sending",
-                                             "retryable": retryable, "status_code": status}
+                from .whatsapp_groups import preflight_error
+                failure = preflight_error(exc)
+                turn["preflight_failure"] = {"error": str(failure), "retryable": failure.retryable,
+                                             "status_code": failure.status_code}
                 self._save(row)
-                raise ReplyPreflightError("Companion WhatsApp authorization failed before sending",
-                                          retryable=retryable, status_code=status) from exc
+                raise failure from exc
         if turn.get("delivery"):
             turn["delivery"]["state"] = "sending"
             self._save(row)
@@ -1158,10 +1171,8 @@ class CompanionReceiver:
                 try:
                     self.authorize_whatsapp(row, turn)
                 except Exception as exc:
-                    status = getattr(exc, "status_code", None)
-                    retryable = isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 409, 429} or isinstance(status, int) and status >= 500
-                    raise ReplyPreflightError("Original Companion WhatsApp authority changed; no send attempted",
-                                              retryable=retryable, status_code=status) from exc
+                    from .whatsapp_groups import preflight_error
+                    raise preflight_error(exc) from exc
             if threaded:
                 try:
                     self._check_native_reply_authority(row, turn)

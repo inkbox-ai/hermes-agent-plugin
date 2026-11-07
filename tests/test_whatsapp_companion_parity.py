@@ -130,7 +130,8 @@ def test_plain_reply_and_uncertain_explicit_attempt_no_replacement(factory):
         turn = row["turns"][0]
         result = await instance.receiver.send("companion:" + row["key"], "A plain answer", turn["id"])
         assert result.success
-        instance.identity.send_whatsapp.assert_called_once_with(conversation_id=uid(30), text="A plain answer")
+        instance.identity.send_whatsapp.assert_called_once_with(conversation_id=uid(30), text="A plain answer",
+            idempotency_key=turn["delivery"]["idempotency_key"])
         turn["whatsapp_send_attempts"] = {"retained": {"key": "retained", "state": "uncertain"}}
         result = await instance.receiver.send("companion:" + row["key"], "Another answer", turn["id"])
         assert not result.success
@@ -139,7 +140,8 @@ def test_plain_reply_and_uncertain_explicit_attempt_no_replacement(factory):
     asyncio.run(run())
 
 
-def test_transient_send_preflight_preserves_answer_without_post(factory):
+@pytest.mark.parametrize("failure_kind", ["503", "transport"])
+def test_transient_send_preflight_preserves_answer_without_post(factory, failure_kind):
     async def run():
         instance = factory("imessage")
         item = setup(instance)
@@ -147,18 +149,25 @@ def test_transient_send_preflight_preserves_answer_without_post(factory):
         await idle(instance)
         row = next(iter(instance.receiver.rows.values()))
         turn = row["turns"][0]
-        error = RuntimeError("temporarily unavailable")
-        error.status_code = 503
+        if failure_kind == "transport":
+            from httpx import ReadTimeout
+            error = ReadTimeout("temporarily unavailable")
+        else:
+            error = RuntimeError("temporarily unavailable")
+            error.status_code = 503
         instance.resource.activation_messages.side_effect = error
         result = await instance.receiver.send("companion:" + row["key"], "Retained answer", turn["id"])
         assert not result.success
         assert turn["delivery"]["state"] == "pending"
         assert turn["preflight_failure"]["retryable"] is True
         instance.identity.send_whatsapp.assert_not_called()
+        saved_key = turn["delivery"]["idempotency_key"]
         instance.resource.activation_messages.side_effect = lambda *a, **kw: snapshot(item)
         result = await instance.receiver.send("companion:" + row["key"], "Retained answer", turn["id"])
         assert result.success
         instance.identity.send_whatsapp.assert_called_once()
+        assert instance.identity.send_whatsapp.call_args.kwargs["idempotency_key"] == saved_key
+        assert len(instance.inputs) == 1
         await instance.receiver.close()
     asyncio.run(run())
 
@@ -245,4 +254,72 @@ def test_new_activation_progresses_without_replaying_old_ambiguous_grant(factory
         assert old["state"] != "revoked"
         assert old["trigger_envelope"] == first
         await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status,code", [(429, "whatsapp_daily_limit_exceeded"), (409, "whatsapp_group_reply_required")])
+def test_definitive_send_rejection_settles_only_original_answer(factory, status, code):
+    async def run():
+        instance = factory("imessage")
+        item = setup(instance)
+        await instance.receiver.accept(item)
+        await idle(instance)
+        row = next(iter(instance.receiver.rows.values()))
+        turn = row["turns"][0]
+        error = RuntimeError("rejected")
+        error.status_code, error.detail = status, {"error": code}
+        instance.identity.send_whatsapp.side_effect = error
+        first = await instance.receiver.send("companion:" + row["key"], "Rejected answer", turn["id"])
+        assert first.success and first.raw_response["inkbox_suppressed"] is True
+        assert first.message_id is None
+        assert turn["delivery"]["state"] == "rejected"
+        repeated = await instance.receiver.send("companion:" + row["key"], "Rejected answer", turn["id"])
+        assert repeated.success and repeated.raw_response["error"] == code
+        assert instance.identity.send_whatsapp.call_count == 1
+        assert row["state"] == "initialized"
+        await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_companion_media_checks_off_loop_and_reuses_upload_after_late_read_failure(factory, tmp_path):
+    async def run():
+        import threading
+        from inkbox_plugin.whatsapp import send_media
+        instance = factory("imessage")
+        item = setup(instance)
+        await instance.receiver.accept(item)
+        await idle(instance)
+        receiver = instance.receiver
+        row = next(iter(receiver.rows.values()))
+        turn = row["turns"][0]
+        receiver._bind_whatsapp_context(row, turn)
+        chat = "companion:" + row["key"]
+        receiver.active[chat] = turn
+        picture = tmp_path / "picture.png"
+        picture.write_bytes(b"png")
+        instance.adapter.validate_media_delivery_path = lambda path: path
+        instance.identity.upload_whatsapp_media = Mock(return_value=SimpleNamespace(id=uid(700)))
+        loop_thread = threading.get_ident()
+        threads = []
+        def proof(*args, **kwargs):
+            threads.append(threading.get_ident())
+            if len(threads) == 5:
+                raise TimeoutError("late membership read")
+            return snapshot(item)
+        instance.resource.activation_messages.side_effect = proof
+        first = await send_media(instance.adapter, chat, picture, "Picture")
+        assert not first.success and first.raw_response["inkbox_preflight_failure"]
+        assert threads and loop_thread not in threads
+        instance.identity.send_whatsapp.assert_not_called()
+        delivery = next(iter(turn["media_deliveries"].values()))
+        assert delivery["state"] == "uploaded"
+        assert turn["state"] == "completed"
+        key = delivery["idempotency_key"]
+        second = await send_media(instance.adapter, chat, picture, "Picture")
+        assert second.success
+        assert loop_thread not in threads
+        instance.identity.upload_whatsapp_media.assert_called_once()
+        instance.identity.send_whatsapp.assert_called_once()
+        assert instance.identity.send_whatsapp.call_args.kwargs["idempotency_key"] == key
+        await receiver.close()
     asyncio.run(run())
