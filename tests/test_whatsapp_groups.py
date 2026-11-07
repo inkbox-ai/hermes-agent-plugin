@@ -689,7 +689,7 @@ def test_rejected_dm_to_group_author_does_not_suppress_group_reply(factory, tmp_
     asyncio.run(run())
 
 
-def test_transient_quoted_parent_read_retries_same_native_receipt(factory, tmp_path):
+def test_transient_parent_read_keeps_current_receipt_and_next_quote_can_recover(factory, tmp_path):
     async def run():
         value = await harness(factory, tmp_path)
         client = real_identity(value.adapter)
@@ -703,11 +703,17 @@ def test_transient_quoted_parent_read_retries_same_native_receipt(factory, tmp_p
         try:
             source = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101',
                              content='That is odd', reply_to_message_id=uid(800))
-            with pytest.raises(TimeoutError):
-                await receive(value.adapter, source)
-            accepted.assert_not_called()
             assert (await receive(value.adapter, source)).status == 202
             accepted.assert_awaited_once()
+            first = accepted.call_args.args[0]
+            assert '"status": "temporarily_unavailable"' in first.text
+            assert 'That is odd' in first.text and uid(800) in first.text
+            assert (await receive(value.adapter, source)).status == 200
+            accepted.assert_awaited_once()
+            source['data']['message']['id'] = uid(2)
+            source['id'] = 'next-quote'
+            assert (await receive(value.adapter, source)).status == 202
+            assert accepted.await_count == 2
             assert 'Recovered parent' in accepted.call_args.args[0].text
             assert value.adapter._reply_identity.get_whatsapp_message.call_count == 2
         finally:
@@ -717,10 +723,11 @@ def test_transient_quoted_parent_read_retries_same_native_receipt(factory, tmp_p
 
 
 @pytest.mark.parametrize('status', [429, 500, 503])
-def test_transient_parent_http_status_is_not_cached_as_missing(status):
+def test_transient_parent_http_status_is_distinct_from_definitive_unavailability(status):
     from inkbox import InkboxAPIError
     from inkbox_plugin.whatsapp_groups import render_reply_context
     adapter = NS(_identity_id=uid(100), _identity_handle='sample-agent',
         _reply_identity=NS(get_whatsapp_message=Mock(side_effect=InkboxAPIError(status, {'error': 'temporarily_unavailable'}))))
-    with pytest.raises(InkboxAPIError):
-        asyncio.run(render_reply_context(adapter, {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800)}))
+    text = asyncio.run(render_reply_context(adapter, {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800)}))
+    assert '"status": "temporarily_unavailable"' in text
+    assert uid(800) in text

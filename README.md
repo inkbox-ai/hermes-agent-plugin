@@ -694,7 +694,7 @@ The existing `group_reply_mode=auto` default lets the agent decide contextually 
 
 WhatsApp groups use the existing Companion configuration and Safe/Relaxed modes. Safe mode keeps sponsored messages as context; Relaxed mode may answer them, subject to current scope, sponsor and participant authorization. Sponsorship never grants direct-message or cross-group access. The published Inkbox SDK 0.7.29 includes the required group metadata and WhatsApp Companion models.
 
-Incoming inline replies in direct and group chats show the quoted parent’s author, text excerpt, and attachment metadata upfront. If the parent is unavailable, the agent sees that explicitly rather than guessing its contents. Only the current message’s mentions control mention-mode wake-up; quoted mentions and commands remain context, not new instructions.
+Incoming inline replies in direct and group chats show the quoted parent’s author, text excerpt, and attachment metadata upfront. Parent lookup is best effort: the current message still arrives if the parent cannot be read. Temporary lookup failures and unavailable parents are identified explicitly, retaining the parent ID for an authorized history lookup rather than guessing its contents. Only the current message’s mentions control mention-mode wake-up; quoted mentions and commands remain context, not new instructions.
 
 For an explicit quote, provide `reply_to_message_id` together with the original conversation. Thread reads preserve their opaque cursor and never invent inaccessible parent content. Native quote chains do not split the host's ordinary conversation session.
 

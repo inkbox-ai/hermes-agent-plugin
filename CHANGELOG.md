@@ -2,7 +2,7 @@
 
 ## 0.2.23
 
-- Show authorized inline-reply parent authors, text excerpts and attachment metadata upfront, including retained context-only messages; unavailable parents stay explicit.
+- Show authorized inline-reply parent authors, text excerpts and attachment metadata upfront, including retained context-only messages; temporary lookup failures and unavailable parents stay explicit without blocking the current message.
 - Require published Inkbox SDK `>=0.7.29,<1.0.0` for the complete WhatsApp group and Companion interfaces.
 
 - Support existing inbound-admitted WhatsApp groups with isolated sessions, media, reactions and explicit quoted replies; group names remain labels, with no group creation.

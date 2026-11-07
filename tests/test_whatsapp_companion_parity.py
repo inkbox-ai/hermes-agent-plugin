@@ -548,7 +548,7 @@ def test_rejected_independent_dm_never_borrows_companion_scope_or_blocks_group(f
 
 
 @pytest.mark.parametrize('http_error', [False, True])
-def test_transient_parent_read_uses_existing_companion_retry_without_guessing(factory, http_error):
+def test_transient_parent_read_admits_current_turn_and_later_quote_can_recover(factory, http_error):
     async def run():
         instance = factory('imessage')
         item = setup(instance)
@@ -565,8 +565,17 @@ def test_transient_parent_read_uses_existing_companion_retry_without_guessing(fa
             await instance.receiver.accept(item)
             await idle(instance)
             assert len(instance.inputs) == 1
-            assert 'Recovered parent' in instance.inputs[0].text
-            assert '"status": "unavailable"' not in instance.inputs[0].text
+            assert '"status": "temporarily_unavailable"' in instance.inputs[0].text
+            assert 'Recovered parent' not in instance.inputs[0].text
+            assert uid(800) in instance.inputs[0].text
+            assert instance.identity.get_whatsapp_message.call_count == 1
+            followup = whatsapp_event('live')
+            followup['companion']['sequence'] = 4
+            followup['data']['message'].update(id=uid(4), reply_to_message_id=uid(800), content='Another reply')
+            await instance.receiver.accept(followup)
+            await idle(instance)
+            assert len(instance.inputs) == 2
+            assert 'Recovered parent' in instance.inputs[1].text
             assert instance.identity.get_whatsapp_message.call_count == 2
         finally:
             await instance.receiver.close()
