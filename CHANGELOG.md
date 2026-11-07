@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.23
+
+- Add durable, bounded webhook acceptance and retain uncertain outcomes without automatic replay.
+- Track asynchronous replies through completion and expose supervised activity and admission fences so configuration changes wait for active work.
+- Preserve standalone gateway behavior.
+
 ## 0.2.22
 
 - Restore delivery-failure follow-ups through Hermes v0.22.5 while retaining their original destinations and retry limits.

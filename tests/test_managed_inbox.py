@@ -1,0 +1,122 @@
+import json
+import os
+import subprocess
+import sys
+from uuid import uuid4
+
+import pytest
+
+from inkbox_plugin.managed_inbox import InboxError, InboxFull, ManagedInbox
+
+
+def event(activation, number=1):
+    event_id = 'evt_' + f'{number:064x}'
+    return {'id': event_id, 'event_type': 'message.received', 'data': {'body': 'Hello'},
+            'hosted_delivery': {'version': 1, 'activation_id': activation, 'event_id': event_id, 'starts_agent': True}}
+
+
+def test_accept_survives_process_death_and_unstarted_work_can_run(tmp_path):
+    path, activation = tmp_path / 'inbox' / 'events.sqlite3', str(uuid4())
+    code = '''from pathlib import Path
+import json,os,sys
+from managed_inbox import ManagedInbox
+inbox=ManagedInbox(Path(sys.argv[1]),sys.argv[2])
+inbox.accept(json.loads(sys.argv[3]))
+os._exit(0)
+'''
+    subprocess.run([sys.executable, '-c', code, str(path), activation, json.dumps(event(activation))], check=True)
+    inbox = ManagedInbox(path, activation)
+    try:
+        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 0}
+        assert inbox.claim() == (event(activation)['id'], event(activation))
+        assert inbox.claim() is None
+        assert inbox.finish(event(activation)['id'], completed=True)
+        receipt = inbox.accept(event(activation))
+        assert receipt['state'] == 'completed' and inbox.claim() is None
+    finally:
+        inbox.close()
+
+
+def test_started_work_is_quarantined_after_restart_and_not_replayed(tmp_path):
+    activation, path = str(uuid4()), tmp_path / 'inbox' / 'events.sqlite3'
+    inbox = ManagedInbox(path, activation)
+    receipt = inbox.accept(event(activation))
+    inbox.claim()
+    inbox.close()
+    inbox = ManagedInbox(path, activation)
+    try:
+        assert inbox.claim() is None
+        assert inbox.accept(event(activation)) == receipt | {'state': 'unknown'}
+        assert not inbox.finish(event(activation)['id'], completed=True)
+        inbox.accept(event(activation, 2))
+        assert inbox.claim()[0] == event(activation, 2)['id']
+    finally:
+        inbox.close()
+
+
+def test_duplicate_identity_keeps_first_payload_despite_refreshed_projection(tmp_path):
+    activation, path = str(uuid4()), tmp_path / 'inbox' / 'events.sqlite3'
+    inbox = ManagedInbox(path, activation)
+    try:
+        original = inbox.accept(event(activation))
+        assert inbox.accept(event(activation) | {'timestamp': 'changed'}) == original
+        assert inbox.accept(event(activation) | {'data': {'body': 'updated', 'url': 'refreshed'}}) == original
+        assert inbox.claim()[1] == event(activation)
+        with pytest.raises(InboxError):
+            inbox.accept(event(activation) | {'event_type': 'text.received'})
+        with pytest.raises(InboxError):
+            inbox.accept(event(str(uuid4())))
+        assert os.stat(path).st_mode & 0o077 == 0
+        with pytest.raises(BlockingIOError):
+            ManagedInbox(path, activation)
+    finally:
+        inbox.close()
+
+
+def test_full_inbox_refuses_without_evicting_pending_or_unknown(tmp_path, monkeypatch):
+    import inkbox_plugin.managed_inbox as module
+    activation = str(uuid4())
+    monkeypatch.setattr(module, 'MAX_EVENTS', 1)
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        first = inbox.accept(event(activation))
+        with pytest.raises(InboxFull):
+            inbox.accept(event(activation, 2))
+        assert inbox.accept(event(activation)) == first
+        assert inbox.summary()['pending'] == 1
+    finally:
+        inbox.close()
+
+
+def test_old_completed_receipts_expire_without_dropping_unknown_or_pending(tmp_path):
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        inbox.accept(event(activation))
+        inbox.claim()
+        inbox.finish(event(activation)['id'], completed=True)
+        inbox.accept(event(activation, 2))
+        inbox.claim()
+        inbox.finish(event(activation, 2)['id'], completed=False)
+        inbox.db.execute('UPDATE deliveries SET finished=0')
+        inbox.accept(event(activation, 3))
+        assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 1}
+        assert inbox.db.execute('SELECT count(*) FROM deliveries').fetchone()[0] == 2
+    finally:
+        inbox.close()
+
+
+def test_protocol_receipts_have_separate_admission_from_agent_turns(tmp_path):
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        ordinary = event(activation)
+        control = event(activation, 2)
+        control['hosted_delivery']['starts_agent'] = False
+        inbox.accept(ordinary)
+        inbox.accept(control)
+        assert inbox.claim(protocol_only=True)[0] == control['id']
+        assert inbox.claim(protocol_only=True) is None
+        assert inbox.claim()[0] == ordinary['id']
+    finally:
+        inbox.close()
