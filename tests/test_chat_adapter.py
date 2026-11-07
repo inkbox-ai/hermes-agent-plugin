@@ -9,9 +9,11 @@ from inkbox_plugin.chat_adapter import ChatAdapter
 class NativeChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_questions_and_approvals_use_the_suspended_native_request(self):
         received = []
+        run_id = str(uuid4())
 
         async def start(request):
             self.assertEqual(request.headers["Authorization"], "Bearer synthetic-local-key")
+            self.assertEqual(request.headers["Idempotency-Key"], run_id)
             body = await request.json()
             self.assertTrue(body["session_id"].startswith("session_"))
             return web.json_response({"run_id": "native-run"})
@@ -69,7 +71,7 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             result = await adapter.run(
-                {"session_id": str(uuid4()), "run_id": str(uuid4()), "prompt": "Example"},
+                {"session_id": str(uuid4()), "run_id": run_id, "prompt": "Example"},
                 lambda k, v: public.append((k, v)),
                 ask,
             )
