@@ -200,6 +200,12 @@ class CompanionReceiver:
                 turn.setdefault("execution_owner_id", os.getenv("INKBOX_MANAGED_OWNER_ID"))
         self._save_checkpoint(self.root / f"{row['key']}.json", row)
 
+    @staticmethod
+    def _execution_started(turn: dict) -> None:
+        from .managed_inbox import boot_id
+        turn["execution_boot_id"] = boot_id()
+        turn["execution_owner_id"] = os.getenv("INKBOX_MANAGED_OWNER_ID")
+
     def _save_checkpoint(self, path: Path, value: dict) -> None:
         with self._checkpoint_lock:
             self._require_owner()
@@ -433,6 +439,7 @@ class CompanionReceiver:
                                           "_inkbox_companion_control": True})
         event.allow_gateway_control = True
         turn["state"] = "control_submitting"
+        self._execution_started(turn)
         self._save(row)
         task = await self.adapter._enqueue(event)
         await task
@@ -540,6 +547,7 @@ class CompanionReceiver:
                 self._require_owner()
                 self._check_controls(event)
                 turn["state"] = "submitting"
+                self._execution_started(turn)
                 self._save(row)
                 future = asyncio.get_running_loop().create_future()
                 self.completions[turn["id"]] = future
@@ -1047,6 +1055,7 @@ class CompanionReceiver:
         if prior or self._uncertain_media(turn):
             return SendResult(success=False, error="Original Slack media outcome is retained; no resend", raw_response={"inkbox_no_retry": True})
         delivery = turn["media_deliveries"][fingerprint] = {"state": "sending"}
+        self._execution_started(turn)
         self._save(row)
 
         def checked_upload():
@@ -1100,7 +1109,8 @@ class CompanionReceiver:
             self._check_local_reply_authority(row, turn)
         if turn.get("delivery"):
             turn["delivery"]["state"] = "sending"
-            self._save(row)
+        self._execution_started(turn)
+        self._save(row)
         def send_checked():
             if threaded:
                 try:

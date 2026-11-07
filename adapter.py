@@ -4695,6 +4695,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _catch_up_hosted_call_completions(self) -> None:
         """Replay unfinished hosted-call turns owned by an earlier process."""
+        if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+            return
         try:
             entries = list(self._read_hosted_call_registry().items())
         except Exception:

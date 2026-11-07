@@ -176,6 +176,38 @@ async def wait_inputs(instance, count):
     raise AssertionError(f"Expected {count} host inputs; received {len(instance.inputs)}")
 
 
+def test_new_submission_and_saved_reply_refresh_execution_proof(factory, monkeypatch):
+    from inkbox_plugin import managed_inbox
+    from inkbox_plugin.managed_lifecycle import status
+    monkeypatch.setattr(managed_inbox, "boot_id", lambda: "new-boot")
+    monkeypatch.setenv("INKBOX_MANAGED_OWNER_ID", "new-owner")
+
+    async def run():
+        instance = factory()
+        receiver = instance.receiver
+        instance.adapter._running = True
+        await receiver.accept(event())
+        await idle(instance)
+        row = next(iter(receiver.rows.values()))
+        turn = row["turns"][0]
+        assert turn["execution_boot_id"] == "new-boot"
+        turn.update(execution_boot_id="old-boot", execution_owner_id="old-owner", state="completed")
+        receiver._save(row)
+        assert turn["execution_boot_id"] == "old-boot"
+        turn["delivery"] = {"state": "pending"}
+        def uncertain_send():
+            assert turn["execution_boot_id"] == "new-boot"
+            assert turn["execution_owner_id"] == "new-owner"
+            raise TimeoutError("unknown send")
+        with pytest.raises(TimeoutError):
+            await receiver.dispatch_reply(row, turn, uncertain_send)
+        turn["delivery"]["state"] = "uncertain"
+        receiver._save(row)
+        assert status(instance.adapter)["unknown"]
+        await receiver.close()
+    asyncio.run(run())
+
+
 def test_native_reply_preflight_retry_preserves_companion_result(factory):
     async def run():
         instance = factory("imessage")

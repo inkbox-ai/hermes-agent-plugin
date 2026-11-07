@@ -999,6 +999,18 @@ def test_running_hosted_completion_recovers_after_adapter_restart(tmp_path):
     assert len(restarted_events) == 1
 
 
+def test_managed_restart_leaves_call_recovery_to_durable_admission(tmp_path, monkeypatch):
+    first, first_events = _adapter(tmp_path)
+    asyncio.run(first._on_call_ended(_payload()))
+    asyncio.run(first.on_processing_start(first_events[0]))
+    assert first._read_hosted_call_registry()["call-1"]["state"] == "running"
+    monkeypatch.setenv("INKBOX_HOSTED_ACTIVATION_ID", "synthetic-activation")
+    restarted, events = _adapter(tmp_path)
+    asyncio.run(restarted._catch_up_hosted_call_completions())
+    assert events == []
+    assert restarted._read_hosted_call_registry()["call-1"]["state"] == "running"
+
+
 def test_recovery_waits_when_authoritative_transcript_fetch_fails(tmp_path):
     first, first_events = _adapter(tmp_path)
     asyncio.run(first._on_call_ended(_payload()))

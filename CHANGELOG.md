@@ -2,6 +2,7 @@
 
 ## 0.2.23
 
+- Refresh execution ownership for retried turns and replies; leave supervised post-call recovery to durable admission.
 - Keep stopped uncertain work isolated from unrelated activity and configuration changes.
 - Add durable, bounded webhook acceptance and retain uncertain outcomes without automatic replay.
 - Preserve all message receipts through debounce batching, serialize conversation admission, and separate completed receipts from pending capacity.
