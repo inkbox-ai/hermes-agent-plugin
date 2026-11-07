@@ -345,3 +345,229 @@ def test_rejected_explicit_quote_suppresses_only_captured_final_not_intermediate
         instance.identity.send_whatsapp.assert_not_called()
         await instance.receiver.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('unavailable', [False, True])
+def test_inline_reply_context_reaches_initialization_and_live_companion_turns(factory, unavailable):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        item['data']['message'].update(content='That is odd', reply_to_message_id=uid(800))
+        instance.identity.get_whatsapp_message = Mock(return_value={
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Delivery is still pending.', 'media': [],
+        }, side_effect=PermissionError('sensitive failure') if unavailable else None)
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            live = whatsapp_event('live')
+            live['companion']['sequence'] = 4
+            live['data']['message'].update(id=uid(4), content='And this reply?', reply_to_message_id=uid(800))
+            await instance.receiver.accept(live)
+            await idle(instance)
+            assert len(instance.inputs) == 2
+            for current in instance.inputs:
+                assert '"reply_to_message_id": "' + uid(800) + '"' in current.text
+                if unavailable:
+                    assert '"status": "unavailable"' in current.text
+                    assert 'Delivery is still pending.' not in current.text and 'sensitive failure' not in current.text
+                else:
+                    assert '"author": "sample-agent"' in current.text
+                    assert 'Delivery is still pending.' in current.text
+            assert instance.identity.get_whatsapp_message.call_count == 2
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('quiet_mode', ['safe', 'mention'])
+def test_context_only_inline_reply_retains_parent_for_later_wake(factory, quiet_mode):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        instance.identity.get_whatsapp_message = Mock(return_value={
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Earlier quoted answer', 'media': [],
+        })
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            instance.adapter.config.extra.update(group_reply_mode='mention' if quiet_mode == 'mention' else 'auto',
+                                                 companion_response_mode='safe')
+            quiet = whatsapp_event('live')
+            quiet['companion']['sequence'] = 4
+            quiet['data']['message'].update(id=uid(4), content='That is odd', reply_to_message_id=uid(800),
+                agent_mentioned=False, sender_access='sponsored' if quiet_mode == 'safe' else 'direct')
+            await instance.receiver.accept(quiet)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            row = next(iter(instance.receiver.rows.values()))
+            assert row['turns'][-1]['state'] == 'context_only'
+            assert 'Earlier quoted answer' in row['turns'][-1]['text']
+            wake = whatsapp_event('live')
+            wake['companion']['sequence'] = 5
+            wake['data']['message'].update(id=uid(5), content='Please explain', agent_mentioned=True)
+            await instance.receiver.accept(wake)
+            await idle(instance)
+            assert len(instance.inputs) == 2
+            assert 'Earlier quoted answer' in instance.inputs[-1].text
+            assert 'sample-agent' in instance.inputs[-1].text
+            assert uid(800) in instance.inputs[-1].text
+            instance.identity.get_whatsapp_message.assert_called_once_with(uid(800))
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_quoted_companion_source_failure_does_not_read_parent_or_consume_receipt(factory):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        item['data']['message']['reply_to_message_id'] = uid(800)
+        instance.identity.get_whatsapp_message = Mock()
+        instance.identity.get_whatsapp_conversation.side_effect = PermissionError('source denied')
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            instance.identity.get_whatsapp_message.assert_not_called()
+            assert not instance.inputs
+            row = next(iter(instance.receiver.rows.values()))
+            assert row['state'] == 'failed'
+            assert 'whatsapp_quote' not in row['turns'][0]
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_quiet_initialization_quote_is_retained_without_duplicate_lookup(factory):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        instance.adapter.config.extra['group_reply_mode'] = 'mention'
+        item['data']['message'].update(agent_mentioned=False, reply_to_message_id=uid(800))
+        instance.identity.get_whatsapp_message = Mock(return_value={
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Quoted before initialization', 'media': [],
+        })
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            assert not instance.inputs
+            wake = whatsapp_event('live')
+            wake['companion']['sequence'] = 4
+            wake['data']['message'].update(id=uid(4), content='Please explain')
+            await instance.receiver.accept(wake)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            assert 'Quoted before initialization' in instance.inputs[0].text
+            instance.identity.get_whatsapp_message.assert_called_once_with(uid(800))
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+def test_inline_reply_source_timeout_retries_before_parent_lookup(factory):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        item['data']['message']['reply_to_message_id'] = uid(800)
+        conversation = instance.identity.get_whatsapp_conversation.return_value
+        source_reads = 0
+
+        def read_source(*args):
+            nonlocal source_reads
+            source_reads += 1
+            if source_reads == 1:
+                raise TimeoutError('temporary source failure')
+            return conversation
+
+        def read_parent(*args):
+            assert source_reads >= 2
+            return {'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+                    'direction': 'outbound', 'content': 'Recovered quote', 'media': []}
+
+        instance.identity.get_whatsapp_conversation.side_effect = read_source
+        instance.identity.get_whatsapp_message = Mock(side_effect=read_parent)
+        instance.receiver.retry_delay = .001
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            assert 'Recovered quote' in instance.inputs[0].text
+            instance.identity.get_whatsapp_message.assert_called_once_with(uid(800))
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('explicit_group_reply', [False, True])
+def test_rejected_independent_dm_never_borrows_companion_scope_or_blocks_group(factory, monkeypatch, explicit_group_reply):
+    import json
+    from inkbox import InkboxAPIError
+    from inkbox_plugin.imessage_state import clear_context
+    from inkbox_plugin.whatsapp_tools import invoke
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        session = None
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            row = next(iter(instance.receiver.rows.values()))
+            turn = row['turns'][0]
+            session = row['host_session_id']
+            instance.receiver._bind_whatsapp_context(row, turn)
+            monkeypatch.setattr('inkbox_plugin.tools._client_and_identity', lambda: (
+                SimpleNamespace(base_url='https://inkbox.ai'), SimpleNamespace(close=lambda: None), instance.identity))
+
+            def send(**kwargs):
+                if 'to' in kwargs:
+                    assert set(kwargs) == {'to', 'text', 'idempotency_key'}
+                    assert kwargs['to'] == turn['author']
+                    raise InkboxAPIError(403, {'error': 'whatsapp_contact_not_allowed'})
+                assert kwargs['conversation_id'] == uid(30)
+                return SimpleNamespace(id=uid(900))
+
+            instance.identity.send_whatsapp.side_effect = send
+            denied = json.loads(invoke('send_whatsapp', {'to': turn['author'], 'text': 'Independent DM'}, session))
+            assert denied['error'] == 'whatsapp_contact_not_allowed'
+            if explicit_group_reply:
+                sent = json.loads(invoke('send_whatsapp', {'conversation_id': uid(30), 'text': 'Group answer'}, session))
+                assert sent.get('ok'), sent
+            turn.update(result_ready=True, result='Group answer')
+            result = await instance.receiver.send('companion:' + row['key'], 'Group answer', turn['id'])
+            assert result.success and result.message_id
+            assert instance.identity.send_whatsapp.call_count == 2
+            assert instance.identity.send_whatsapp.call_args.kwargs['conversation_id'] == uid(30)
+        finally:
+            if session:
+                clear_context(session, turn["id"])
+            await instance.receiver.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('http_error', [False, True])
+def test_transient_parent_read_uses_existing_companion_retry_without_guessing(factory, http_error):
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        item['data']['message']['reply_to_message_id'] = uid(800)
+        instance.receiver.retry_delay = .001
+        import httpx
+        failure = httpx.HTTPStatusError('temporary', request=httpx.Request('GET', 'https://example.test/messages/parent'),
+            response=httpx.Response(503)) if http_error else TimeoutError('temporary')
+        instance.identity.get_whatsapp_message = Mock(side_effect=[failure, {
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Recovered parent', 'media': [],
+        }])
+        try:
+            await instance.receiver.accept(item)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            assert 'Recovered parent' in instance.inputs[0].text
+            assert '"status": "unavailable"' not in instance.inputs[0].text
+            assert instance.identity.get_whatsapp_message.call_count == 2
+        finally:
+            await instance.receiver.close()
+    asyncio.run(run())

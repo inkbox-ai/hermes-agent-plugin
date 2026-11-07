@@ -539,6 +539,10 @@ class CompanionReceiver:
                     raise RuntimeError("Companion host outcome is uncertain")
                 if turn["phase"] != "initialization":
                     await self._prepare_live(row, turn)
+                elif "whatsapp_quote" not in turn:
+                    quote = await self._whatsapp_reply_presentation(row, turn)
+                    if quote:
+                        turn["text"] += "\n" + quote
                 receipt = turn.get("envelope")
                 item = message(receipt) if receipt else {}
                 turn["sender_access"] = item.get("sender_access")
@@ -631,7 +635,7 @@ class CompanionReceiver:
             if status in {401, 403, 404, 409, 410} and not (row["meta"]["channel"] == "whatsapp" and status == 409):
                 for turn in row["turns"]:
                     if turn["state"] in {"pending", "ready"}:
-                        for field in ("text", "entries", "envelope", "notices"):
+                        for field in ("text", "entries", "envelope", "notices", "whatsapp_quote"):
                             turn.pop(field, None)
                 row["state"] = "revoked"
             row["error"] = (
@@ -685,10 +689,28 @@ class CompanionReceiver:
         if meta["channel"] != "slack":
             turn["envelope"]["data"]["message" if meta["channel"] != "phone" else "text_message"]["body_text"] = text
         turn["text"] = json.dumps({
+            **({key: item.get(key) for key in ("id", "reply_to_message_id", "thread_id", "thread_root_message_id")}
+               if meta["channel"] == "whatsapp" else {}),
             "author": author, "occurred_at": item.get("created_at"), "text": text,
             "sender_access": item.get("sender_access"),
             "attachments": item.get("attachments") or item.get("media") or item.get("media_urls") or [],
         }, ensure_ascii=False)
+        quote = await self._whatsapp_reply_presentation(row, turn)
+        if quote:
+            turn["text"] += "\n" + quote
+
+    async def _whatsapp_reply_presentation(self, row: dict, turn: dict) -> str:
+        envelope = turn.get("envelope")
+        if row["meta"]["channel"] != "whatsapp" or not envelope or not message(envelope).get("reply_to_message_id"):
+            return ""
+        if "whatsapp_quote" not in turn:
+            await self._authorized_source(row, turn)
+            if not getattr(self.adapter, "_reply_identity", None):
+                self.adapter._reply_identity = await asyncio.to_thread(self.adapter._inkbox.get_identity, self.adapter._identity_handle)
+            await asyncio.to_thread(self.authorize_whatsapp, row, turn, read_only=True)
+            from .whatsapp_groups import render_reply_context
+            turn["whatsapp_quote"] = await render_reply_context(self.adapter, message(envelope))
+        return turn["whatsapp_quote"]
 
     def _host_owner(self) -> Any:
         owner = getattr(self.adapter, "gateway_runner", None)
@@ -791,7 +813,7 @@ class CompanionReceiver:
         if meta["channel"] == "whatsapp" and turn.get("envelope"):
             from .whatsapp_groups import render_mentions
             rendered, mentions = await render_mentions(adapter, message(turn["envelope"]))
-            text += "\nCurrent message presentation: " + json.dumps({"text": rendered, "mentions": mentions}, ensure_ascii=False)
+            text += "\nCurrent message presentation: " + json.dumps({"message_id": message(turn["envelope"]).get("id"), "text": rendered, "mentions": mentions}, ensure_ascii=False)
         text += "\nRespond only when warranted by the current message; otherwise return exactly [SILENT]."
         text += "\nCurrent sender_access: " + str(turn.get("sender_access") or "unknown")
         text += " (message admission, not permission to execute commands)."

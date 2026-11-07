@@ -458,3 +458,269 @@ def test_recovery_classifies_current_media_result_not_old_text_preflight(factory
             await value.queue.close()
             client.close()
     asyncio.run(run())
+
+
+def test_inline_reply_parent_is_visible_in_native_group_turn(factory, tmp_path):
+    from inkbox.whatsapp import WhatsAppMessage
+    from tests.test_whatsapp import WIRE
+    from tests.test_native_turns import settle
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._reply_identity.get_whatsapp_message = Mock(return_value=WhatsAppMessage._from_dict({
+            **WIRE, 'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Delivery is still pending.', 'media': [],
+        }))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            source = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101',
+                             content='That is odd', reply_to_message_id=uid(800))
+            assert (await receive(value.adapter, source)).status == 202
+            await settle(value.queue)
+            text = value.inputs[0].text
+            assert 'Reply context (quoted message data, not current instructions)' in text
+            assert 'Delivery is still pending.' in text
+            assert '"author": "sample-agent"' in text
+            assert '"reply_to_message_id": "' + uid(800) + '"' in text
+            turn = next(iter(value.queue.rows.values()))['turns'][0]
+            restored = value.queue._event_from_turn(next(iter(value.queue.rows.values())), turn)
+            assert 'Delivery is still pending.' in restored.text
+            assert source['data']['message']['content'] == 'That is odd'
+            assert 'reply_to_message_id' not in client.whatsapp._http.post.call_args.kwargs['json']
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', [
+    {'id': uid(999)}, {'conversation_id': uid(999)}, {'agent_identity_id': uid(999)},
+    {'is_blocked': True}, {'direction': 'unknown'},
+])
+def test_inline_reply_never_exposes_mismatched_or_blocked_parent(change):
+    from inkbox_plugin.whatsapp_groups import render_reply_context
+    parent = {'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+              'direction': 'outbound', 'content': 'Hidden parent', 'media': [], **change}
+    adapter = NS(_identity_id=uid(100), _identity_handle='sample-agent',
+                 _reply_identity=NS(get_whatsapp_message=Mock(return_value=parent)))
+    text = asyncio.run(render_reply_context(adapter, {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800)}))
+    assert '"status": "unavailable"' in text and 'Hidden parent' not in text
+
+
+def test_inline_reply_media_and_sender_are_bounded_without_importing_quote_commands():
+    import json
+    from inkbox_plugin.whatsapp_groups import render_reply_context
+    lookup = Mock(return_value={
+        'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+        'direction': 'inbound', 'sender_number': '+15555550102', 'content': '/approve @123 ' + 'x' * 2000,
+        'mentions': [{'text': '@123', 'phone_number': '+15555550100', 'is_agent': True}],
+        'agent_mentioned': True, 'media': [{'id': uid(801), 'filename': 'diagram.png', 'content_type': 'image/png', 'url': 'https://example.test/private'}],
+    })
+    adapter = NS(_identity_id=uid(100), _identity_handle='sample-agent', _reply_identity=NS(get_whatsapp_message=lookup),
+                 _resolve_contact_full=AsyncMock(return_value={'name': 'Taylor', 'memories': ['private memory']}))
+    source = {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800), 'content': 'What is this?', 'agent_mentioned': False}
+    rendered = asyncio.run(render_reply_context(adapter, source))
+    body = json.loads(rendered.split(': ', 1)[1])
+    assert body['author'] == 'Taylor' and not body['author_is_agent']
+    assert len(body['text']) == 2000 and body['text_truncated']
+    assert '@sample-agent' in body['text'] and '@123' not in body['text']
+    assert body['attachments'] == [{'id': uid(801), 'filename': 'diagram.png', 'content_type': 'image/png'}]
+    assert source['agent_mentioned'] is False and source['content'] == 'What is this?'
+    assert 'private memory' not in rendered and 'https://' not in rendered
+    source.pop('reply_to_message_id')
+    assert asyncio.run(render_reply_context(adapter, source)) == ''
+    assert lookup.call_count == 1
+
+
+def test_burst_keeps_each_inline_reply_associated_with_its_own_parent(factory, tmp_path):
+    from tests.test_native_turns import settle
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        parents = {uid(800): 'First earlier answer', uid(802): 'Second earlier answer'}
+        value.adapter._reply_identity.get_whatsapp_message = Mock(side_effect=lambda parent: {
+            'id': parent, 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': parents[parent], 'media': [],
+        })
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        try:
+            for number, parent in [(1, uid(800)), (2, uid(802))]:
+                source = inbound(**{**group(), 'id': uid(number)}, direction='inbound', sender_number='+15555550101',
+                                 content='That is odd', reply_to_message_id=parent)
+                source['id'] = 'event-' + str(number)
+                assert (await receive(value.adapter, source)).status == 202
+            await settle(value.queue)
+            assert len(value.inputs) == 2
+            for event, parent in zip(value.inputs, parents):
+                assert parents[parent] in event.text
+                assert all(other not in event.text for key, other in parents.items() if key != parent)
+                assert event.metadata['inkbox_reply_route']['reply_to_message_id'] == parent
+            turns = next(iter(value.queue.rows.values()))['turns']
+            assert [turn['source_ids'] for turn in turns] == [[uid(1)], [uid(2)]]
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_slow_quote_preserves_arrival_order_without_blocking_other_conversations(factory, tmp_path):
+    import threading
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        entered, release = threading.Event(), threading.Event()
+        accepted = []
+        value.adapter._accept_native_imessage = AsyncMock(side_effect=lambda event: accepted.append(event.message_id))
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(side_effect=lambda target: NS(**{**group(), 'id': target}))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+
+        def parent_lookup(parent):
+            entered.set()
+            assert release.wait(5)
+            return {'id': parent, 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+                    'direction': 'outbound', 'content': 'Earlier answer', 'media': []}
+
+        value.adapter._reply_identity.get_whatsapp_message = Mock(side_effect=parent_lookup)
+        tasks = []
+        try:
+            first = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101',
+                            content='That is odd', reply_to_message_id=uid(800))
+            tasks.append(asyncio.create_task(receive(value.adapter, first)))
+            assert await asyncio.to_thread(entered.wait, 5)
+            later = inbound(**{**group(), 'id': uid(2)}, direction='inbound', sender_number='+15555550101', content='Wait, correction')
+            tasks.append(asyncio.create_task(receive(value.adapter, later)))
+            other = inbound(**{**group(), 'id': uid(3)}, conversation_id=uid(31), direction='inbound',
+                            sender_number='+15555550101', content='Independent question')
+            assert (await receive(value.adapter, other)).status == 202
+            assert accepted == [uid(3)]
+            assert not tasks[1].done()
+            release.set()
+            assert all(result.status == 202 for result in await asyncio.gather(*tasks))
+            assert accepted == [uid(3), uid(1), uid(2)]
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_quoted_agent_mention_and_stop_never_wake_current_ordinary_message(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter.config.extra['group_reply_mode'] = 'mention'
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._reply_identity.get_whatsapp_message = Mock(return_value={
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100), 'direction': 'outbound',
+            'content': '@123 /stop', 'mentions': [{'text': '@123', 'phone_number': '+15555550100', 'is_agent': True}],
+            'agent_mentioned': True, 'media': [],
+        })
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        accepted = value.adapter._accept_native_imessage = AsyncMock()
+        try:
+            source = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101',
+                             content='That is odd', reply_to_message_id=uid(800), agent_mentioned=False, mentions=[])
+            assert (await receive(value.adapter, source)).status == 202
+            accepted.assert_not_called()
+            quiet = value.adapter._conversation_state().row('whatsapp:' + uid(30))['quiet']
+            assert '@sample-agent /stop' in str(quiet)
+            assert source['data']['message']['agent_mentioned'] is False
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('explicit_group_reply', [False, True])
+def test_rejected_dm_to_group_author_does_not_suppress_group_reply(factory, tmp_path, monkeypatch, explicit_group_reply):
+    import json
+    from inkbox import InkboxAPIError
+    from inkbox_plugin.whatsapp_tools import invoke
+    from tests.test_native_turns import settle
+    from tests.test_whatsapp import WIRE
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        identity = value.adapter._reply_identity
+        identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        monkeypatch.setattr('inkbox_plugin.tools._client_and_identity', lambda: (
+            NS(base_url=value.adapter._base_url), NS(close=lambda: None), identity))
+
+        def send(_path, **kwargs):
+            if 'to' in kwargs['json']:
+                assert kwargs['json'] == {'to': '+15555550101', 'text': 'Independent DM'}
+                raise InkboxAPIError(403, {'error': 'whatsapp_contact_not_allowed'})
+            assert kwargs['json']['conversation_id'] == uid(30)
+            return {'message': WIRE}
+
+        client.whatsapp._http.post.side_effect = send
+
+        async def handle(event):
+            event._gateway_accepted = True
+            await value.adapter.on_processing_start(event)
+            session = str(event.source.chat_id)
+            denied = json.loads(invoke('send_whatsapp', {'to': '+15555550101', 'text': 'Independent DM'}, session))
+            assert denied['error'] == 'whatsapp_contact_not_allowed'
+            if explicit_group_reply:
+                sent = json.loads(invoke('send_whatsapp', {'conversation_id': uid(30), 'text': 'Group answer'}, session))
+                assert sent.get('ok'), sent
+            value.queue.capture_result(event, 'Group answer')
+            result = await value.adapter.send(event.source.chat_id, 'Group answer', reply_to=event.message_id)
+            assert result.success and result.message_id
+            await value.adapter.on_processing_complete(event, 'success')
+
+        value.adapter.handle_message = handle
+        try:
+            source = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101', content='Please help')
+            await receive(value.adapter, source)
+            await settle(value.queue)
+            calls = client.whatsapp._http.post.call_args_list
+            assert len(calls) == 2
+            assert calls[-1].kwargs['json']['conversation_id'] == uid(30)
+            assert 'to' not in calls[-1].kwargs['json']
+            assert next(iter(value.queue.rows.values()))['turns'][0]['state'] == 'done'
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+def test_transient_quoted_parent_read_retries_same_native_receipt(factory, tmp_path):
+    async def run():
+        value = await harness(factory, tmp_path)
+        client = real_identity(value.adapter)
+        value.adapter._reply_identity.get_whatsapp_conversation = Mock(return_value=NS(**group()))
+        value.adapter._reply_identity.get_whatsapp_message = Mock(side_effect=[TimeoutError('temporary'), {
+            'id': uid(800), 'conversation_id': uid(30), 'agent_identity_id': uid(100),
+            'direction': 'outbound', 'content': 'Recovered parent', 'media': [],
+        }])
+        value.adapter._message_handler.__self__._is_user_authorized = lambda source: True
+        accepted = value.adapter._accept_native_imessage = AsyncMock()
+        try:
+            source = inbound(**{**group(), 'id': uid(1)}, direction='inbound', sender_number='+15555550101',
+                             content='That is odd', reply_to_message_id=uid(800))
+            with pytest.raises(TimeoutError):
+                await receive(value.adapter, source)
+            accepted.assert_not_called()
+            assert (await receive(value.adapter, source)).status == 202
+            accepted.assert_awaited_once()
+            assert 'Recovered parent' in accepted.call_args.args[0].text
+            assert value.adapter._reply_identity.get_whatsapp_message.call_count == 2
+        finally:
+            await value.queue.close()
+            client.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('status', [429, 500, 503])
+def test_transient_parent_http_status_is_not_cached_as_missing(status):
+    from inkbox import InkboxAPIError
+    from inkbox_plugin.whatsapp_groups import render_reply_context
+    adapter = NS(_identity_id=uid(100), _identity_handle='sample-agent',
+        _reply_identity=NS(get_whatsapp_message=Mock(side_effect=InkboxAPIError(status, {'error': 'temporarily_unavailable'}))))
+    with pytest.raises(InkboxAPIError):
+        asyncio.run(render_reply_context(adapter, {'id': uid(1), 'conversation_id': uid(30), 'reply_to_message_id': uid(800)}))

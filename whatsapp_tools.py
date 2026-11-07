@@ -26,7 +26,7 @@ def _destination(payload, owner):
     phone = payload.get("to")
     if not isinstance(phone, str) or not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
         raise ValueError("WhatsApp requires one E.164 recipient")
-    if owner and phone == owner.get("author"):
+    if owner and owner.get("conversation_kind") == "direct" and phone == owner.get("author"):
         return ("conversation", str(uuid.UUID(str(owner.get("conversation_id")))))
     return ("recipient", phone)
 
@@ -45,6 +45,9 @@ def _same_destination(left, right, identity, owner):
     if (str(field(details, "id")) != conversation[1]
             or str(field(details, "agent_identity_id")) != str(identity.id)):
         raise ValueError("WhatsApp destination ownership could not be verified")
+    from .whatsapp_groups import is_group
+    if is_group(details):
+        return False
     if not direct_destination(details):
         raise ValueError("WhatsApp direct destination could not be verified")
     return recipients[1] == field(details, "remote_number")

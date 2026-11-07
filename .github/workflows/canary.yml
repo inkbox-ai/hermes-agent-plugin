@@ -43,18 +43,10 @@ jobs:
             --host "$GITHUB_WORKSPACE/.upstream-hermes" \
             --out "$GITHUB_WORKSPACE/.venv"
 
-      - name: Check out compatible WhatsApp SDK source
-        uses: actions/checkout@v7
-        with:
-          repository: inkbox-ai/inkbox
-          ref: 6f9fad715abbae8022789cfc1028a0335bf23212
-          path: .whatsapp-sdk
-          fetch-depth: 1
-
       - name: Complete offline suite vs Hermes v0.22.5
         working-directory: ${{ runner.temp }}
         env:
-          PYTHONPATH: ${{ github.workspace }}/.whatsapp-sdk/sdk/python:${{ github.workspace }}/.upstream-hermes
+          PYTHONPATH: ${{ github.workspace }}/.upstream-hermes
           # Keep independent launcher fixtures out of the bootstrap tool store.
           HERMES_HOME: ${{ runner.temp }}/hermes-contract-home
           HERMES_RUNTIME_DIR: ''

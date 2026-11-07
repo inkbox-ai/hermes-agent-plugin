@@ -601,7 +601,7 @@ including task content or webhook response bodies. Outbound delegation tools can
 create tasks, wait for worker state changes, and answer requests for more input.
 The history tools support direction, participant, lifecycle, context, keyword,
 timestamp, and cursor filters. The sent-task tools remain available as
-outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.27 or
+outbound-only compatibility aliases. The plugin requires Inkbox SDK 0.7.29 or
 newer.
 
 Realtime-only call tools:
@@ -641,7 +641,7 @@ These features use the existing Hermes platform, session store, authorization, a
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
 | `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
 
-The SDK floor is **0.7.27**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
+The SDK floor is **0.7.29**, including Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
 ### Capability visibility and refresh
 
@@ -692,7 +692,9 @@ WhatsApp supports direct messages and existing groups after another participant 
 
 The existing `group_reply_mode=auto` default lets the agent decide contextually whether to answer or remain silent. Optional `mention` mode accepts the current message's verified native agent mention or typed agent handle; mentioning someone else never wakes it. Verified native mentions in both groups and direct messages render as the configured agent handle, a visible contact name, a known phone number, or an unresolved label. Original text and mention metadata remain intact; mentioned contacts' notes and memories are not imported.
 
-WhatsApp groups use the existing Companion configuration and Safe/Relaxed modes. Safe mode keeps sponsored messages as context; Relaxed mode may answer them, subject to current scope, sponsor and participant authorization. Sponsorship never grants direct-message or cross-group access. Group metadata and WhatsApp Companion require compatible Inkbox SDK 0.7.29 models; until that release is published, install the corresponding SDK source. SDK 0.7.27 retains direct-send compatibility, but reads/listings containing groups require the compatible SDK.
+WhatsApp groups use the existing Companion configuration and Safe/Relaxed modes. Safe mode keeps sponsored messages as context; Relaxed mode may answer them, subject to current scope, sponsor and participant authorization. Sponsorship never grants direct-message or cross-group access. The published Inkbox SDK 0.7.29 includes the required group metadata and WhatsApp Companion models.
+
+Incoming inline replies in direct and group chats show the quoted parent’s author, text excerpt, and attachment metadata upfront. If the parent is unavailable, the agent sees that explicitly rather than guessing its contents. Only the current message’s mentions control mention-mode wake-up; quoted mentions and commands remain context, not new instructions.
 
 For an explicit quote, provide `reply_to_message_id` together with the original conversation. Thread reads preserve their opaque cursor and never invent inaccessible parent content. Native quote chains do not split the host's ordinary conversation session.
 
@@ -731,7 +733,7 @@ Scheduled full-stack CI runs once daily at **12:00 PM Pacific time** (`America/L
 
 All CI jobs that use a real Hermes host pin **v0.22.5** (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). Contract checks, native installation, the reusable canary, and live suites share this revision. The installer script is fetched from the same commit and receives an explicit commit pin. This CI pin does not change an existing user's Hermes installation.
 
-The dependency is published Inkbox SDK `>=0.7.27,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
+The dependency is published Inkbox SDK `>=0.7.29,<1.0.0`. The UV lockfile pins the resolved registry release. PR checks exercise published-package installations and retain separate historical compatibility lanes.
 
 SDK versions 0.7.11–0.7.16 inspect certificate-store statistics that native platform
 verifiers may not expose. The plugin adapts only the exact known tunnel helper:
