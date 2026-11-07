@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.25
+
+- Add supervised direct chat with streamed text, tool activity, approvals, questions, cancellation, and downloadable file references.
+- Retain control receipts across reconnects and expose bounded conversation observations without rerunning work.
+
 ## 0.2.24
 
 - Refresh execution ownership for retried turns and replies; leave supervised post-call recovery to durable admission.

@@ -4201,9 +4201,24 @@ class InkboxAdapter(BasePlatformAdapter):
             return self._signing_key
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
 
+    def managed_chat_runtime(self, base_url, token):
+        from .managed_chat import ChatRuntime
+        from .chat_adapter import ChatAdapter
+        from hermes_constants import get_hermes_home
+        adapter = ChatAdapter(base_url, token)
+        self._managed_chat = ChatRuntime(Path(get_hermes_home()) / "inkbox" / "chat.sqlite",
+            os.environ["INKBOX_MANAGED_OWNER_ID"], adapter.run, adapter.cancel)
+        return self._managed_chat
+
     def managed_status(self):
         from .managed_lifecycle import status
-        return status(self)
+        result = status(self)
+        if chat := getattr(self, "_managed_chat", None):
+            activity = chat.journal.activity()
+            result["active"] += activity["active"]
+            result["unknown"] |= activity["unknown"]
+            result["capabilities"] = {"normalized_chat": 1, "chat_interactions": 1, "chat_observation": 1, "workspace_schedules": 1}
+        return result
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         if getattr(self, "_managed_draining", False):
