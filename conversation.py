@@ -76,7 +76,12 @@ def wakes(adapter: Any, channel: str, item: dict) -> bool:
     """Admission and addressing describe the current message, never history."""
     if mode(adapter, "companion_response_mode") == "safe" and item.get("sender_access") != "direct":
         return False
-    if mode(adapter, "group_reply_mode") == "auto" or (channel == "slack" and item.get("slack_mentioned")) or mentions(raw_text(item), adapter._identity_handle):
+    if channel == "whatsapp":
+        from .whatsapp_groups import attention_text
+        addressed = item.get("agent_mentioned") is True or mentions(attention_text(item), adapter._identity_handle)
+    else:
+        addressed = mentions(raw_text(item), adapter._identity_handle)
+    if mode(adapter, "group_reply_mode") == "auto" or (channel == "slack" and item.get("slack_mentioned")) or addressed:
         return True
     if channel == "mail":
         own = {address.casefold() for address in getattr(adapter, "_identity_email_addresses", set())}
