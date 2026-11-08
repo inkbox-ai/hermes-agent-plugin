@@ -4217,7 +4217,7 @@ class InkboxAdapter(BasePlatformAdapter):
             activity = chat.journal.activity()
             result["active"] += activity["active"]
             result["unknown"] |= activity["unknown"]
-            result["capabilities"] = {"normalized_chat": 1, "chat_interactions": 1, "chat_observation": 1, "workspace_schedules": 1}
+            result["capabilities"] = {"normalized_chat": 1, "chat_model_selection": 1, "chat_interactions": 1, "chat_observation": 1, "workspace_schedules": 1}
         return result
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":

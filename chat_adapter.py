@@ -51,7 +51,8 @@ class ChatAdapter:
         accepted = await self.request(
             "POST",
             "/v1/runs",
-            {"input": spec["prompt"] + file_instruction(spec["run_id"]), "session_id": native_session},
+            {"input": spec["prompt"] + file_instruction(spec["run_id"]), "session_id": native_session,
+             **({"model": spec["model"]} if spec.get("model") else {})},
             {"Idempotency-Key": spec["run_id"]},
         )
         run = accepted["run_id"]

@@ -16,6 +16,7 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.headers["Idempotency-Key"], run_id)
             body = await request.json()
             self.assertTrue(body["session_id"].startswith("session_"))
+            self.assertEqual(body["model"], "gpt-6.1-sol")
             return web.json_response({"run_id": "native-run"})
 
         async def answer(request):
@@ -71,7 +72,7 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             result = await adapter.run(
-                {"session_id": str(uuid4()), "run_id": run_id, "prompt": "Example"},
+                {"session_id": str(uuid4()), "run_id": run_id, "prompt": "Example", "model": "gpt-6.1-sol"},
                 lambda k, v: public.append((k, v)),
                 ask,
             )
