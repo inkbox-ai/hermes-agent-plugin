@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.24
+
+- Mask generated webhook secrets in workflow output.
+- Replace raw live-test log dumps and uploads with content-free diagnostic counts.
+
 ## 0.2.23
 
 - Show authorized inline-reply parent authors, text excerpts and attachment metadata upfront, including retained context-only messages; temporary lookup failures and unavailable parents stay explicit without blocking the current message.

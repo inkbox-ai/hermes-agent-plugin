@@ -36,8 +36,7 @@ def test_native_gateway_keeps_recognized_argv_and_spy_stays_private():
     assert 'PYTHONPATH=' not in workflow
     assert 'cat "$SPY_FILE"' not in workflow
     assert '${{ runner.temp }}/send_intents.jsonl' in workflow  # test input remains enabled
-    upload = workflow.split('- name: Upload artifacts', 1)[1]
-    assert 'send_intents.jsonl' not in upload
+    assert 'actions/upload-artifact' not in workflow
 
 
 @pytest.mark.parametrize('name', ['live-voice.yml', 'tests.yml'])
