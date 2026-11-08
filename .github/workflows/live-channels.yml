@@ -137,7 +137,9 @@ jobs:
             curl -sf --connect-timeout 1 --max-time 3 http://127.0.0.1:8088/v1/models >/dev/null && { echo "mock model ready"; exit 0; }
             sleep 1
           done
-          echo "::error::mock model did not start"; cat "$RUNNER_TEMP/mock.log"; exit 1
+          echo "::error::mock model did not start"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" mock "$RUNNER_TEMP/mock.log"
+          exit 1
 
       - name: Start gateway and wait for readiness
         run: |
@@ -154,7 +156,9 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+          echo "::error::gateway did not become ready"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          exit 1
 
       - name: Run live test (${{ matrix.mode }})
         env:
@@ -178,29 +182,15 @@ jobs:
             "$PYTEST" tests/live -v
           fi
 
-      # Failure-only: these logs carry live phone/email/message content and this repo
-      # (and its Action logs/artifacts) is public.
-      - name: Dump logs (on failure only)
+      - name: Summarize runtime state on failure
         if: failure() || cancelled()
         run: |
-          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
-          # Send-spy records remain runner-local: they contain recipient/body data.
-          echo "=== mock model log ==="; cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
-          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" mock "$RUNNER_TEMP/mock.log"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" hermes "$HERMES_HOME/logs/gateway.log"
 
       - name: Tear down (always)
         if: always()
         run: |
           kill "$(cat "$RUNNER_TEMP/gateway.pid" 2>/dev/null)" 2>/dev/null || true
           kill "$(cat "$RUNNER_TEMP/mock.pid" 2>/dev/null)" 2>/dev/null || true
-
-      - name: Upload artifacts (on failure only)
-        if: failure() || cancelled()
-        uses: actions/upload-artifact@v7
-        with:
-          name: live-logs-${{ matrix.mode }}
-          retention-days: 5
-          path: |
-            ${{ runner.temp }}/gateway.log
-            ${{ runner.temp }}/mock.log
-          if-no-files-found: ignore
