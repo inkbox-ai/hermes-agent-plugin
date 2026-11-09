@@ -273,3 +273,26 @@ def test_completion_watermark_survives_restart_and_status_does_not_touch_it(tmp_
     reopened = ManagedInbox(path, activation)
     assert reopened.last_completed_unix_ms() == 2010500
     reopened.close()
+
+
+def test_quarantine_after_owner_replacement_unblocks_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv('INKBOX_MANAGED_OWNER_ID', 'owner-one')
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    try:
+        first = event(activation) | {'companion': {'scope_id': 'example'}}
+        second = event(activation, 2) | {'companion': {'scope_id': 'example'}}
+        inbox.accept(first)
+        inbox.claim()
+        inbox.finish(first['id'], completed=False)
+        inbox.accept(second)
+        with pytest.raises(InboxError, match='Cold restart'):
+            inbox.quarantine(first['id'])
+        assert inbox.claim() is None
+        monkeypatch.setenv('INKBOX_MANAGED_OWNER_ID', 'owner-two')
+        assert inbox.summary()['review_required'] == 1
+        assert inbox.quarantine(first['id'])['quarantined']
+        assert inbox.claim()[0] == second['id']
+        assert inbox.accept(first)['state'] == 'unknown'
+    finally:
+        inbox.close()

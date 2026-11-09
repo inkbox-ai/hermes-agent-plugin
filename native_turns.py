@@ -443,7 +443,10 @@ class NativeTurns(CompanionReceiver):
                 row["error"] = f"Native host processing failed ({type(exc).__name__})"
                 # Retry only a proven pre-admission failure. Once accepted,
                 # uncertain execution is never automatically replayed.
-                if not getattr(event, "_gateway_accepted", False) and turn["state"] == "running":
+                from .managed_work import AdmissionRejected
+                if isinstance(exc, AdmissionRejected):
+                    turn.update(state="cancelled", fenced=True, error_code=exc.code, rejected_unix_ms=int(time.time() * 1000))
+                if not isinstance(exc, AdmissionRejected) and not getattr(event, "_gateway_accepted", False) and turn["state"] == "running":
                     turn["state"] = "pending"
                     self._save(row)
                     await asyncio.sleep(self.retry_delay)

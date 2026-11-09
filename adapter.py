@@ -4316,10 +4316,7 @@ class InkboxAdapter(BasePlatformAdapter):
                     secret=self._provider_secret("inkbox"),
                 ):
                     return web.Response(status=401, text="Companion mode requires an authenticated webhook")
-                if receiver.closed:
-                    return web.Response(status=503, text="Companion receiver is closing")
-                receiver.record_delivery_failure(envelope, failure_rows)
-                return web.Response(status=200, text="Companion delivery failure recorded")
+                return self._record_companion_delivery_failure(envelope)
 
         if envelope.get("companion") is not None and source != "inkbox":
             return web.Response(status=401, text="Companion mode requires an authenticated Inkbox webhook")
@@ -4395,6 +4392,17 @@ class InkboxAdapter(BasePlatformAdapter):
             raise
         self._dedup_commit(dedup_id)
         return response
+
+    def _record_companion_delivery_failure(self, envelope):
+        """Handle a verified failure through the same policy for both ingress paths."""
+        receiver = getattr(self, "_companion", None)
+        rows = receiver.delivery_failure_rows(envelope) if receiver is not None else []
+        if not rows:
+            return None
+        if receiver.closed:
+            return web.Response(status=503, text="Companion receiver is closing")
+        receiver.record_delivery_failure(envelope, rows)
+        return web.Response(status=200, text="Companion delivery failure recorded")
 
     async def _route_inkbox_event(self, event_type, envelope, headers=None):
         if event_type in SLACK_INCOMING_EVENTS or event_type == SLACK_STOP_EVENT:

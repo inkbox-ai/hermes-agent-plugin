@@ -10,10 +10,18 @@ _current = ContextVar('managed_deliveries', default=())
 _owners = WeakKeyDictionary()
 
 
+class AdmissionRejected(RuntimeError):
+    """A typed native refusal before any execution was admitted."""
+
+    code = 'native_sender_not_authorized'
+
+
 class DeliveryWork:
     def __init__(self):
         self.parts = set()
         self.failed = False
+        self.uncertain = False
+        self.rejection = None
         self.sealed = False
         self.done = asyncio.get_running_loop().create_future()
 
@@ -22,8 +30,10 @@ class DeliveryWork:
             raise RuntimeError('Delivery work was already completed')
         self.parts.add(part)
 
-    def finish(self, part, *, success):
+    def finish(self, part, *, success, rejection=None):
         self.failed |= not success
+        self.uncertain |= not success and rejection is None
+        self.rejection = rejection or self.rejection
         self.parts.discard(part)
         self.check()
 
@@ -53,9 +63,11 @@ def spawn(coroutine, **kwargs):
         work.add(task)
     def finished(done):
         _owners.pop(done, None)
-        success = not done.cancelled() and done.exception() is None
+        error = None if done.cancelled() else done.exception()
+        success = not done.cancelled() and error is None
+        rejection = error.code if isinstance(error, AdmissionRejected) else None
         for work in owners:
-            work.finish(done, success=success)
+            work.finish(done, success=success, rejection=rejection)
     if owners:
         task.add_done_callback(finished)
     return task
@@ -96,10 +108,14 @@ def adopt(previous):
     for work in owners:
         work.add(part)
     success = False
+    rejection = None
     try:
         with scope(owners):
             yield
         success = True
+    except AdmissionRejected as error:
+        rejection = error.code
+        raise
     finally:
         for work in owners:
-            work.finish(part, success=success)
+            work.finish(part, success=success, rejection=rejection)

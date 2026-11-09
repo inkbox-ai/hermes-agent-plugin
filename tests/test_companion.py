@@ -898,3 +898,47 @@ def test_last_companion_task_completion_advances_idle_clock(monkeypatch, native)
         assert receiver.last_completed_unix_ms == 3000
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_tracked_delivery_failure_is_diagnostic_in_both_ingress_paths(factory, monkeypatch, tmp_path, managed):
+    from inkbox_plugin import adapter as adapter_module
+    from inkbox_plugin.managed_ingress import ManagedIngress
+    async def run():
+        instance = factory()
+        await instance.receiver.accept(event())
+        await idle(instance)
+        baseline = len(instance.inputs)
+        failure = {"event_type": "message.failed", "data": {"message": {
+            "id": uid(800), "thread_id": uid(30), "direction": "outbound"}}}
+        instance.adapter._on_mail_delivery_failure = AsyncMock(side_effect=AssertionError("Must not start recovery"))
+        ingress = None
+        try:
+            if managed:
+                monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'managed-home'))
+                instance.adapter._base_url = 'https://api.example.test'
+                activation = uid(700)
+                failure['id'] = 'evt_' + 'a' * 64
+                failure['hosted_delivery'] = {'version': 1, 'activation_id': activation,
+                    'event_id': failure['id'], 'starts_agent': True}
+                ingress = ManagedIngress(instance.adapter, activation)
+                ingress.inbox.accept(failure)
+                ingress.start()
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                assert ingress.inbox.accept(failure)['state'] == 'completed'
+            else:
+                provider = types.SimpleNamespace(name='inkbox', verify=Mock(return_value=True))
+                monkeypatch.setattr(adapter_module, 'match_provider', lambda _: provider)
+                request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(failure).encode()),
+                    headers={}, url='https://example.test/webhook')
+                assert (await instance.adapter._handle_webhook(request)).text == 'Companion delivery failure recorded'
+            row = next(iter(instance.receiver.rows.values()))
+            assert row['delivery_failures'][uid(800)]['event_type'] == 'message.failed'
+            assert len(instance.inputs) == baseline
+            instance.adapter._on_mail_delivery_failure.assert_not_awaited()
+        finally:
+            if ingress:
+                await ingress.close()
+            await instance.receiver.close()
+    asyncio.run(run())

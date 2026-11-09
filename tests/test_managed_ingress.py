@@ -104,3 +104,39 @@ def test_hosted_legacy_subscription_is_ignored_only_after_signature_check(monkey
         provider.verify = lambda **_: False
         assert (await adapter._accept_webhook(request)).status == 401
     asyncio.run(scenario())
+
+
+def test_proven_pre_execution_denial_settles_without_replay_or_drain_pin(tmp_path, monkeypatch):
+    from inkbox_plugin.managed_work import AdmissionRejected
+    from inkbox_plugin.managed_lifecycle import status
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    async def scenario():
+        calls = []
+        async def native_admit():
+            calls.append('denied')
+            raise AdmissionRejected('native_sender_not_authorized')
+        async def route(*_):
+            spawn(native_admit())
+            return web.Response(status=200)
+        adapter = SimpleNamespace(_base_url='https://api.example.test', _identity_id='example',
+            _route_inkbox_event=route, is_connected=True)
+        activation = str(uuid4())
+        receiver = ManagedIngress(adapter, activation)
+        adapter._managed_receiver = receiver
+        try:
+            value = envelope(activation)
+            receiver.inbox.accept(value)
+            receiver.start()
+            for _ in range(20):
+                await asyncio.sleep(0)
+            assert receiver.inbox.summary() == {'pending': 0, 'active': 0, 'unknown': 0, 'review_required': 0}
+            observation = status(adapter)
+            assert observation['active'] == 0 and observation['unknown'] is False
+            assert observation['last_delivery_failure']['code'] == 'native_sender_not_authorized'
+            assert observation['last_delivery_failure']['event_id'] == value['id']
+            assert receiver.inbox.accept(value)['state'] == 'unknown'
+            assert receiver.inbox.claim() is None
+            assert calls == ['denied']
+        finally:
+            await receiver.close()
+    asyncio.run(scenario())

@@ -41,7 +41,11 @@ class ChatAdapter:
         if not run:
             return False
         value = await self.request("GET", f"/v1/runs/{run}")
-        return value.get("status") in {"completed", "cancelled", "failed"}
+        terminal = value.get("status") in {"completed", "cancelled", "failed"}
+        if terminal and self.runs.get(session_id) == run:
+            self.runs.pop(session_id, None)
+            self.cancelled.discard(session_id)
+        return terminal
 
     async def run(self, spec, emit, ask):
         session = spec["session_id"]
@@ -64,6 +68,7 @@ class ChatAdapter:
         self.last_runs[session] = run
         if session in self.cancelled:
             await self.cancel(session)
+        terminal = False
         try:
             async with aiohttp.ClientSession(
                 headers={"Authorization": f"Bearer {self.token}"},
@@ -170,6 +175,7 @@ class ChatAdapter:
                                 body["execution_generation"] = event["execution_generation"]
                             await self.request("POST", f"/v1/runs/{run}/{endpoint}", body)
                         elif kind in {"run.completed", "run.cancelled", "run.failed"}:
+                            terminal = True
                             return {
                                 "text": str(event.get("output") or ""),
                                 "cancelled": kind == "run.cancelled",
@@ -181,5 +187,8 @@ class ChatAdapter:
                             raise RuntimeError("Native outcome uncertain")
             raise RuntimeError("Native event stream ended before completion")
         finally:
-            self.runs.pop(session, None)
-            self.cancelled.discard(session)
+            # Keep a failed stream's run identity until status proves it stopped;
+            # ChatRuntime still has to cancel and settle this exact turn.
+            if terminal:
+                self.runs.pop(session, None)
+                self.cancelled.discard(session)

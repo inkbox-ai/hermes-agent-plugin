@@ -40,9 +40,14 @@ class ManagedIngress:
                 continue
             event_id, payload = claimed
             completed = False
+            rejection = None
             try:
                 async with asyncio.timeout(86400):
-                    if payload.get('companion') is not None:
+                    failure_handler = getattr(self.gateway, '_record_companion_delivery_failure', None)
+                    failure = failure_handler(payload) if failure_handler else None
+                    if failure is not None:
+                        completed = 200 <= failure.status < 300
+                    elif payload.get('companion') is not None:
                         await self.gateway._companion.accept(payload)
                         completed = True
                     else:
@@ -51,10 +56,12 @@ class ManagedIngress:
                             response = await self.gateway._route_inkbox_event(payload['event_type'], payload)
                         work.seal()
                         completed = 200 <= response.status < 300 and await work.done
+                        if not completed and not work.uncertain:
+                            rejection = work.rejection
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001
                 logger.warning("Managed delivery outcome is unknown (%s)", type(error).__name__)
                 completed = False
             finally:
-                self.inbox.finish(event_id, completed=completed)
+                self.inbox.finish(event_id, completed=completed, rejection=rejection)

@@ -113,3 +113,45 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(json.dumps(result, separators=(",", ":"))), 65536)
             with self.assertRaisesRegex(RuntimeError, "Native request unavailable"):
                 await adapter.request("GET", "/65537")
+
+
+def test_stream_failure_cleanup_cannot_cancel_the_next_turn(tmp_path):
+    import time
+    from inkbox_plugin.managed_chat import ChatRuntime
+
+    async def scenario():
+        starts, stops = [], []
+        turns = [str(uuid4()), str(uuid4())]
+        async def start(request):
+            starts.append(await request.json())
+            return web.json_response({'run_id': f'native-{len(starts)}'})
+        async def events(request):
+            body = '' if request.match_info['run'] == 'native-1' else 'data: {"event":"run.completed","output":"done"}\n\n'
+            return web.Response(text=body, content_type='text/event-stream')
+        async def stop(request):
+            stops.append(request.match_info['run'])
+            return web.json_response({})
+        async def status(request):
+            return web.json_response({'status': 'completed'})
+        app = web.Application()
+        app.router.add_post('/v1/runs', start)
+        app.router.add_get('/v1/runs/{run}/events', events)
+        app.router.add_post('/v1/runs/{run}/stop', stop)
+        app.router.add_get('/v1/runs/{run}', status)
+        async with TestServer(app) as server:
+            adapter = ChatAdapter(str(server.make_url('')), 'synthetic-local-key')
+            runtime = ChatRuntime(tmp_path / 'chat.sqlite', 'owner', adapter.run, adapter.cancel, settled=adapter.settled)
+            try:
+                for number in (1, 2):
+                    await runtime.control({'action': 'chat_start', 'spec': {
+                        'run_id': turns[number - 1], 'session_id': 'conversation', 'harness': 'hermes',
+                        'prompt': 'hello', 'deadline_unix_ms': int(time.time() * 1000) + 60000}})
+                    await asyncio.gather(*list(runtime.tasks.values()))
+                assert len(starts) == 2
+                assert stops == ['native-1']
+                assert runtime.journal.get(turns[0])['children_complete'] is True
+                assert runtime.journal.get(turns[1])['state'] == 'succeeded'
+                assert not adapter.cancelled and not adapter.runs
+            finally:
+                await runtime.close()
+    asyncio.run(scenario())

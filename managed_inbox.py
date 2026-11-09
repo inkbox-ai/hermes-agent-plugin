@@ -75,7 +75,7 @@ class ManagedInbox:
             columns = {row[1] for row in self.db.execute('PRAGMA table_info(deliveries)')}
             if 'owner_id' not in columns:
                 self.db.execute('ALTER TABLE deliveries ADD COLUMN owner_id TEXT')
-            for name, kind in (('boot_id', 'TEXT'), ('settled_at', 'REAL')):
+            for name, kind in (('boot_id', 'TEXT'), ('settled_at', 'REAL'), ('failure_code', 'TEXT')):
                 if name not in columns:
                     self.db.execute(f'ALTER TABLE deliveries ADD COLUMN {name} {kind}')
             self.db.execute("UPDATE deliveries SET boot_id=? WHERE boot_id IS NULL AND state!='completed'", (boot_id(),))
@@ -148,24 +148,30 @@ class ManagedInbox:
                             (boot_id(), os.getenv('INKBOX_MANAGED_OWNER_ID'), self.activation_id, row[0]))
             return row[0], json.loads(row[1])
 
-    def finish(self, event_id: str, *, completed: bool) -> bool:
-        if type(completed) is not bool:
+    def finish(self, event_id: str, *, completed: bool, rejection: str | None = None) -> bool:
+        if type(completed) is not bool or rejection not in (None, 'native_sender_not_authorized') or (completed and rejection):
             raise InboxError('Invalid delivery outcome')
         with self.transaction():
             row = self.db.execute("UPDATE deliveries SET state=?,finished=?,payload=CASE WHEN ? THEN NULL ELSE payload END,bytes=CASE WHEN ? THEN 0 ELSE bytes END WHERE activation=? AND event_id=? AND state='dispatching'",
                                   ('completed' if completed else 'unknown', time.time(), completed, completed,
                                    self.activation_id, event_id))
+            if row.rowcount == 1 and rejection:
+                self.db.execute("UPDATE deliveries SET settled_at=?,failure_code=?,payload=NULL,bytes=0 WHERE activation=? AND event_id=?",
+                                (time.time(), rejection, self.activation_id, event_id))
             return row.rowcount == 1
 
+    def latest_failure(self):
+        row = self.db.execute("SELECT event_id,failure_code,finished FROM deliveries WHERE activation=? AND failure_code IS NOT NULL ORDER BY finished DESC LIMIT 1", (self.activation_id,)).fetchone()
+        return {'event_id': row[0], 'code': row[1], 'finished_unix_ms': int(row[2] * 1000)} if row else None
+
     def quarantine(self, event_id: str) -> dict:
-        current = boot_id()
         with self.transaction():
-            row = self.db.execute("SELECT receipt,state,boot_id,settled_at FROM deliveries WHERE activation=? AND event_id=?",
+            row = self.db.execute("SELECT receipt,state,boot_id,settled_at,owner_id FROM deliveries WHERE activation=? AND event_id=?",
                                   (self.activation_id, event_id)).fetchone()
             if row is None or row[1] != 'unknown':
                 raise InboxError('Only unknown outcomes may be quarantined')
             if row[3] is None:
-                if current is None or row[2] is None or current == row[2]:
+                if not execution_stopped(row[2], row[4]):
                     raise InboxError('Cold restart required to confirm the previous execution has stopped')
                 self.db.execute("UPDATE deliveries SET settled_at=?,finished=?,payload=NULL,bytes=0 WHERE activation=? AND event_id=?",
                                 (time.time(), time.time(), self.activation_id, event_id))
