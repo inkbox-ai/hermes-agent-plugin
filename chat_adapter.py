@@ -22,9 +22,13 @@ class ChatAdapter:
             headers={"Authorization": f"Bearer {self.token}"}, timeout=aiohttp.ClientTimeout(total=15)
         ) as client:
             async with client.request(method, self.base_url + path, json=data, headers=headers) as response:
-                body = await response.content.read(65537)
-                if response.status >= 400 or len(body) > 65536:
+                if response.status >= 400:
                     raise RuntimeError("Native request unavailable")
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(8192):
+                    if len(body) + len(chunk) > 65536:
+                        raise RuntimeError("Native request unavailable")
+                    body.extend(chunk)
                 return json.loads(body)
 
     async def cancel(self, session_id):

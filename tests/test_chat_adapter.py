@@ -1,8 +1,10 @@
+import asyncio
 import json
 import unittest
 from uuid import uuid4
 
 from aiohttp import web
+from aiohttp.test_utils import TestServer
 from inkbox_plugin.chat_adapter import ChatAdapter
 
 
@@ -10,6 +12,7 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_questions_and_approvals_use_the_suspended_native_request(self):
         received = []
         run_id = str(uuid4())
+        session_id = str(uuid4())
 
         async def start(request):
             self.assertEqual(request.headers["Authorization"], "Bearer synthetic-local-key")
@@ -17,7 +20,13 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
             body = await request.json()
             self.assertTrue(body["session_id"].startswith("session_"))
             self.assertEqual(body["model"], "gpt-6.1-sol")
-            return web.json_response({"run_id": "native-run"})
+            response = web.StreamResponse(headers={"Content-Type": "application/json"})
+            await response.prepare(request)
+            await response.write(b'{"run_id":')
+            await asyncio.sleep(0.02)
+            await response.write(b'"native-run"}')
+            await response.write_eof()
+            return response
 
         async def answer(request):
             received.append((request.match_info["kind"], await request.json()))
@@ -72,11 +81,12 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             result = await adapter.run(
-                {"session_id": str(uuid4()), "run_id": run_id, "prompt": "Example", "model": "gpt-6.1-sol"},
+                {"session_id": session_id, "run_id": run_id, "prompt": "Example", "model": "gpt-6.1-sol"},
                 lambda k, v: public.append((k, v)),
                 ask,
             )
             self.assertEqual(result["text"], "Finished")
+            self.assertEqual(adapter.last_runs[session_id], "native-run")
             self.assertEqual(
                 received,
                 [
@@ -88,3 +98,18 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(public[-1][1]["status"], "failed")
         finally:
             await runner.cleanup()
+
+    async def test_response_limit_applies_to_the_complete_body(self):
+        async def response(request):
+            size = int(request.match_info["size"])
+            body = b'{"value":"' + b'x' * (size - len(b'{"value":""}')) + b'"}'
+            return web.Response(body=body, content_type="application/json")
+
+        app = web.Application()
+        app.router.add_get("/{size}", response)
+        async with TestServer(app) as server:
+            adapter = ChatAdapter(str(server.make_url("")), "synthetic-local-key")
+            result = await adapter.request("GET", "/65536")
+            self.assertEqual(len(json.dumps(result, separators=(",", ":"))), 65536)
+            with self.assertRaisesRegex(RuntimeError, "Native request unavailable"):
+                await adapter.request("GET", "/65537")
