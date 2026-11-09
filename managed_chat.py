@@ -294,12 +294,19 @@ class ChatRuntime:
                 receipt["children_complete"] = True
                 self.journal.save(receipt)
         if action == "chat_events":
-            return {
-                "type": "events",
-                "receipt": receipt,
-                "next_sequence": receipt["last_sequence"],
+            result = {
+                "type": "events", "receipt": receipt,
+                "next_sequence": data["after"],
                 "events": self.journal.events(identifier, data["after"], data.get("limit", 32)),
             }
+            # Budget the whole UTF-8 response, including repeated request metadata.
+            while result["events"] and len(encode(result).encode()) > 64000:
+                result["events"].pop()
+            if result["events"]:
+                result["next_sequence"] = result["events"][-1]["sequence"]
+            if len(encode(result).encode()) > 64000:
+                raise RuntimeError("Chat receipt exceeds response capacity")
+            return result
         if action == "chat_acknowledge":
             through = data["through"]
             if type(through) is not int or not 0 <= through <= receipt["last_sequence"]:
@@ -412,6 +419,9 @@ class ChatRuntime:
             self.journal.save(self.journal.get(identifier), {"type": kind, "data": data})
 
         async def ask(payload):
+            current = self.journal.get(identifier)
+            if current["state"] in TERMINAL | {"cancelling"} or spec["deadline_unix_ms"] <= milliseconds():
+                return {"cancelled": True}
             emit(
                 "turn.updated",
                 {"id": identifier, "status": "waiting_for_input", "terminal": False},

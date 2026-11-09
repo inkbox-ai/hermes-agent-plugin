@@ -25,6 +25,33 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.directory.cleanup()
 
+
+    async def test_late_question_cannot_revive_uncertain_turn(self):
+        callbacks = []
+        stopped = False
+        async def run(value, emit, ask):
+            callbacks.append(ask)
+            raise RuntimeError("transport lost")
+        async def cancel(_):
+            pass
+        async def settled(_):
+            return stopped
+        runtime = ChatRuntime(self.path, "owner", run, cancel, settled)
+        try:
+            await runtime.control({"action": "chat_start", "spec": spec()})
+            await asyncio.gather(*list(runtime.tasks.values()))
+            before = runtime.journal.get("turn")
+            self.assertEqual(before["state"], "outcome_unknown")
+            answer = await callbacks[0]({"kind": "approval", "title": "Late approval", "decisions": ["approve_once", "deny"]})
+            self.assertEqual(answer, {"cancelled": True})
+            self.assertEqual(runtime.journal.get("turn"), before)
+            stopped = True
+            result = await runtime.control({"action": "chat_events", "run_id": "turn", "after": 0})
+            self.assertTrue(result["receipt"]["children_complete"])
+            self.assertTrue(runtime.journal.accept(spec("next")))
+        finally:
+            await runtime.close()
+
     async def test_retry_and_ordered_events(self):
         calls = []
 
