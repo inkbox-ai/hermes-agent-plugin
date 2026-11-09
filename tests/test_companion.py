@@ -862,3 +862,39 @@ def test_checkpoint_unicode_and_legacy_windows_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr(companion.locale, "getpreferredencoding", lambda _do_setlocale: "cp1252")
     target.write_bytes('{"text": "café"}'.encode("cp1252"))
     assert companion.read_checkpoint(target) == {"text": "café"}
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_last_companion_task_completion_advances_idle_clock(monkeypatch, native):
+    from inkbox_plugin import companion
+
+    async def scenario():
+        from inkbox_plugin.native_turns import NativeTurns
+        receiver_class = NativeTurns if native else CompanionReceiver
+        receiver = receiver_class.__new__(receiver_class)
+        receiver.closed = False
+        receiver.tasks = {}
+        receiver.last_completed_unix_ms = 1000
+        gates = {key: asyncio.Event() for key in ('first', 'second')}
+
+        async def drain(value):
+            key = value if isinstance(value, str) else value['key']
+            await gates[key].wait()
+
+        receiver._drain = drain
+        for key in gates:
+            receiver._kick({'key': key, 'meta': {'channel': 'phone'}, 'state': 'ordinary', 'turns': []})
+        tasks = dict(receiver.tasks)
+        monkeypatch.setattr(companion.time, 'time', lambda: 2.0)
+        gates['first'].set()
+        await tasks['first']
+        await asyncio.sleep(0)
+        assert receiver.last_completed_unix_ms == 2000
+        assert not tasks['second'].done()
+        monkeypatch.setattr(companion.time, 'time', lambda: 3.0)
+        gates['second'].set()
+        await tasks['second']
+        await asyncio.sleep(0)
+        assert receiver.last_completed_unix_ms == 3000
+
+    asyncio.run(scenario())

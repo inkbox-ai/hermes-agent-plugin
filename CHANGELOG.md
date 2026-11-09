@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.28
+
+- Report durable managed message and chat completion timestamps so supervisors can count inactivity after work finishes. Status reads do not extend the idle window.
+
 ## 0.2.27
 
 - Forward an optional model selection to the native chat turn without changing the default for other conversations.

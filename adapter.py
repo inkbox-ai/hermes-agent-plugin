@@ -4213,7 +4213,12 @@ class InkboxAdapter(BasePlatformAdapter):
     def managed_status(self):
         from .managed_lifecycle import status
         result = status(self)
+        receiver = getattr(self, "_managed_receiver", None)
+        result["last_completed_unix_ms"] = receiver.inbox.last_completed_unix_ms() if receiver else 0
+        for name in ("_companion", "_native_turns"):
+            result["last_completed_unix_ms"] = max(result["last_completed_unix_ms"], getattr(getattr(self, name, None), "last_completed_unix_ms", 0))
         if chat := getattr(self, "_managed_chat", None):
+            result["last_completed_unix_ms"] = max(result["last_completed_unix_ms"], chat.journal.last_completed_unix_ms())
             activity = chat.journal.activity()
             result["active"] += activity["active"]
             result["unknown"] |= activity["unknown"]

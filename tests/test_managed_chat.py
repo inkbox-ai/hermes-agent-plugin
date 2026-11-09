@@ -46,6 +46,12 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         result = await runtime.control({"action": "chat_events", "run_id": "turn", "after": 0})
         self.assertEqual(len(calls), 1)
         self.assertEqual(result["receipt"]["state"], "succeeded")
+        completed = result["receipt"]["finished_unix_ms"]
+        self.assertGreater(completed, 0)
+        self.assertEqual(runtime.journal.last_completed_unix_ms(), completed)
+        runtime.journal.activity()
+        self.assertEqual(runtime.journal.last_completed_unix_ms(), completed)
+
         events = result["events"]
         self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
         self.assertEqual([e["payload"]["text"] for e in events if e["kind"] == "message.delta"], ["hello world"])

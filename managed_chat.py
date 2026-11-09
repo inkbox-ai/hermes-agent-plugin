@@ -251,6 +251,11 @@ class Journal:
             values.append(json.loads(row[0]))
         return values
 
+    def last_completed_unix_ms(self):
+        return self.db.execute(
+            "SELECT COALESCE(MAX(json_extract(receipt,'$.finished_unix_ms')),0) FROM chat_turns"
+        ).fetchone()[0]
+
     def activity(self):
         receipts = [json.loads(row[0]) for row in self.db.execute("SELECT receipt FROM chat_turns")]
         return {

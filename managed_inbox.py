@@ -171,6 +171,14 @@ class ManagedInbox:
                                 (time.time(), time.time(), self.activation_id, event_id))
             return {'event_id': event_id, 'quarantined': True}
 
+    def last_completed_unix_ms(self) -> int:
+        """Completion watermark; reading status must not extend the idle window."""
+        value = self.db.execute(
+            "SELECT COALESCE(MAX(finished),0) FROM deliveries WHERE activation=?",
+            (self.activation_id,),
+        ).fetchone()[0]
+        return int(value * 1000)
+
     def summary(self) -> dict:
         counts = dict(self.db.execute('SELECT state,count(*) FROM deliveries WHERE activation=? AND settled_at IS NULL GROUP BY state',
                                       (self.activation_id,)))

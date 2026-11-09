@@ -11,6 +11,7 @@ import locale
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -155,6 +156,7 @@ class CompanionReceiver:
         self.root = root
         self.max_bytes = max_bytes
         self.rows: dict[str, dict] = {}
+        self.last_completed_unix_ms = int(time.time() * 1000)
         self.tasks: dict[str, asyncio.Task] = {}
         self.completions: dict[str, asyncio.Future] = {}
         self.active: dict[str, dict] = {}
@@ -469,6 +471,9 @@ class CompanionReceiver:
         self._save(row)
         return True
 
+    def _work_completed(self, _task):
+        self.last_completed_unix_ms = int(time.time() * 1000)
+
     def _kick(self, row: dict) -> None:
         if row["meta"]["channel"] == "slack" and not getattr(self.adapter, "_slack_enabled", False):
             return
@@ -485,6 +490,7 @@ class CompanionReceiver:
             ):
                 self._kick(row)
 
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(finished)
 
     async def _snapshot(self, row: dict) -> dict:
@@ -1165,6 +1171,7 @@ class CompanionReceiver:
 
         task = asyncio.create_task(asyncio.to_thread(checked_upload))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             operation = await asyncio.shield(task)
@@ -1229,6 +1236,7 @@ class CompanionReceiver:
             return method(*args, **kwargs)
         task = asyncio.create_task(asyncio.to_thread(send_checked))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             return await asyncio.shield(task)

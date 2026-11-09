@@ -1,4 +1,5 @@
 import json
+import time as time_module
 import os
 import subprocess
 import sys
@@ -248,3 +249,27 @@ def test_fenced_owner_replacement_releases_pin_without_replay(tmp_path, monkeypa
     assert inbox.claim() is None
     assert inbox.accept(first)['state'] == 'unknown'
     inbox.close()
+
+
+def test_completion_watermark_survives_restart_and_status_does_not_touch_it(tmp_path, monkeypatch):
+    path, activation = tmp_path / 'inbox' / 'events.sqlite3', str(uuid4())
+    inbox = ManagedInbox(path, activation)
+    assert inbox.last_completed_unix_ms() == 0
+    first, second = event(activation), event(activation, 2)
+    inbox.accept(first)
+    inbox.claim()
+    assert inbox.last_completed_unix_ms() == 0
+    monkeypatch.setattr(time_module, 'time', lambda: 2000.125)
+    inbox.finish(first['id'], completed=True)
+    assert inbox.last_completed_unix_ms() == 2000125
+    inbox.accept(second)
+    inbox.claim()
+    assert inbox.last_completed_unix_ms() == 2000125
+    inbox.summary()
+    assert inbox.last_completed_unix_ms() == 2000125
+    monkeypatch.setattr(time_module, 'time', lambda: 2010.5)
+    inbox.finish(second['id'], completed=True)
+    inbox.close()
+    reopened = ManagedInbox(path, activation)
+    assert reopened.last_completed_unix_ms() == 2010500
+    reopened.close()

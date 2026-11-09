@@ -316,6 +316,7 @@ class NativeTurns(CompanionReceiver):
                 self._save(row)
             elif not self.closed and any(turn["state"] in {"pending", "answer_ready"} for turn in row["turns"]):
                 self._kick(row)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(done)
 
     async def _batch(self, row, turn):
@@ -824,6 +825,7 @@ class NativeTurns(CompanionReceiver):
         self._save(row)
         task = asyncio.create_task(asyncio.to_thread(self.checked_imessage_send, row, turn, identity, payload))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             result = await asyncio.shield(task)
@@ -937,6 +939,7 @@ class NativeTurns(CompanionReceiver):
                 method, args, kwargs = (self.checked_whatsapp_send if route["mode"] == "whatsapp" else self.checked_imessage_send), (row, turn, self.adapter._reply_identity, payload), {}
             task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
             self.outbound.add(task)
+            task.add_done_callback(self._work_completed)
             task.add_done_callback(self.outbound.discard)
             result = await asyncio.shield(task)
             message_id = str(result.id)
