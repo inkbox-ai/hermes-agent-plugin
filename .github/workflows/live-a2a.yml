@@ -123,7 +123,7 @@ jobs:
             sleep 1
           done
           echo "::error::deterministic model did not start"
-          cat "$RUNNER_TEMP/mock.log"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" mock "$RUNNER_TEMP/mock.log"
           exit 1
 
       - name: Start gateway
@@ -151,12 +151,12 @@ jobs:
         run: |
           "$RUNNER_TEMP/inkbox-live-runner/bin/python" tests/live/a2a_driver.py
 
-      - name: Dump gateway log on failure
+      - name: Summarize runtime state on failure
         if: failure()
         run: |
-          tail -n 300 "$GATEWAY_LOG" 2>/dev/null || true
-          tail -n 300 "$HERMES_HOME"/logs/gateway.log 2>/dev/null || true
-          cat "$RUNNER_TEMP/mock.log" 2>/dev/null || true
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" hermes "$HERMES_HOME/logs/gateway.log"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" mock "$RUNNER_TEMP/mock.log"
 
       - name: Stop gateway
         if: always()

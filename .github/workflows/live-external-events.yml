@@ -91,6 +91,7 @@ jobs:
           # Per-run GitHub webhook secret: shared by the gateway (to verify) and
           # the test (to sign). Generated fresh so nothing is committed.
           GH_SECRET="$(openssl rand -hex 24)"
+          echo "::add-mask::$GH_SECRET"
           echo "INKBOX_WEBHOOK_SECRET_GITHUB=$GH_SECRET" >> "$GITHUB_ENV"
           {
             echo "INKBOX_API_KEY=$HERMES_INKBOX_API_KEY"
@@ -127,7 +128,9 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+          echo "::error::gateway did not become ready"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          exit 1
 
       - name: Run external-event intelligence test
         env:
@@ -144,12 +147,11 @@ jobs:
               tests/live/test_external_event_intelligence.py \
               tests/live/test_external_event_github.py -v
 
-      # Failure-only: these logs carry live agent content and this repo is public.
-      - name: Dump logs (on failure only)
+      - name: Summarize runtime state on failure
         if: failure()
         run: |
-          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
-          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" hermes "$HERMES_HOME/logs/gateway.log"
 
       - name: Tear down (always)
         if: always()

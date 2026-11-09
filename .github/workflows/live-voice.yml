@@ -150,7 +150,9 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error::gateway did not become ready"; cat "$GATEWAY_LOG"; exit 1
+          echo "::error::gateway did not become ready"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          exit 1
 
       - name: Start voice driver and wait for its tunnel
         env:
@@ -188,10 +190,12 @@ jobs:
             "$PY" "$GITHUB_WORKSPACE/tests/live/voice_driver.py" > "$DRIVER_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/driver.pid"
           for i in $(seq 1 30); do      # up to ~90s
-            if [ -s "$DRIVER_STATE" ]; then echo "driver ready:"; cat "$DRIVER_STATE"; exit 0; fi
+            if [ -s "$DRIVER_STATE" ]; then echo "driver ready"; exit 0; fi
             sleep 3
           done
-          echo "::error::driver did not become ready"; cat "$DRIVER_LOG"; exit 1
+          echo "::error::driver did not become ready"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" driver "$DRIVER_LOG"
+          exit 1
 
       - name: Run voice test (${{ matrix.scenario }})
         env:
@@ -205,13 +209,12 @@ jobs:
           LIVE_REAL_MODEL=1 VOICE_DRIVER_STATE="$DRIVER_STATE" \
             "$PYTEST" tests/live/test_voice.py -v
 
-      # Failure-only: these logs carry live call content and this repo is public.
-      - name: Dump logs (on failure only)
+      - name: Summarize runtime state on failure
         if: failure() || cancelled()
         run: |
-          echo "=== gateway.log ==="; cat "$GATEWAY_LOG" || true
-          echo "=== driver.log ==="; cat "$DRIVER_LOG" || true
-          echo "=== ~/.hermes/logs ==="; tail -n 200 "$HERMES_HOME"/logs/* 2>/dev/null || true
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" gateway "$GATEWAY_LOG"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" driver "$DRIVER_LOG"
+          uv run --no-project python "$GITHUB_WORKSPACE/tests/ci/summarize_live_failure.py" hermes "$HERMES_HOME/logs/gateway.log"
 
       - name: Tear down (always)
         if: always()

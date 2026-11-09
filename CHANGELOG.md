@@ -24,6 +24,8 @@
 - Track asynchronous replies through completion and expose supervised activity and admission fences so configuration changes wait for active work.
 - Preserve standalone gateway behavior.
 - Support durable inbox ownership on Windows as well as Unix.
+- Mask generated webhook secrets in workflow output.
+- Replace raw live-test log dumps and uploads with content-free diagnostic counts.
 
 ## 0.2.23
 
