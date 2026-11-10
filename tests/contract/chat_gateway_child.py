@@ -110,6 +110,7 @@ async def main():
         body = {
             "input": spec["prompt"] + file_instruction(spec["run_id"]),
             "session_id": "session_" + spec["session_id"].replace("-", ""),
+            "computers_tool_policy": "ask",
         }
         replay = await adapter.request("POST", "/v1/runs", body, {"Idempotency-Key": spec["run_id"]})
         repeated = await adapter.request("POST", "/v1/runs", body, {"Idempotency-Key": spec["run_id"]})
