@@ -621,3 +621,38 @@ def test_quiet_quote_authorization_failure_does_not_block_later_wake(factory, fa
         finally:
             await instance.receiver.close()
     asyncio.run(run())
+
+
+def test_managed_whatsapp_delivery_preserves_native_admission_and_dedup(factory, monkeypatch, tmp_path):
+    from uuid import uuid4
+    from inkbox_plugin.managed_ingress import ManagedIngress
+    from tests.test_managed_inbox import event as managed_event
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    async def run():
+        instance = factory('imessage')
+        item = setup(instance)
+        activation = str(uuid4())
+        receipt = managed_event(activation)
+        item.update(id=receipt['id'], hosted_delivery=receipt['hosted_delivery'])
+        instance.adapter._base_url = 'https://api.example.test'
+        ingress = ManagedIngress(instance.adapter, activation)
+        try:
+            assert ingress.inbox.accept(item)['state'] == 'accepted'
+            ingress.start()
+            async def accepted():
+                while ingress.inbox.accept(item)['state'] != 'completed':
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(accepted(), 3)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            assert instance.inputs[0].source.thread_id.startswith('whatsapp:')
+            assert ingress.inbox.accept(item)['state'] == 'completed'
+            assert ingress.inbox.claim() is None
+            await instance.receiver.accept(item)
+            await idle(instance)
+            assert len(instance.inputs) == 1
+        finally:
+            await ingress.close()
+            await instance.receiver.close()
+    asyncio.run(run())

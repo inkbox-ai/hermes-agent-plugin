@@ -24,7 +24,7 @@ from inkbox_plugin.native_turns import NativeTurns
 from inkbox_plugin.native_envelope import route_for
 
 
-@pytest.mark.parametrize("mode,scenario", [(mode, "normal") for mode in ("email", "sms", "whatsapp", "imessage", "slack")] + [("whatsapp", "stop"), ("email", "recovered"), ("email", "recovered_failure"), ("sms", "group_interrupt"), ("whatsapp", "preworker"), ("whatsapp", "producer_unicode"), ("email", "long_email"), ("whatsapp", "preadmission"), ("whatsapp", "outgoing_media"), ("sms", "remote_media"), ("email", "recovered_skill"), ("email", "recovered_later_guard"), ("email", "shared_busy"), ("email", "shared_busy_failure"), ("email", "shared_busy_empty"), ("email", "shared_busy_cancel")] + [(mode, case) for mode in ("email", "whatsapp") for case in ("late_terminal", "late_inflight", "late_empty", "late_delivery")] + [("email", "shared_busy_late_terminal"), ("email", "shared_busy_late_inflight")])
+@pytest.mark.parametrize("mode,scenario", [(mode, "normal") for mode in ("email", "sms", "whatsapp", "imessage", "slack")] + [("whatsapp", "stop"), ("email", "recovered"), ("email", "recovered_failure"), ("sms", "group_interrupt"), ("whatsapp", "preworker"), ("whatsapp", "producer_unicode"), ("email", "long_email"), ("whatsapp", "preadmission"), ("whatsapp", "outgoing_media"), ("sms", "remote_media"), ("email", "recovered_skill"), ("email", "recovered_later_guard"), ("email", "shared_busy"), ("email", "shared_busy_failure"), ("email", "shared_busy_empty"), ("email", "shared_busy_cancel")] + [(mode, case) for mode in ("email", "whatsapp") for case in ("late_terminal", "late_inflight", "late_empty", "late_delivery")] + [("email", "shared_busy_late_terminal"), ("email", "shared_busy_late_inflight"), ("imessage", "managed_open"), ("imessage", "native_denied")])
 def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeypatch, mode, scenario):
     is_busy = scenario.startswith("shared_busy")
     is_late = "late_" in scenario
@@ -32,6 +32,11 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         monkeypatch.setenv("INKBOX_ALLOWED_USERS", "sample-sender,+15555550101,whatsapp:sample-conversation")
         monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "false")
+        if scenario in {"managed_open", "native_denied"}:
+            monkeypatch.delenv("INKBOX_ALLOWED_USERS")
+            monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+            monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+            monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "true")
         platform_registry.register(PlatformEntry(name="inkbox", label="Inkbox", adapter_factory=InkboxAdapter,
             check_fn=lambda: True, allowed_users_env="INKBOX_ALLOWED_USERS", allow_all_env="INKBOX_ALLOW_ALL_USERS"))
         adapter = InkboxAdapter(PlatformConfig(enabled=True, typing_indicator=False,
@@ -80,6 +85,12 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
         if scenario == "outgoing_media":
             from PIL import Image
             Image.new("RGB", (2, 2)).save(picture)
+        if scenario == "native_denied":
+            native_admit = authority.admit_native
+            async def refuse_at_admission(event, *args, **kwargs):
+                monkeypatch.setenv("INKBOX_ALLOW_ALL_USERS", "false")
+                return await native_admit(event, *args, **kwargs)
+            monkeypatch.setattr(authority, "admit_native", refuse_at_admission)
         if scenario == "preadmission":
             from inkbox_plugin import native_envelope
             monkeypatch.setattr(native_envelope, "bind_execution", lambda *args: (_ for _ in ()).throw(RuntimeError("Synthetic refusal")))
@@ -327,6 +338,16 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 assert saved["state"] == "uncertain" and "answer" not in saved
                 assert not saved.get("worker_completion")
                 assert "inkbox_reply_route" in original.metadata
+                return
+            if scenario == "native_denied":
+                assert not executed and not sent
+                saved = next(iter(queue.rows.values()))["turns"][0]
+                assert saved["state"] == "cancelled" and saved["fenced"]
+                assert saved["error_code"] == "native_sender_not_authorized"
+                from inkbox_plugin.managed_lifecycle import status
+                observation = status(adapter)
+                assert observation["unknown"] is False
+                assert observation["last_delivery_failure"]["code"] == "native_sender_not_authorized"
                 return
             assert len(executed) == (2 if scenario == "group_interrupt" else 1), (queue.rows if queue else {
                 "sent": sent, "accepted": getattr(original, "_gateway_accepted", None),

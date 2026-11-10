@@ -11,6 +11,7 @@ import locale
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -155,6 +156,7 @@ class CompanionReceiver:
         self.root = root
         self.max_bytes = max_bytes
         self.rows: dict[str, dict] = {}
+        self.last_completed_unix_ms = int(time.time() * 1000)
         self.tasks: dict[str, asyncio.Task] = {}
         self.completions: dict[str, asyncio.Future] = {}
         self.active: dict[str, dict] = {}
@@ -194,7 +196,18 @@ class CompanionReceiver:
         self._owner_file = handle
 
     def _save(self, row: dict) -> None:
+        from .managed_inbox import boot_id
+        for turn in row.get("turns", []):
+            if turn.get("state") in {"submitting", "submitted", "control_submitting"}:
+                turn.setdefault("execution_boot_id", boot_id())
+                turn.setdefault("execution_owner_id", os.getenv("INKBOX_MANAGED_OWNER_ID"))
         self._save_checkpoint(self.root / f"{row['key']}.json", row)
+
+    @staticmethod
+    def _execution_started(turn: dict) -> None:
+        from .managed_inbox import boot_id
+        turn["execution_boot_id"] = boot_id()
+        turn["execution_owner_id"] = os.getenv("INKBOX_MANAGED_OWNER_ID")
 
     def _save_checkpoint(self, path: Path, value: dict) -> None:
         with self._checkpoint_lock:
@@ -449,6 +462,7 @@ class CompanionReceiver:
                                           "_inkbox_companion_control": True})
         event.allow_gateway_control = True
         turn["state"] = "control_submitting"
+        self._execution_started(turn)
         self._save(row)
         task = await self.adapter._enqueue(event)
         await task
@@ -456,6 +470,9 @@ class CompanionReceiver:
         turn["state"] = "completed"
         self._save(row)
         return True
+
+    def _work_completed(self, _task):
+        self.last_completed_unix_ms = int(time.time() * 1000)
 
     def _kick(self, row: dict) -> None:
         if row["meta"]["channel"] == "slack" and not getattr(self.adapter, "_slack_enabled", False):
@@ -473,6 +490,7 @@ class CompanionReceiver:
             ):
                 self._kick(row)
 
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(finished)
 
     async def _snapshot(self, row: dict) -> dict:
@@ -560,6 +578,7 @@ class CompanionReceiver:
                 self._require_owner()
                 self._check_controls(event)
                 turn["state"] = "submitting"
+                self._execution_started(turn)
                 self._save(row)
                 future = asyncio.get_running_loop().create_future()
                 self.completions[turn["id"]] = future
@@ -1135,6 +1154,7 @@ class CompanionReceiver:
         if prior or self._uncertain_media(turn):
             return SendResult(success=False, error="Original Slack media outcome is retained; no resend", raw_response={"inkbox_no_retry": True})
         delivery = turn["media_deliveries"][fingerprint] = {"state": "sending"}
+        self._execution_started(turn)
         self._save(row)
 
         def checked_upload():
@@ -1151,6 +1171,7 @@ class CompanionReceiver:
 
         task = asyncio.create_task(asyncio.to_thread(checked_upload))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             operation = await asyncio.shield(task)
@@ -1198,7 +1219,8 @@ class CompanionReceiver:
                 raise failure from exc
         if turn.get("delivery"):
             turn["delivery"]["state"] = "sending"
-            self._save(row)
+        self._execution_started(turn)
+        self._save(row)
         def send_checked():
             if row["meta"]["channel"] == "whatsapp":
                 try:
@@ -1214,6 +1236,7 @@ class CompanionReceiver:
             return method(*args, **kwargs)
         task = asyncio.create_task(asyncio.to_thread(send_checked))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             return await asyncio.shield(task)

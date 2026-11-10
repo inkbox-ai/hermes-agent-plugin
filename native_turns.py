@@ -316,6 +316,7 @@ class NativeTurns(CompanionReceiver):
                 self._save(row)
             elif not self.closed and any(turn["state"] in {"pending", "answer_ready"} for turn in row["turns"]):
                 self._kick(row)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(done)
 
     async def _batch(self, row, turn):
@@ -442,7 +443,10 @@ class NativeTurns(CompanionReceiver):
                 row["error"] = f"Native host processing failed ({type(exc).__name__})"
                 # Retry only a proven pre-admission failure. Once accepted,
                 # uncertain execution is never automatically replayed.
-                if not getattr(event, "_gateway_accepted", False) and turn["state"] == "running":
+                from .managed_work import AdmissionRejected
+                if isinstance(exc, AdmissionRejected):
+                    turn.update(state="cancelled", fenced=True, error_code=exc.code, rejected_unix_ms=int(time.time() * 1000))
+                if not isinstance(exc, AdmissionRejected) and not getattr(event, "_gateway_accepted", False) and turn["state"] == "running":
                     turn["state"] = "pending"
                     self._save(row)
                     await asyncio.sleep(self.retry_delay)
@@ -824,6 +828,7 @@ class NativeTurns(CompanionReceiver):
         self._save(row)
         task = asyncio.create_task(asyncio.to_thread(self.checked_imessage_send, row, turn, identity, payload))
         self.outbound.add(task)
+        task.add_done_callback(self._work_completed)
         task.add_done_callback(self.outbound.discard)
         try:
             result = await asyncio.shield(task)
@@ -937,6 +942,7 @@ class NativeTurns(CompanionReceiver):
                 method, args, kwargs = (self.checked_whatsapp_send if route["mode"] == "whatsapp" else self.checked_imessage_send), (row, turn, self.adapter._reply_identity, payload), {}
             task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
             self.outbound.add(task)
+            task.add_done_callback(self._work_completed)
             task.add_done_callback(self.outbound.discard)
             result = await asyncio.shield(task)
             message_id = str(result.id)

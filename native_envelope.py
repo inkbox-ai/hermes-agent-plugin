@@ -289,7 +289,19 @@ async def dispatch(adapter, event):
             # official closed envelope crosses the host admission boundary.
             event.metadata = {}
             event.raw_message = None
-            receipt = await admit_producer(adapter, event)
+            try:
+                receipt = await admit_producer(adapter, event)
+            except Exception as error:
+                from hermes_state_runtime import RuntimeStoreError
+                from .managed_work import AdmissionRejected
+                # Only this native pre-write authorization clause proves no turn
+                # started. A prior receipt or any other exception stays uncertain.
+                if (isinstance(error, RuntimeStoreError) and error.reason == "permission_denied"
+                        and error.field == "user_not_authorized" and not record.get("receipt")):
+                    record["rejection"] = AdmissionRejected.code
+                    slot[2]()
+                    raise AdmissionRejected(AdmissionRejected.code) from error
+                raise
             if receipt is None:
                 raise RuntimeError("Native producer did not commit its input")
             record["receipt"] = {"id": receipt.admission_id, "session_id": receipt.ref.session_id,

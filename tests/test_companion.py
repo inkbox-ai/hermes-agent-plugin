@@ -176,6 +176,38 @@ async def wait_inputs(instance, count):
     raise AssertionError(f"Expected {count} host inputs; received {len(instance.inputs)}")
 
 
+def test_new_submission_and_saved_reply_refresh_execution_proof(factory, monkeypatch):
+    from inkbox_plugin import managed_inbox
+    from inkbox_plugin.managed_lifecycle import status
+    monkeypatch.setattr(managed_inbox, "boot_id", lambda: "new-boot")
+    monkeypatch.setenv("INKBOX_MANAGED_OWNER_ID", "new-owner")
+
+    async def run():
+        instance = factory()
+        receiver = instance.receiver
+        instance.adapter._running = True
+        await receiver.accept(event())
+        await idle(instance)
+        row = next(iter(receiver.rows.values()))
+        turn = row["turns"][0]
+        assert turn["execution_boot_id"] == "new-boot"
+        turn.update(execution_boot_id="old-boot", execution_owner_id="old-owner", state="completed")
+        receiver._save(row)
+        assert turn["execution_boot_id"] == "old-boot"
+        turn["delivery"] = {"state": "pending"}
+        def uncertain_send():
+            assert turn["execution_boot_id"] == "new-boot"
+            assert turn["execution_owner_id"] == "new-owner"
+            raise TimeoutError("unknown send")
+        with pytest.raises(TimeoutError):
+            await receiver.dispatch_reply(row, turn, uncertain_send)
+        turn["delivery"]["state"] = "uncertain"
+        receiver._save(row)
+        assert status(instance.adapter)["unknown"]
+        await receiver.close()
+    asyncio.run(run())
+
+
 def test_native_reply_preflight_retry_preserves_companion_result(factory):
     async def run():
         instance = factory("imessage")
@@ -830,3 +862,83 @@ def test_checkpoint_unicode_and_legacy_windows_encoding(tmp_path, monkeypatch):
     monkeypatch.setattr(companion.locale, "getpreferredencoding", lambda _do_setlocale: "cp1252")
     target.write_bytes('{"text": "café"}'.encode("cp1252"))
     assert companion.read_checkpoint(target) == {"text": "café"}
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_last_companion_task_completion_advances_idle_clock(monkeypatch, native):
+    from inkbox_plugin import companion
+
+    async def scenario():
+        from inkbox_plugin.native_turns import NativeTurns
+        receiver_class = NativeTurns if native else CompanionReceiver
+        receiver = receiver_class.__new__(receiver_class)
+        receiver.closed = False
+        receiver.tasks = {}
+        receiver.last_completed_unix_ms = 1000
+        gates = {key: asyncio.Event() for key in ('first', 'second')}
+
+        async def drain(value):
+            key = value if isinstance(value, str) else value['key']
+            await gates[key].wait()
+
+        receiver._drain = drain
+        for key in gates:
+            receiver._kick({'key': key, 'meta': {'channel': 'phone'}, 'state': 'ordinary', 'turns': []})
+        tasks = dict(receiver.tasks)
+        monkeypatch.setattr(companion.time, 'time', lambda: 2.0)
+        gates['first'].set()
+        await tasks['first']
+        await asyncio.sleep(0)
+        assert receiver.last_completed_unix_ms == 2000
+        assert not tasks['second'].done()
+        monkeypatch.setattr(companion.time, 'time', lambda: 3.0)
+        gates['second'].set()
+        await tasks['second']
+        await asyncio.sleep(0)
+        assert receiver.last_completed_unix_ms == 3000
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_tracked_delivery_failure_is_diagnostic_in_both_ingress_paths(factory, monkeypatch, tmp_path, managed):
+    from inkbox_plugin import adapter as adapter_module
+    from inkbox_plugin.managed_ingress import ManagedIngress
+    async def run():
+        instance = factory()
+        await instance.receiver.accept(event())
+        await idle(instance)
+        baseline = len(instance.inputs)
+        failure = {"event_type": "message.failed", "data": {"message": {
+            "id": uid(800), "thread_id": uid(30), "direction": "outbound"}}}
+        instance.adapter._on_mail_delivery_failure = AsyncMock(side_effect=AssertionError("Must not start recovery"))
+        ingress = None
+        try:
+            if managed:
+                monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'managed-home'))
+                instance.adapter._base_url = 'https://api.example.test'
+                activation = uid(700)
+                failure['id'] = 'evt_' + 'a' * 64
+                failure['hosted_delivery'] = {'version': 1, 'activation_id': activation,
+                    'event_id': failure['id'], 'starts_agent': True}
+                ingress = ManagedIngress(instance.adapter, activation)
+                ingress.inbox.accept(failure)
+                ingress.start()
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                assert ingress.inbox.accept(failure)['state'] == 'completed'
+            else:
+                provider = types.SimpleNamespace(name='inkbox', verify=Mock(return_value=True))
+                monkeypatch.setattr(adapter_module, 'match_provider', lambda _: provider)
+                request = types.SimpleNamespace(read=AsyncMock(return_value=json.dumps(failure).encode()),
+                    headers={}, url='https://example.test/webhook')
+                assert (await instance.adapter._handle_webhook(request)).text == 'Companion delivery failure recorded'
+            row = next(iter(instance.receiver.rows.values()))
+            assert row['delivery_failures'][uid(800)]['event_type'] == 'message.failed'
+            assert len(instance.inputs) == baseline
+            instance.adapter._on_mail_delivery_failure.assert_not_awaited()
+        finally:
+            if ingress:
+                await ingress.close()
+            await instance.receiver.close()
+    asyncio.run(run())
