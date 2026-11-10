@@ -28,6 +28,7 @@ class NativeChatTests(unittest.IsolatedAsyncioTestCase):
             body = await request.json()
             self.assertTrue(body["session_id"].startswith("session_"))
             self.assertEqual(body["model"], "gpt-6.1-sol")
+            self.assertEqual(body["computers_tool_policy"], "ask")
             response = web.StreamResponse(headers={"Content-Type": "application/json"})
             await response.prepare(request)
             await response.write(b'{"run_id":')
@@ -163,3 +164,43 @@ def test_stream_failure_cleanup_cannot_cancel_the_next_turn(tmp_path):
             finally:
                 await runtime.close()
     asyncio.run(scenario())
+
+
+class BrowserToolPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ask_yolo_ask_is_sent_per_admission_on_same_session(self):
+        received = []
+
+        async def start(request):
+            body = await request.json()
+            received.append((body, request.headers["Idempotency-Key"]))
+            return web.json_response({"run_id": str(len(received))})
+
+        async def events(request):
+            return web.Response(text='data: {"event":"run.completed","output":"done"}\n\n',
+                                content_type="text/event-stream")
+
+        app = web.Application()
+        app.router.add_post("/v1/runs", start)
+        app.router.add_get("/v1/runs/{run}/events", events)
+        async with TestServer(app) as server:
+            adapter = ChatAdapter(str(server.make_url('')).rstrip('/'), "synthetic-local-key")
+            session = str(uuid4())
+            runs = [str(uuid4()) for _ in range(3)]
+            before = dict(os.environ)
+            for run, options in zip(runs, [{}, {"tool_policy": "yolo"}, {"tool_policy": "ask"}]):
+                result = await adapter.run({"session_id": session, "run_id": run, "prompt": "Example",
+                                            "options": options}, lambda *_: None, None)
+                self.assertEqual(result["text"], "done")
+            self.assertEqual([body["computers_tool_policy"] for body, _ in received], ["ask", "yolo", "ask"])
+            self.assertEqual([key for _, key in received], runs)
+            self.assertEqual(len({body["session_id"] for body, _ in received}), 1)
+            self.assertEqual(dict(os.environ), before)
+
+    async def test_invalid_policy_never_submits_a_run(self):
+        from unittest.mock import AsyncMock
+        adapter = ChatAdapter("http://127.0.0.1:1", "synthetic-local-key")
+        adapter.request = AsyncMock()
+        with self.assertRaisesRegex(ValueError, "Invalid browser tool policy"):
+            await adapter.run({"session_id": str(uuid4()), "run_id": str(uuid4()), "prompt": "Example",
+                               "options": {"tool_policy": "always"}}, lambda *_: None, None)
+        adapter.request.assert_not_awaited()

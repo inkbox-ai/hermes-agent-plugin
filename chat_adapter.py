@@ -55,14 +55,18 @@ class ChatAdapter:
             return {"text": "", "cancelled": True, "session_id": native_session}
         from .managed_chat import file_instruction, safe_text, failure_code
 
+        tool_policy = (spec.get("options") or {}).get("tool_policy", "ask")
+        if tool_policy not in ("ask", "yolo"):
+            raise ValueError("Invalid browser tool policy")
         self.last_runs.pop(session, None)
-        # This adapter is browser-only. Hosted incoming/scheduled approval
-        # policy belongs to the native owner; browser requests must still
-        # suspend and use ask() below, never inherit a global autoapproval.
+        # The managed owner persists this policy with the FIFO admission and
+        # restores it in the execution context. Never toggle shared session or
+        # process state: the next browser turn may require Ask again.
         accepted = await self.request(
             "POST",
             "/v1/runs",
             {"input": spec["prompt"] + file_instruction(spec["run_id"]), "session_id": native_session,
+             "computers_tool_policy": tool_policy,
              **({"model": spec["model"]} if spec.get("model") else {})},
             {"Idempotency-Key": spec["run_id"]},
         )
