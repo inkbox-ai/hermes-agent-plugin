@@ -56,6 +56,9 @@ class ChatAdapter:
         from .managed_chat import file_instruction, safe_text, failure_code
 
         self.last_runs.pop(session, None)
+        # This adapter is browser-only. Hosted incoming/scheduled approval
+        # policy belongs to the native owner; browser requests must still
+        # suspend and use ask() below, never inherit a global autoapproval.
         accepted = await self.request(
             "POST",
             "/v1/runs",

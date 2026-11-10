@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+from unittest.mock import patch
 import unittest
 from uuid import uuid4
 
@@ -9,6 +11,12 @@ from inkbox_plugin.chat_adapter import ChatAdapter
 
 
 class NativeChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hosted_browser_ask_still_uses_native_approval(self):
+        # A hosted launcher may autoapprove non-chat work. Browser Ask remains
+        # an explicit suspended request answered through the chat runtime.
+        with patch.dict(os.environ, {"INKBOX_HOSTED_ACTIVATION_ID": "synthetic-activation"}):
+            await self.test_questions_and_approvals_use_the_suspended_native_request()
+
     async def test_questions_and_approvals_use_the_suspended_native_request(self):
         received = []
         run_id = str(uuid4())
