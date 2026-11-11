@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.29
+
+- Make subprocess-based inbox tests independent of the caller's working directory.
+
 ## 0.2.28
 
 - Report durable managed message and chat completion timestamps so supervisors can count inactivity after work finishes. Status reads do not extend the idle window.
