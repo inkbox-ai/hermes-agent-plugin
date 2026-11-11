@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,16 @@ HOST_SYMBOLS = {
     "gateway.session": ["build_session_key"],
     "hermes_cli.config": ["save_env_value", "get_env_value", "load_config"],
 }
+
+
+def test_plugin_has_no_deprecated_host_imports():
+    """Lazy fallback imports can disable the entire plugin before registration."""
+    from hermes_cli.plugin_compat import scan_plugin
+
+    hits = scan_plugin(Path(__file__).resolve().parents[2])
+    assert not hits, "Hermes rejects these plugin imports:\n" + "\n".join(
+        f"{hit.file}:{hit.line}: {hit.old} -> {hit.new}" for hit in hits
+    )
 
 
 @pytest.mark.parametrize("module, names", list(HOST_SYMBOLS.items()))
