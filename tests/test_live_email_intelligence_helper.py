@@ -154,3 +154,11 @@ def test_ask_bounds_history_without_losing_pages_or_baseline_exclusions(monkeypa
     assert transport.pages == [(False, 0), (False, 50), (False, 100),
                                (True, 0), (True, 50), (True, 100),
                                (True, 0), (True, 50), (True, 100)]
+
+
+def test_reported_phone_requires_all_digits_not_a_mask_or_last_four():
+    module = _live_email_module()
+    assert module._phone_present("+15551112222", "Phone: +1 (555) 111-2222")
+    assert not module._phone_present("+15551112222", "Phone: +155****2222")
+    assert not module._phone_present("+15551112222", "Phone: 2222")
+    assert not module._phone_present("", "No phone")

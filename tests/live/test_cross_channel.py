@@ -240,8 +240,7 @@ def test_email_request_gets_call(xc):
     remote.messages.send(
         xc["remote_email"], to=[xc["aut_email"]], subject="please call me",
         body_text=(
-            "Please place a phone call to my number now with "
-            "voicemail_detection disabled — I'd rather talk than type."
+            "Please call my phone now — I'd rather talk than type."
         ),
     )
     _driver_call, aut_call = _wait_for_new_call_pair(
@@ -274,9 +273,7 @@ def test_sms_request_gets_call(xc):
         remote_pid,
         to=aut_phone,
         text=(
-            "Use your Inkbox phone capability to place a call to me now with "
-            "voicemail_detection disabled. Do not reply by SMS; this is complete "
-            f"only after inkbox_place_call places the call. (ref {_token()})"
+            f"Please call me now. Do not reply by SMS. (ref {_token()})"
         ),
     )
     _driver_call, aut_call = _wait_for_new_call_pair(
