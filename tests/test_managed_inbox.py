@@ -3,6 +3,7 @@ import time as time_module
 import os
 import subprocess
 import sys
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -10,7 +11,8 @@ import pytest
 from inkbox_plugin.managed_inbox import InboxError, InboxFull, ManagedInbox
 
 
-def test_import_does_not_require_posix_locking():
+def test_import_does_not_require_posix_locking(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     code = '''import builtins
 original = builtins.__import__
 def portable_import(name, *args, **kwargs):
@@ -20,7 +22,7 @@ def portable_import(name, *args, **kwargs):
 builtins.__import__ = portable_import
 import managed_inbox
 '''
-    subprocess.run([sys.executable, '-c', code], check=True)
+    subprocess.run([sys.executable, '-c', code], check=True, cwd=Path(__file__).resolve().parents[1])
 
 
 def event(activation, number=1):
@@ -29,7 +31,8 @@ def event(activation, number=1):
             'hosted_delivery': {'version': 1, 'activation_id': activation, 'event_id': event_id, 'starts_agent': True}}
 
 
-def test_accept_survives_process_death_and_unstarted_work_can_run(tmp_path):
+def test_accept_survives_process_death_and_unstarted_work_can_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     path, activation = tmp_path / 'inbox' / 'events.sqlite3', str(uuid4())
     code = '''from pathlib import Path
 import json,os,sys
@@ -38,7 +41,10 @@ inbox=ManagedInbox(Path(sys.argv[1]),sys.argv[2])
 inbox.accept(json.loads(sys.argv[3]))
 os._exit(0)
 '''
-    subprocess.run([sys.executable, '-c', code, str(path), activation, json.dumps(event(activation))], check=True)
+    subprocess.run(
+        [sys.executable, '-c', code, str(path), activation, json.dumps(event(activation))],
+        check=True, cwd=Path(__file__).resolve().parents[1],
+    )
     inbox = ManagedInbox(path, activation)
     try:
         assert inbox.summary() == {'pending': 1, 'active': 0, 'unknown': 0, 'review_required': 0}
