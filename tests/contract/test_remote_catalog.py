@@ -26,6 +26,7 @@ def test_catalog_changes_native_approval_and_source_lifetime(tmp_path, monkeypat
     monkeypatch.setattr(model_tools, "registry", registry)
     monkeypatch.setattr(remote_tools, "inkbox_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(capabilities, "refresh_host_tools", lambda **kwargs: {})
+    monkeypatch.setattr(remote_tools.time, "monotonic", lambda: 10.0)
     manager = plugins.PluginManager()
     ctx = plugins.PluginContext(PluginManifest(name="inkbox", description="Synthetic", version="1", path=tmp_path), manager)
     owner = RemoteTools(ctx)

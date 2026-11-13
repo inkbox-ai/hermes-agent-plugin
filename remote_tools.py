@@ -114,7 +114,7 @@ class RemoteTools:
             if len(self.turns) >= 512:
                 return {"context": "Inkbox remote tools are unavailable until active turns finish."}
             warning = None
-            if time.monotonic() - self.refreshed_at >= 300:
+            if not self.refreshed_at or time.monotonic() - self.refreshed_at >= 300:
                 try:
                     self.publish(*asyncio.run(self.discover()))
                 except Exception:
