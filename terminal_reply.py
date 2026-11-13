@@ -116,26 +116,30 @@ async def send(remote, client, identity_handle, bound, arguments, journal_path, 
                 journal.reject(identifier, operation)
             return result
         receipt = result.get("structuredContent")
-        if (
-            not isinstance(receipt, dict)
-            or not isinstance(receipt.get("id"), str)
-            or receipt.get("direction") != "outbound"
-            or receipt.get("is_blocked") is True
-        ):
+        if not isinstance(receipt, dict):
             raise RemoteToolError("The reply outcome is unconfirmed; retain the original operation")
         if bound["channel"] == "email":
+            accepted_id = receipt.get("id")
+            accepted = receipt.get("direction") == "outbound" and receipt.get("is_blocked") is not True
             same = all(
                 {str(value).lower() for value in receipt.get(field) or []}
                 == {str(value).lower() for value in payload["approved_recipients"][bucket]}
                 for field, bucket in (("to_addresses", "to"), ("cc_addresses", "cc"))
             )
         else:
-            actual = [item.get("recipient_phone_number") for item in receipt.get("recipients") or []]
-            actual = actual or [receipt.get("remote_phone_number")]
-            same = set(actual) == set(payload["to"])
+            accepted_id = receipt.get("message_id")
+            accepted = receipt.get("delivery_status") in {"queued", "sent", "delivered"} and not receipt.get("error")
+            actual = receipt.get("recipients")
+            same = (
+                isinstance(actual, list)
+                and all(isinstance(value, str) for value in actual)
+                and set(actual) == set(payload["to"])
+            )
+        if not accepted or not isinstance(accepted_id, str) or not accepted_id:
+            raise RemoteToolError("The reply outcome is unconfirmed; retain the original operation")
         if not same:
             raise RemoteToolError("The reply receipt does not confirm the original destination")
-        journal.accept(identifier, operation, receipt["id"])
+        journal.accept(identifier, operation, accepted_id)
         return result
     except BaseException:
         current = journal.lookup(identifier)
