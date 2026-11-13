@@ -199,10 +199,10 @@ def test_registers_inkbox_platform_tools_commands_and_skills():
     assert ctx.cli_commands[0]["name"] == "inkbox"
     assert ctx.commands[0][0][0] == "inkbox"
     assert {args[0] for args, _kwargs in ctx.skills}
-    assert ctx.hooks[0][0][0] == "pre_llm_call"
-    assert ctx.hooks[1][0][0] == "pre_tool_call"
-    assert ctx.hooks[2][0][0] == "pre_tool_call"
-    assert ctx.hooks[3][0][0] == "post_tool_call"
+    assert [args[0] for args, _kwargs in ctx.hooks] == [
+        "pre_llm_call", "pre_llm_call", "post_llm_call", "pre_tool_call",
+        "pre_tool_call", "pre_tool_call", "post_tool_call",
+    ]
 
 
 def test_env_enablement_warns_once_when_plugin_is_unconfigured(monkeypatch, caplog):

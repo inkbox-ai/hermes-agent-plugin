@@ -1,11 +1,32 @@
 """CI cannot bypass native admission or assume a legacy dependency directory."""
 from pathlib import Path
+import json
+from types import SimpleNamespace
 
 import pytest
 
 from tests.ci.hermes_python import native_command
+from tests.ci import check_hermes_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize('source, expected', [
+    (None, 'inkbox==0.1.0'),
+    ({'url': 'https://example.test/sdk.git', 'vcs_info': {'vcs': 'git', 'commit_id': 'a' * 40},
+      'subdirectory': 'sdk/python'}, 'inkbox @ git+https://example.test/sdk.git@' + 'a' * 40 + '#subdirectory=sdk/python'),
+])
+def test_independent_runner_reproduces_admitted_sdk_source(monkeypatch, source, expected):
+    package = SimpleNamespace(version='0.1.0', read_text=lambda name: json.dumps(source) if source else None)
+    monkeypatch.setattr(check_hermes_runtime, 'distribution', lambda name: package)
+    assert check_hermes_runtime.admitted_sdk_requirement() == expected
+
+
+def test_independent_runner_rejects_unreproducible_local_install(monkeypatch):
+    package = SimpleNamespace(version='0.1.0', read_text=lambda name: '{"url":"file:///tmp/sdk"}')
+    monkeypatch.setattr(check_hermes_runtime, 'distribution', lambda name: package)
+    with pytest.raises(RuntimeError, match='not reproducible'):
+        check_hermes_runtime.admitted_sdk_requirement()
 
 
 @pytest.mark.parametrize('args', [[], ['-m']])

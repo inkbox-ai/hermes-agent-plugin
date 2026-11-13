@@ -2106,27 +2106,6 @@ def _inkbox_tunnel_state_dir() -> "Path":
     return Path(get_hermes_home()) / "inkbox_tunnel"
 
 
-def _wipe_inkbox_tunnel_state(state_dir: "Path") -> None:
-    """Remove the three SDK-owned files inside ``state_dir``.
-
-    Called on every connect so a stale ``tunnel_id`` referencing a tunnel
-    that's been removed server-side can never block the next start. The
-    directory itself is left in place; the SDK recreates contents during
-    ``connect()``.
-    """
-    for name in ("state.json", "private_key.pem", "cert_chain.pem"):
-        path = state_dir / name
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            logger.debug(
-                "[Inkbox] Couldn't remove stale tunnel state file %s: %s",
-                path, exc,
-            )
-
-
 def _slugify_for_tunnel(handle: str) -> str:
     """Convert an agent handle into a valid tunnel-name slug.
 
@@ -2196,6 +2175,10 @@ class InkboxAdapter(BasePlatformAdapter):
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
             async with delivery_scope(self, event):
+                from .terminal_reply import adapter_blocked
+                route = (getattr(event, "metadata", None) or {}).get("inkbox_reply_route") or {}
+                if adapter_blocked(self, route):
+                    return
                 return await super()._send_final_text(event, *args, **kwargs)
         finally:
             _host_final_reply.reset(token)
@@ -2750,25 +2733,7 @@ class InkboxAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _provision_inkbox_tunnel(self) -> bool:
-        """Open an SDK-managed tunnel to inkboxwire.com.
-
-        ``inkbox.tunnels.client.connect`` only does the control-plane
-        registration; the runtime thread that actually opens the h2 data
-        plane is started lazily inside ``listener.wait()``. We don't want
-        to block the gateway event loop on ``wait()``, so we spawn a small
-        background thread to drive it — which gives us a live data plane
-        plus a place to log any runtime error the listener captures.
-
-        Data-plane auth uses the SDK client's ``x-api-key`` (admin-scoped
-        or scoped to this tunnel's owning identity), so there is no
-        connect_secret to mint, rotate, or persist on this side.
-
-        SDK-managed state (state.json, private_key.pem, cert_chain.pem)
-        lives in a dedicated subdir of HERMES_HOME so its generic filenames
-        don't collide with Hermes' own state files. We wipe that subdir on
-        every connect so a stale ``tunnel_id`` referencing a tunnel that's
-        been removed server-side can never put us in a TunnelRemoved loop.
-        """
+        """Reuse verified tunnel state and start its listener."""
         import threading
         from inkbox.tunnels.exceptions import TunnelNotProvisioned
 
@@ -2780,15 +2745,12 @@ class InkboxAdapter(BasePlatformAdapter):
         forward_to = f"http://127.0.0.1:{self._port}"
         state_dir = _inkbox_tunnel_state_dir()
 
-        _wipe_inkbox_tunnel_state(state_dir)
-
         try:
             install_tunnel_tls_compatibility()
-            # ``connect`` is sync (does an HTTPS round-trip + opens the data
-            # plane); offload to a thread so the gateway event loop isn't
-            # blocked. The returned listener owns its own supervisor threads.
-            self._tunnel = await asyncio.to_thread(
-                inkbox_tunnel_connect,
+            from .tunnel_bootstrap import connect_tunnel
+
+            self._tunnel = await connect_tunnel(
+                self, inkbox_tunnel_connect,
                 self._inkbox,
                 name=tunnel_name,
                 forward_to=forward_to,
@@ -9933,7 +9895,8 @@ class InkboxAdapter(BasePlatformAdapter):
                  "message_id": str(event.message_id or ""), "thread_id": event.source.thread_id,
                  "conversation_id": str(item.get("conversation_id") or item.get("conversationId") or ""),
                  "remote_phone_number": author, "remote_number": author, "to": author,
-                 "stored_message_id": str(item.get("id") or "") if channel == "email" else ""}
+                 "stored_message_id": str(item.get("id") or "") if channel == "email" else "",
+                 "conversation_kind": "group" if event.source.chat_type == "group" else "direct"}
         journal = self._conversation_state()
         key = str(event.source.chat_id)
         journal.row(key)["chat_type"] = event.source.chat_type

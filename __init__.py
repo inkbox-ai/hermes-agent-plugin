@@ -267,6 +267,8 @@ def register(ctx) -> None:
         activate_next_hosted_turn_context(str(session_id))
 
     ctx.register_hook("pre_llm_call", _activate_trusted_turn_contexts)
+    from .remote_tools import register as register_remote_tools
+    register_remote_tools(ctx)
     ctx.register_hook("pre_tool_call", observe_hosted_tool_start)
     ctx.register_hook("pre_tool_call", observe_a2a_tool_start)
     ctx.register_hook("post_tool_call", observe_hosted_tool_call)
