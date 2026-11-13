@@ -57,7 +57,7 @@ jobs:
       - name: Install compatible WhatsApp SDK and test dependencies
         run: |
           uv venv --python 3.12
-          uv pip install 'inkbox @ git+https://github.com/inkbox-ai/inkbox.git@64bbc6d76c03dd970a14004777f7c6505226d101#subdirectory=sdk/python' 'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8'
+          uv pip install 'inkbox @ git+https://github.com/inkbox-ai/inkbox.git@5ebde74b33bd560e9c9818f675ff0c5c6f1cb962#subdirectory=sdk/python' 'aiohttp>=3.9' 'segno>=1.5' 'pytest>=8'
       - name: Verify group contracts and native delivery lifecycle
         run: .venv/bin/python -m pytest -q tests/test_whatsapp_groups.py tests/test_whatsapp_companion_parity.py tests/test_whatsapp.py tests/test_companion.py
 
