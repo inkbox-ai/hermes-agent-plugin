@@ -2175,6 +2175,10 @@ class InkboxAdapter(BasePlatformAdapter):
         token = _host_final_reply.set((str(event.source.chat_id), str(event.message_id)))
         try:
             async with delivery_scope(self, event):
+                from .terminal_reply import adapter_blocked
+                route = (getattr(event, "metadata", None) or {}).get("inkbox_reply_route") or {}
+                if adapter_blocked(self, route):
+                    return
                 return await super()._send_final_text(event, *args, **kwargs)
         finally:
             _host_final_reply.reset(token)
@@ -9891,7 +9895,8 @@ class InkboxAdapter(BasePlatformAdapter):
                  "message_id": str(event.message_id or ""), "thread_id": event.source.thread_id,
                  "conversation_id": str(item.get("conversation_id") or item.get("conversationId") or ""),
                  "remote_phone_number": author, "remote_number": author, "to": author,
-                 "stored_message_id": str(item.get("id") or "") if channel == "email" else ""}
+                 "stored_message_id": str(item.get("id") or "") if channel == "email" else "",
+                 "conversation_kind": "group" if event.source.chat_type == "group" else "direct"}
         journal = self._conversation_state()
         key = str(event.source.chat_id)
         journal.row(key)["chat_type"] = event.source.chat_type

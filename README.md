@@ -801,3 +801,5 @@ local allowlist:
 ```bash
 INKBOX_ALLOW_ALL_USERS=true
 ```
+
+See [Remote Inkbox tools](REMOTE_TOOLS.md) for discovery, permissions, retained local capabilities and retry behavior.
