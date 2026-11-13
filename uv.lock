@@ -541,7 +541,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.29"
+version = "0.2.30"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -560,7 +560,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
-    { name = "inkbox", specifier = ">=0.7.29,<1.0.0" },
+    { name = "inkbox", git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=c35cb8334412e63fb329470acccf264429d337ca" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -633,8 +633,8 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.7.29"
-source = { registry = "https://pypi.org/simple" }
+version = "0.7.38"
+source = { git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=c35cb8334412e63fb329470acccf264429d337ca#c35cb8334412e63fb329470acccf264429d337ca" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "certifi" },
@@ -642,10 +642,6 @@ dependencies = [
     { name = "h11" },
     { name = "h2" },
     { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/5a/35a7a0da949d71089b9739490fc2746a05772b7f6c480d842ca520da4284/inkbox-0.7.29.tar.gz", hash = "sha256:1625f782369eb0b2bb70348dea2597f0944b23842368452d1712b9e68c13d4bf", size = 537032, upload-time = "2026-11-07T07:44:08.01Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/d1/d57ce9178ff93a04ee13e9773d9bb0ee2459bf9e2a2efdb573bc9c91771c/inkbox-0.7.29-py3-none-any.whl", hash = "sha256:d1f469186ea98a098e624df55163ad84fdc4f8b0ecabe8500a383486e3c8f079", size = 344308, upload-time = "2026-11-07T07:44:06.463Z" },
 ]
 
 [[package]]

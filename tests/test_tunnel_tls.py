@@ -116,6 +116,11 @@ def test_gateway_supports_native_verifier_before_connecting_tunnel(monkeypatch, 
     gateway._tunnel_name_override = ''
     gateway._port = 8765
     gateway._inkbox = object()
+    state_dir = tmp_path / 'tunnel'
+    state_dir.mkdir()
+    saved = {'state.json': b'{"name":"local-fixture"}', 'private_key.pem': b'key', 'cert_chain.pem': b'certificate'}
+    for name, value in saved.items():
+        (state_dir / name).write_bytes(value)
     monkeypatch.setattr(adapter_module, '_inkbox_tunnel_state_dir', lambda: tmp_path / 'tunnel')
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(context, 'cert_store_stats', Mock(side_effect=NotImplementedError))
@@ -123,6 +128,7 @@ def test_gateway_supports_native_verifier_before_connecting_tunnel(monkeypatch, 
     calls = []
     def connect(client, **kwargs):
         assert client is gateway._inkbox
+        assert {name: (state_dir / name).read_bytes() for name in saved} == saved
         assert _runtime.create_default_verify_context() is context
         assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
         calls.append(kwargs)
