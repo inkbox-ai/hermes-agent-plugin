@@ -261,14 +261,22 @@ def register(ctx) -> None:
             "adapter speaks the response over the active call."
         ),
     )
-    register_tools(ctx)
+    mode = os.getenv("INKBOX_TOOL_MODE", "plugin").strip()
+    if mode not in {"plugin", "native_mcp"}:
+        raise ValueError("INKBOX_TOOL_MODE must be plugin or native_mcp")
+    if mode == "native_mcp":
+        from .tools import NativeMcpHelpers
+        register_tools(NativeMcpHelpers(ctx))
+    else:
+        register_tools(ctx)
     def _activate_trusted_turn_contexts(session_id="", **_kwargs):
         activate_next_a2a_turn_context(str(session_id))
         activate_next_hosted_turn_context(str(session_id))
 
     ctx.register_hook("pre_llm_call", _activate_trusted_turn_contexts)
-    from .remote_tools import register as register_remote_tools
-    register_remote_tools(ctx)
+    if mode == "plugin":
+        from .remote_tools import register as register_remote_tools
+        register_remote_tools(ctx)
     ctx.register_hook("pre_tool_call", observe_hosted_tool_start)
     ctx.register_hook("pre_tool_call", observe_a2a_tool_start)
     ctx.register_hook("post_tool_call", observe_hosted_tool_call)

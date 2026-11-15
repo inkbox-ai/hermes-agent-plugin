@@ -803,3 +803,9 @@ INKBOX_ALLOW_ALL_USERS=true
 ```
 
 See [Remote Inkbox tools](REMOTE_TOOLS.md) for discovery, permissions, retained local capabilities and retry behavior.
+
+### Host-managed MCP tools
+
+Set `INKBOX_TOOL_MODE=native_mcp` before loading the plugin when your host integration owns the regular communications MCP catalog. This suppresses both the plugin's remote connector and overlapping SDK tool registrations. The default, `plugin`, preserves existing registration.
+
+Native mode retains the inbound adapter, voice calling, local media upload/download helpers, Vault tools, and inbound A2A completion helpers. The host integration must configure its MCP server and provide the terminal reply helper with durable receipt tracking. Setting this option alone does not configure a replacement tool connection. Keep the existing reply journals when switching modes or restarting.

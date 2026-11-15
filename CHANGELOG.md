@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.33
+
+- Allow host-managed MCP registration while retaining local voice, media, Vault, and inbound-task helpers.
+- Read durable reply receipts without constructing a remote tool client.
+
+## 0.2.32
+
+- Retry incomplete live-test call cleanup and verify calls have ended between tests.
+
 ## 0.2.31
 
 - Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.

@@ -99,7 +99,7 @@ def _hang_up_owned_call(client, call) -> str | None:
 
 
 def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
-    """Hang up and verify every call created by this pytest session."""
+    """Hang up and verify every call created by this live test."""
     deadline = time.monotonic() + 12
     last_errors: dict[str, str] = {}
     while True:
@@ -124,9 +124,9 @@ def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
         time.sleep(0.5)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _clean_up_calls_created_by_live_session():
-    """Own all calls created by this live process and never leak a carrier leg.
+@pytest.fixture(autouse=True)
+def _clean_up_calls_created_by_live_test():
+    """Own all calls created by this live test and never leak a carrier leg.
 
     Non-voice suites run a watchdog because a model can unexpectedly choose the
     phone tool while answering an SMS/email test. Voice tests own their expected
@@ -147,7 +147,6 @@ def _clean_up_calls_created_by_live_session():
     stop = threading.Event()
 
     def watchdog() -> None:
-        attempted: set[str] = set()
         while not stop.wait(1):
             try:
                 current = _owned_calls(watch_client, local_phone)
@@ -156,11 +155,9 @@ def _clean_up_calls_created_by_live_session():
             for call_id, call in current.items():
                 if (
                     call_id in baseline
-                    or call_id in attempted
                     or _call_status(call) in _ENDED_CALL_STATUSES
                 ):
                     continue
-                attempted.add(call_id)
                 _hang_up_owned_call(watch_client, call)
 
     watcher = None

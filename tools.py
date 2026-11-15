@@ -2277,6 +2277,25 @@ A2A_GET_SENT_TASK_SCHEMA = {
 }
 
 
+class NativeMcpHelpers:
+    """Keep local capabilities when the host owns the communications catalog."""
+
+    names = frozenset({
+        "inkbox_refresh_capabilities", "inkbox_place_call", "inkbox_download_email_attachment",
+        "inkbox_list_vault_secrets", "inkbox_get_vault_secret", "inkbox_get_totp_code",
+        "inkbox_a2a_reply", "inkbox_a2a_complete", "inkbox_a2a_ask_caller", "inkbox_a2a_fail",
+        "inkbox_upload_whatsapp_media", "inkbox_slack_download_file_preview", "inkbox_slack_upload_file",
+    })
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def register_tool(self, name, *args, **kwargs):
+        if name in self.names:
+            return self.ctx.register_tool(name, *args, **kwargs)
+        return None
+
+
 def register_tools(ctx) -> None:
     from .capabilities import check, REFRESH_SCHEMA, refresh_tool
     ctx.register_tool("inkbox_refresh_capabilities", "inkbox", REFRESH_SCHEMA, refresh_tool, check_fn=_configured)

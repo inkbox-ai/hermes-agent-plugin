@@ -271,3 +271,23 @@ def test_optional_tools_follow_yaml_after_registration_and_disabled_dispatch_sta
     assert not registered[names[1]][1]()
     assert "disabled" in json.loads(registered[names[1]][0]({"message_id": "synthetic-source"}))["error"]
     entry.set_runtime_config_extra({})
+
+
+def test_native_mcp_mode_retains_local_helpers_without_remote_connector(monkeypatch):
+    monkeypatch.setenv("INKBOX_TOOL_MODE", "native_mcp")
+    module = _load_entry_module()
+    ctx = DummyContext()
+    module.register(ctx)
+    names = {args[0] for args, _ in ctx.tools}
+    assert {"inkbox_place_call", "inkbox_download_email_attachment", "inkbox_get_vault_secret",
+            "inkbox_a2a_reply", "inkbox_slack_download_file_preview"} <= names
+    assert not {"inkbox_send_email", "inkbox_send_sms", "inkbox_create_contact", "inkbox_list_emails"} & names
+    assert len(ctx.platforms) == 1
+    assert all(getattr(hook[1], "__self__", None).__class__.__name__ != "RemoteTools" for hook, _ in ctx.hooks)
+
+
+def test_invalid_tool_mode_fails_registration(monkeypatch):
+    import pytest
+    monkeypatch.setenv("INKBOX_TOOL_MODE", "unknown")
+    with pytest.raises(ValueError, match="INKBOX_TOOL_MODE"):
+        _load_entry_module().register(DummyContext())
