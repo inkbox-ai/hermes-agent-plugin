@@ -35,4 +35,4 @@ testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
 
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "aefaec5a500bd89275f754ac2a4df16c9a8a6146", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "b465550e4563ae3b75443ab44d269d15a6238132", subdirectory = "sdk/python" }

@@ -25,7 +25,7 @@ def test_contact_alias_uses_public_arguments_and_durable_continuation(tmp_path, 
         async def request(method, params):
             requests.append(params)
             if "requestState" not in params:
-                return {"resultType": "input_required", "requestState": "prepared"}
+                return {"resultType": "input_required", "requestState": "prepared", "inputRequests": {}}
             return {"content": [], "structuredContent": {"id": "contact"}}
 
         remote.request = request
@@ -58,7 +58,7 @@ def test_terminal_reply_validates_public_schema_and_recovers_lost_response(tmp_p
         async def request(method, params):
             requests.append(params)
             if "requestState" not in params:
-                return {"resultType": "input_required", "requestState": "prepared"}
+                return {"resultType": "input_required", "requestState": "prepared", "inputRequests": {}}
             if len(requests) == 2:
                 raise RemoteToolError("Synthetic lost response")
             receipt = ({"id": "accepted", "direction": "outbound", "to_addresses": ["sender@example.com"], "cc_addresses": []}
