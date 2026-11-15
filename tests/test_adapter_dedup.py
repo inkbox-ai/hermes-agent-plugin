@@ -81,3 +81,40 @@ def test_request_id_rolls_back_after_dispatch_failure(monkeypatch):
         asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED)))
 
     assert calls["count"] == 2
+
+
+@pytest.mark.parametrize("fails_first", [False, True])
+def test_event_replay_with_new_request_id(monkeypatch, fails_first):
+    adapter = _adapter()
+    calls = []
+
+    async def receive(envelope):
+        calls.append(envelope["id"])
+        if fails_first and len(calls) == 1:
+            raise RuntimeError("retry")
+        return types.SimpleNamespace(text="ok")
+
+    monkeypatch.setattr(adapter, "_on_mail_received", receive)
+    body = b'{"id":"evt-mail","event_type":"message.received","data":{"message":{"id":"mail-1"}}}'
+    if fails_first:
+        with pytest.raises(RuntimeError):
+            asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id="failed")))
+    asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id="original")))
+    replay = asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id="replay")))
+    assert replay.text == "duplicate"
+    assert len(calls) == (2 if fails_first else 1)
+
+
+def test_external_object_id_does_not_deduplicate_distinct_deliveries(monkeypatch):
+    adapter = _adapter()
+    calls = []
+
+    async def receive(envelope, request_id, **kwargs):
+        calls.append(request_id)
+        return types.SimpleNamespace(text="ok")
+
+    monkeypatch.setattr(adapter, "_on_external_event", receive)
+    body = b'{"id":"object-1","event_type":"external.updated"}'
+    for request_id in ["update-1", "update-2"]:
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id=request_id)))
+    assert calls == ["update-1", "update-2"]

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.31
+
+- Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.
+
+## 0.2.30
+
+- Reuse valid tunnel certificates across reconnects and renew mismatched or expired state with Inkbox SDK 0.7.38 or newer.
+- Bound tunnel startup and reconcile cancelled attempts before reconnecting, including late listener cleanup.
+
 ## 0.2.29
 
 - Make subprocess-based inbox tests independent of the caller's working directory.

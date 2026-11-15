@@ -645,6 +645,9 @@ class NativeTurns(CompanionReceiver):
                 turn["rendered"] = rendered
                 self._save(row)
         text = rendered["text_content"] if rendered else turn["answer"]
+        from .terminal_reply import adapter_blocked
+        if adapter_blocked(self.adapter, turn["route"]):
+            text = ""
         token = reply_route.set(turn["route"])
         try:
             if text:

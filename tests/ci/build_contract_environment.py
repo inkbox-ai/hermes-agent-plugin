@@ -35,8 +35,14 @@ def main() -> None:
     requirements = [line.strip() for line in export.read_text(encoding="utf-8").splitlines()
                     if line.strip() and not line.lstrip().startswith("#")]
     plugin = Path(__file__).resolve().parents[2]
-    project = tomllib.loads((plugin / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    requirements.extend(project["dependencies"])
+    manifest = tomllib.loads((plugin / "pyproject.toml").read_text(encoding="utf-8"))
+    project = manifest["project"]
+    sources = manifest.get("tool", {}).get("uv", {}).get("sources", {})
+    for dependency in project["dependencies"]:
+        if dependency.startswith("inkbox") and "inkbox" in sources:
+            source = sources["inkbox"]
+            dependency = f"inkbox @ git+{source['git']}@{source['rev']}#subdirectory={source['subdirectory']}"
+        requirements.append(dependency)
     requirements.extend(project["optional-dependencies"]["test"])
     interpreter = pm.build_requirements_environment(
         requirements, out=out, lock=host / "uv.lock", explicit=True,
