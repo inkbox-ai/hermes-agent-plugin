@@ -163,16 +163,18 @@ def journal_path(chat_id):
 
 
 def adapter_blocked(adapter, route):
-    from inkbox.remote_mcp import RemoteMcp
+    from inkbox.remote_mcp import TerminalReplyJournal
 
     bound = route_source(route)
     if not bound or not getattr(adapter, "_identity_id", None):
         return False
     path = journal_path(route["chat_id"])
-    remote = RemoteMcp(
-        api_key=adapter._api_key,
-        base_url=adapter._base_url or "https://inkbox.ai",
-        identity=adapter._identity_id,
-        journal_path=path,
-    )
-    return blocked(remote, bound, path)
+    scope = json.dumps([
+        (adapter._base_url or "https://inkbox.ai").rstrip("/") + "/mcp", adapter._identity_id,
+    ], sort_keys=True, separators=(",", ":"))
+    try:
+        receipt = TerminalReplyJournal(path, scope).lookup(source_hash(bound))
+    except Exception:
+        logging.getLogger(__name__).warning("Terminal reply receipt unavailable; automatic reply withheld")
+        return True
+    return bool(receipt and (receipt["state"] == "accepted" or receipt["state"] == "pending" and receipt["submitted"]))

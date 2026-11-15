@@ -1,11 +1,14 @@
 name: inkbox
 label: Inkbox
 kind: platform
-version: 0.2.32
+version: 0.2.33
 description: Inkbox email, SMS/MMS, iMessage, voice, and A2A platform plugin for Hermes Agent.
 author: Inkbox
 requires_env: []
 optional_env:
+  - name: INKBOX_TOOL_MODE
+    description: "Tool registration: plugin (default) or native_mcp for a host-managed communications catalog."
+    secret: false
   - name: INKBOX_SLACK_ENABLED
     description: "Enable Slack messaging (default false)."
     prompt: "Enable Slack"
