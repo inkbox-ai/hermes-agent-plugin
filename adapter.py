@@ -4304,7 +4304,9 @@ class InkboxAdapter(BasePlatformAdapter):
 
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
-        event_id = envelope.get("id") if source == "inkbox" else None
+        event_id = envelope.get("id") if source == "inkbox" and envelope.get("event_type") in (
+            "message.received", "text.received", "imessage.received", "call.ended",
+        ) else None
         dedup_id = f"inkbox:event:{event_id}" if isinstance(event_id, str) and event_id else request_id
         if dedup_id and self._dedup_begin(dedup_id):
             return web.Response(status=200, text="duplicate")

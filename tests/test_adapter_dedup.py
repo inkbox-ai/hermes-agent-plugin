@@ -103,3 +103,18 @@ def test_event_replay_with_new_request_id(monkeypatch, fails_first):
     replay = asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id="replay")))
     assert replay.text == "duplicate"
     assert len(calls) == (2 if fails_first else 1)
+
+
+def test_external_object_id_does_not_deduplicate_distinct_deliveries(monkeypatch):
+    adapter = _adapter()
+    calls = []
+
+    async def receive(envelope, request_id, **kwargs):
+        calls.append(request_id)
+        return types.SimpleNamespace(text="ok")
+
+    monkeypatch.setattr(adapter, "_on_external_event", receive)
+    body = b'{"id":"object-1","event_type":"external.updated"}'
+    for request_id in ["update-1", "update-2"]:
+        asyncio.run(adapter._handle_webhook(_FakeRequest(body, _INKBOX_SIGNED, request_id=request_id)))
+    assert calls == ["update-1", "update-2"]

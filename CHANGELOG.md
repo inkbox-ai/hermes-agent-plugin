@@ -2,7 +2,7 @@
 
 ## 0.2.31
 
-- Deduplicate webhook retries by event ID even when each delivery has a new request ID.
+- Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.
 
 ## 0.2.30
 
