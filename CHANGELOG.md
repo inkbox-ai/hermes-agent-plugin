@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.32
+
+- Retry incomplete live-test call cleanup and verify calls have ended between tests.
+
 ## 0.2.31
 
 - Deduplicate incoming message and call-completion retries by event ID even when each delivery has a new request ID.
