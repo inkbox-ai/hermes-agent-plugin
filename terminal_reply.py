@@ -102,6 +102,8 @@ async def send(remote, client, identity_handle, bound, arguments, journal_path, 
     digest = hashlib.sha256(json.dumps([tool, payload], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     validate()
     journal.reserve(identifier, operation, digest)
+    # Preserve existing receipt fingerprints; execution identity travels separately.
+    payload.pop("idempotency_key")
 
     def submit():
         validate()

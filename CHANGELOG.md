@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.34
+
+- Keep contact and terminal-reply MCP arguments within the advertised schema while retaining durable operation identity and retry receipts.
+
 ## 0.2.33
 
 - Allow host-managed MCP registration while retaining local voice, media, Vault, and inbound-task helpers.
