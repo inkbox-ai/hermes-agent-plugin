@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.31
+
+- Deduplicate webhook retries by event ID even when each delivery has a new request ID.
+
 ## 0.2.30
 
 - Reuse valid tunnel certificates across reconnects and renew mismatched or expired state with Inkbox SDK 0.7.38 or newer.
