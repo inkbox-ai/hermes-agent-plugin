@@ -259,8 +259,20 @@ def _a2a_diagnostics(client: Any, identity_id: Any) -> Dict[str, Any]:
     }
 
 
+try:
+    from .hosted_diagnostics import hosted_diagnostics
+except ImportError:
+    from hosted_diagnostics import hosted_diagnostics
+
+
 def run_doctor() -> Dict[str, Any]:
     cfg = read_runtime_config()
+    hosted = hosted_diagnostics(cfg.identity, "hermes", cfg.signing_key)
+    if hosted is not None:
+        hosted["findings"] = [{"id": "inkbox/hosted-runtime", "severity": "error", "message": detail}
+                              for _, passed, detail in hosted["checks"] if not passed]
+        return hosted
+
     findings: List[Dict[str, str]] = []
 
     if not cfg.api_key:
