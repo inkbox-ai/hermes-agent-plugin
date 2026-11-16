@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,15 +13,19 @@ from inkbox_plugin.terminal_reply import blocked, send, source
 def test_contact_alias_uses_public_arguments_and_durable_continuation(tmp_path, action):
     async def run():
         name = "inkbox_contact_" + action
-        fields = {"preferred_name": "Example"}
-        args = fields if action == "create" else {"contact_id": "contact", **(fields if action == "update" else {})}
+        fields = {
+            "preferred_name": "Example",
+            "emails": ["contact@example.test"],
+            "phones": [{"value": "+15550000001", "label": "work", "isPrimary": False}],
+        }
+        args = fields if action == "create" else {
+            "contact_id": "00000000-0000-4000-8000-000000000001", **(fields if action == "update" else {})
+        }
         converted = compatibility_arguments("inkbox_" + action + "_contact", args)
-        properties = ({"contact": {"type": "object"}} if action == "create" else
-                      {"contact_id": {"type": "string"}, **({"patch": {"type": "object"}} if action == "update" else {})})
+        # Advertised tools/list schemas, with descriptive annotations omitted.
+        catalog = json.loads((Path(__file__).parent / "fixtures" / "contact-input-schemas.json").read_text())
         remote = RemoteMcp(api_key="synthetic", base_url="https://example.test", identity="example", journal_path=tmp_path / "call.sqlite")
-        remote._catalog = ({"name": name, "inputSchema": {
-            "type": "object", "properties": properties, "required": list(properties), "additionalProperties": False,
-        }},)
+        remote._catalog = tuple(catalog)
         requests = []
 
         async def request(method, params):
@@ -34,6 +40,16 @@ def test_contact_alias_uses_public_arguments_and_durable_continuation(tmp_path, 
         assert len(requests) == 3
         assert requests[1] == requests[2]
         assert "idempotency_key" not in requests[0]["arguments"]
+
+        before = len(requests)
+        with pytest.raises(RemoteToolError, match="remote schema"):
+            await remote.call(name, {**converted, "idempotency_key": "unexpected"}, call_identity="invalid-call")
+        assert len(requests) == before
+        if action != "delete":
+            field = "contact" if action == "create" else "patch"
+            with pytest.raises(RemoteToolError, match="remote schema"):
+                await remote.call(name, {**converted, field: {"emails": [{"value": 42}]}}, call_identity="invalid-nested-call")
+            assert len(requests) == before
 
     asyncio.run(run())
 
