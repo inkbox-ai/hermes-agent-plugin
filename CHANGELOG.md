@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.36
+
+- Report bounded dependency import diagnostics when adapter initialization fails, without logging exception messages, paths, or credentials.
+
 ## 0.2.35
 
 - Make managed diagnostics use a recent runtime health report instead of terminal signing-key or ordinary webhook settings. Keep standalone checks and report unavailable runtime evidence.
