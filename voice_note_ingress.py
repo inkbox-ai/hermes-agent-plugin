@@ -81,6 +81,11 @@ class VoiceNoteIngress:
                         (event_id, json.dumps(message, allow_nan=False), time.time()))
         self.adapter._voice_note_receiver().complete(channel, message)
 
+    def completion(self, channel: str, message_id: str) -> dict | None:
+        """Read a saved callback for an already-durable conversation consumer."""
+        row = self.db.execute("SELECT completion FROM voice_note_resolution WHERE event_id=?", (self.key(channel, message_id),)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+
     def _schedule(self, event_id: str) -> None:
         if self.closing or event_id in self.tasks:
             return

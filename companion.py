@@ -555,6 +555,7 @@ class CompanionReceiver:
                     continue
                 if turn["state"] not in {"pending", "ready"}:
                     raise RuntimeError("Companion host outcome is uncertain")
+                await self._resolve_voice_note(row, turn)
                 if turn["phase"] != "initialization":
                     await self._prepare_live(row, turn)
                 elif "whatsapp_quote" not in turn:
@@ -671,6 +672,45 @@ class CompanionReceiver:
                 monitor.cancel()
                 await asyncio.gather(monitor, return_exceptions=True)
 
+    async def _resolve_voice_note(self, row: dict, turn: dict) -> None:
+        """Resolve audio inside the checkpoint owner, never inside webhook acceptance."""
+        channel = {"phone": "text", "imessage": "imessage", "whatsapp": "whatsapp"}.get(row["meta"]["channel"])
+        envelope = turn.get("envelope")
+        item = message(envelope) if envelope else {}
+        if not channel or not any(isinstance(media, dict) and isinstance(media.get("transcription"), dict)
+                                  for media in item.get("media") or []):
+            return
+        from .transcription import merge_results, poll_message, voice_note_context
+        gate = self.adapter._voice_note_receiver()
+        state = turn.get("voice_note_resolution")
+        if state is None:
+            state = turn["voice_note_resolution"] = {"deadline": time.time() + gate.wait_seconds, "polled": False}
+            self._save(row)
+        if "result" not in state:
+            # The ordinary completion inbox can retain a callback that preceded this receipt or a restart.
+            ingress = getattr(self.adapter, "_ordinary_voice_notes", None)
+            if ingress is not None:
+                completion = ingress.completion(channel, str(item["id"]))
+                if completion:
+                    gate.complete(channel, completion)
+            async def poll():
+                if state["polled"]:
+                    return item
+                state["polled"] = True
+                self._save(row)
+                return await poll_message(self.adapter, channel, item)
+            resolved = await gate.resolve(channel, item, poll, deadline=state["deadline"])
+            state["result"] = merge_results(item, resolved)
+            self._save(row)
+        resolved = merge_results(item, state["result"])
+        turn["envelope"]["data"]["text_message" if channel == "text" else "message"] = resolved
+        if turn["phase"] == "initialization" and not turn.get("voice_note_labelled"):
+            context = voice_note_context(resolved)
+            if context:
+                turn["text"] += "\n" + context
+            turn["voice_note_labelled"] = True
+        self._save(row)
+
     async def _prepare_live(self, row: dict, turn: dict) -> None:
         envelope = turn["envelope"]
         meta = envelope["companion"]
@@ -714,6 +754,11 @@ class CompanionReceiver:
             "sender_access": item.get("sender_access"),
             "attachments": item.get("attachments") or item.get("media") or item.get("media_urls") or [],
         }, ensure_ascii=False)
+        if meta["channel"] in {"phone", "imessage", "whatsapp"}:
+            from .transcription import voice_note_context
+            context = voice_note_context(item)
+            if context:
+                turn["text"] += "\n" + context
         quote = await self._whatsapp_reply_presentation(row, turn)
         if quote:
             turn["text"] += "\n" + quote
