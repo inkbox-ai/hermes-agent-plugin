@@ -67,6 +67,17 @@ Keep that process running. On startup the plugin opens an Inkbox tunnel,
 configures mail/text/iMessage webhook subscriptions and incoming-call handling,
 and routes inbound email, SMS, iMessage, and calls into Hermes sessions.
 
+### Voice notes
+
+Incoming MMS, iMessage, and WhatsApp voice notes retain their original attachments.
+When transcription is pending, the plugin waits up to 60 seconds for a completion
+notification, then reads the message once if needed. Completed speech is clearly
+labeled as an automatically transcribed voice note, separate from typed text.
+If transcription fails or remains unavailable after that read, Hermes receives the
+original message through the normal attachment flow. A late completion does not
+wake the agent again. Completion notifications are registered automatically when
+the plugin manages its webhook subscriptions.
+
 ### Agent self-setup for an assigned identity
 
 After a human assigns an existing identity and credential, an agent can complete

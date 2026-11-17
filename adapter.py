@@ -689,6 +689,7 @@ _DESIRED_MAIL_EVENTS: tuple[str, ...] = (
 # by _on_text_received / _on_text_lifecycle.
 _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
     "text.received",
+    "text.transcription_finished",
     "text.sent",
     "text.delivered",
     "text.delivery_failed",
@@ -704,6 +705,7 @@ _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
 # not). The agent can also send its own tapbacks via inkbox_send_imessage_reaction.
 _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.received",
+    "imessage.transcription_finished",
     "imessage.sent",
     "imessage.delivered",
     "imessage.delivery_failed",
@@ -2086,6 +2088,10 @@ def _extract_text_media(
         media_type = content_type or "unknown"
         types.append(media_type)
         markers.append(f"[{marker_label} attachment received: {media_type}]")
+    from .transcription import voice_note_context
+    voice_context = voice_note_context(text_msg)
+    if voice_context:
+        markers.append(voice_context)
     return urls, types, markers
 
 
@@ -2647,6 +2653,8 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        if gate := getattr(self, "_voice_notes", None):
+            await gate.close()
         if receiver := getattr(self, "_managed_receiver", None):
             await receiver.close()
             self._managed_receiver = None
@@ -4258,6 +4266,10 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=409, text="Invalid or conflicting delivery")
             except (InboxFull, OSError, sqlite3.Error):
                 return web.Response(status=503, text="Temporarily unavailable")
+            from .transcription import FINISHED, message_of
+            completion_channel = FINISHED.get(envelope.get("event_type"))
+            if completion_channel:
+                self._voice_note_receiver().complete(completion_channel, message_of(envelope, completion_channel))
             return web.json_response(receipt, status=202)
 
         if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
@@ -4373,7 +4385,19 @@ class InkboxAdapter(BasePlatformAdapter):
         receiver.record_delivery_failure(envelope, rows)
         return web.Response(status=200, text="Companion delivery failure recorded")
 
+    def _voice_note_receiver(self):
+        """Keep completion correlation scoped to this configured adapter."""
+        if not hasattr(self, "_voice_notes"):
+            from .transcription import VoiceNoteGate
+            self._voice_notes = VoiceNoteGate()
+        return self._voice_notes
+
     async def _route_inkbox_event(self, event_type, envelope, headers=None):
+        from .transcription import FINISHED
+        if event_type in FINISHED:
+            from .transcription import message_of
+            self._voice_note_receiver().complete(FINISHED[event_type], message_of(envelope, FINISHED[event_type]))
+            return web.Response(status=200, text="Voice-note completion recorded")
         if event_type in SLACK_INCOMING_EVENTS or event_type == SLACK_STOP_EVENT:
             response = await self._on_slack_event(envelope)
         elif event_type == "message.received":
@@ -7085,6 +7109,9 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _on_text_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
         text_msg = (envelope.get("data") or {}).get("text_message") or {}
+        from .transcription import poll_message
+        text_msg = await self._voice_note_receiver().resolve("text", text_msg, lambda: poll_message(self, "text", text_msg))
+        envelope = {**envelope, "data": {**(envelope.get("data") or {}), "text_message": text_msg}}
         data = envelope.get("data") or {}
         text_id = str(text_msg.get("id") or "").strip()
         direction = str(text_msg.get("direction") or "").strip().lower()
@@ -7911,6 +7938,9 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _on_imessage_received_once(self, envelope: Dict[str, Any]) -> "web.Response":
         message = (envelope.get("data") or {}).get("message") or {}
+        from .transcription import poll_message
+        message = await self._voice_note_receiver().resolve("imessage", message, lambda: poll_message(self, "imessage", message))
+        envelope = {**envelope, "data": {**(envelope.get("data") or {}), "message": message}}
         message_id = str(message.get("id") or "").strip()
         direction = str(message.get("direction") or "").strip().lower()
         if direction and direction != "inbound":
