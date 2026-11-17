@@ -30,6 +30,11 @@ def voice_event(instance, channel, phase="initialization", status="pending"):
         value["companion"]["phase"] = phase
         if phase == "ordinary":
             value["companion"].pop("activation_id", None)
+            # Without a sponsorship activation, every synthetic group member needs native permission.
+            authorize = instance.host._is_user_authorized
+            instance.host._is_user_authorized = lambda source: authorize(source) or (
+                source.user_id == "+15555550102" and source.user_id not in instance.host.denied
+            )
     else:
         value = event(channel, phase=phase)
     source = value["data"]["text_message" if channel == "phone" else "message"]
