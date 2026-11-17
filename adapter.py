@@ -2614,6 +2614,8 @@ class InkboxAdapter(BasePlatformAdapter):
 
         try:
             await self._start_companion()
+            if not os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+                self._ordinary_voice_note_receiver().start()
         except Exception:
             logger.error("[Inkbox] Companion checkpoint recovery failed; gateway startup stopped")
             await self._cleanup()
@@ -2653,6 +2655,9 @@ class InkboxAdapter(BasePlatformAdapter):
         logger.info("[Inkbox] Disconnected")
 
     async def _cleanup(self) -> None:
+        if ingress := getattr(self, "_ordinary_voice_notes", None):
+            await ingress.close()
+            del self._ordinary_voice_notes
         if gate := getattr(self, "_voice_notes", None):
             await gate.close()
         if receiver := getattr(self, "_managed_receiver", None):
@@ -4323,6 +4328,27 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=400, text="Invalid Companion event")
             return web.Response(status=202, text="Companion event saved")
 
+        from .transcription import FINISHED, RECEIVED, message_of, pending
+        event_type = envelope.get("event_type")
+        voice_channel = RECEIVED.get(event_type)
+        voice_message = message_of(envelope, voice_channel) if voice_channel else {}
+        if source == "inkbox" and (event_type in FINISHED or (
+            voice_channel and voice_message.get("id") and voice_message.get("direction") != "outbound" and pending(voice_message)
+        )):
+            # Ordinary callbacks may not retry; retain originals before returning a prompt ACK.
+            if not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):
+                return web.Response(status=401, text="Voice notes require an authenticated Inkbox webhook")
+            try:
+                ingress = self._ordinary_voice_note_receiver()
+                if event_type in FINISHED:
+                    ingress.complete(envelope)
+                else:
+                    ingress.accept(envelope)
+            except Exception:
+                logger.exception("Voice-note receipt could not be saved")
+                return web.Response(status=503, text="Voice-note receiver is unavailable")
+            return web.Response(status=202, text="Voice-note receipt saved")
+
         event_type = envelope.get("event_type")
         request_id = request.headers.get("X-Inkbox-Request-Id", "")
         event_id = envelope.get("id") if source == "inkbox" and envelope.get("event_type") in (
@@ -4393,6 +4419,18 @@ class InkboxAdapter(BasePlatformAdapter):
             from .transcription import VoiceNoteGate
             self._voice_notes = VoiceNoteGate()
         return self._voice_notes
+
+    def _ordinary_voice_note_receiver(self):
+        """Keep ordinary fire-and-forget receipts in an identity-scoped inbox."""
+        if not hasattr(self, "_ordinary_voice_notes"):
+            from .voice_note_ingress import VoiceNoteIngress
+            import hashlib
+            namespace = hashlib.sha256(json.dumps([
+                self._base_url, self._identity_id,
+            ]).encode()).hexdigest()
+            path = _inkbox_state_path().parent / "inkbox_voice_notes" / namespace / "events.sqlite3"
+            self._ordinary_voice_notes = VoiceNoteIngress(self, path)
+        return self._ordinary_voice_notes
 
     def _voice_note_waiting(self, envelope):
         """Do not ACK an ordinary retry before its original message is retained."""

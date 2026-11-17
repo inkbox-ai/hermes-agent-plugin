@@ -109,20 +109,31 @@ class VoiceNoteGate:
         task = (self.entries.get((channel, message_id)) or {}).get("task")
         return task is not None and not task.done()
 
-    async def resolve(self, channel: str, message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+    def remember(self, channel: str, message: dict[str, Any]) -> None:
+        """Reuse a durable resolution when normal channel admission resumes."""
+        entry = self._entry(channel, str(message["id"]))
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(message)
+        entry["task"] = future
+
+    async def resolve(self, channel: str, message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]],
+                      *, deadline: float | None = None) -> dict[str, Any]:
         """Wait at most one minute, then make one bounded read before fallback."""
         if not pending(message) or not message.get("id"):
             return message
         entry = self._entry(channel, str(message["id"]))
         if "task" not in entry:
-            entry["task"] = asyncio.create_task(self._resolve(entry, message, poll))
+            entry["task"] = asyncio.create_task(self._resolve(entry, message, poll, deadline=deadline))
         return await asyncio.shield(entry["task"])
 
-    async def _resolve(self, entry: dict[str, Any], message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+    async def _resolve(self, entry: dict[str, Any], message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]],
+                       *, deadline: float | None = None) -> dict[str, Any]:
         """Resolve the timeout/completion race in one owning coroutine."""
         wait_seconds = self.wait_seconds
+        if deadline is not None:
+            wait_seconds = min(wait_seconds, max(0, deadline - time.time()))
         created_at = message.get("created_at")
-        if isinstance(created_at, str):
+        if deadline is None and isinstance(created_at, str):
             try:
                 created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                 if created.tzinfo is not None:
