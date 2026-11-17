@@ -125,11 +125,11 @@ def _finish_new_calls(client, local_phone: str, baseline: set[str]) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_up_calls_created_by_live_test():
+def _clean_up_calls_created_by_live_test(request):
     """Own all calls created by this live test and never leak a carrier leg.
 
     Non-voice suites run a watchdog because a model can unexpectedly choose the
-    phone tool while answering an SMS/email test. Voice tests own their expected
+    phone tool while answering an SMS/email test. Tests expecting calls own their
     call ids directly and use this fixture as a final safety net.
     """
     if not AUT_KEY:
@@ -143,7 +143,9 @@ def _clean_up_calls_created_by_live_test():
     local_phone = numbers[0].number
     baseline = set(_owned_calls(client, local_phone))
     watch_client = _client(AUT_KEY)
-    voice_session = bool(os.environ.get("VOICE_SCENARIO"))
+    expects_calls = bool(os.environ.get("VOICE_SCENARIO")) or (
+        request.node.get_closest_marker("expects_live_call") is not None
+    )
     stop = threading.Event()
 
     def watchdog() -> None:
@@ -161,7 +163,7 @@ def _clean_up_calls_created_by_live_test():
                 _hang_up_owned_call(watch_client, call)
 
     watcher = None
-    if not voice_session:
+    if not expects_calls:
         watcher = threading.Thread(target=watchdog, name="live-call-cleanup", daemon=True)
         watcher.start()
     try:
