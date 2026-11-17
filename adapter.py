@@ -4399,7 +4399,12 @@ class InkboxAdapter(BasePlatformAdapter):
         from .transcription import RECEIVED, message_of
         channel = RECEIVED.get(envelope.get("event_type"))
         gate = getattr(self, "_voice_notes", None)
-        return bool(channel and gate and gate.waiting(channel, str(message_of(envelope, channel).get("id") or "")))
+        message_id = str(message_of(envelope, channel).get("id") or "") if channel else ""
+        return bool(channel and gate and (
+            gate.waiting(channel, message_id)
+            or (channel, message_id) in gate.entries
+            and f"{channel}:{message_id}" in getattr(self, "_inflight_request_ids", {})
+        ))
 
     async def _route_inkbox_event(self, event_type, envelope, headers=None):
         from .transcription import FINISHED

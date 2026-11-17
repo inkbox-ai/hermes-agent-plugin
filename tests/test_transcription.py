@@ -182,6 +182,9 @@ def test_duplicate_received_is_not_acknowledged_while_its_original_wait_is_unadm
         gate.complete("text", message("completed", text="Speech"))
         await waiter
         assert not adapter._voice_note_waiting({"event_type": "text.received", "data": {"text_message": message()}})
+        adapter._inflight_request_ids = {"text:message-1": 1}
+        assert adapter._voice_note_waiting({"event_type": "text.received", "data": {"text_message": message()}})
+        adapter._inflight_request_ids.clear()
         await gate.close()
     asyncio.run(scenario())
 
