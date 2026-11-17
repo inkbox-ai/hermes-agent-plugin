@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.37
+
+### Changed
+- Require Inkbox SDK 0.7.39 for durable messaging and remote tool handling.
+
 ## 0.2.36
 
 - Report bounded dependency import diagnostics when adapter initialization fails, without logging exception messages, paths, or credentials.
