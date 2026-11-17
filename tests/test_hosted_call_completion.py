@@ -1091,6 +1091,7 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
         order.append("a2a")
 
     instance._start_companion = _start_companion
+    instance._ordinary_voice_note_receiver = lambda: types.SimpleNamespace(start=lambda: order.append("voice_notes"))
     instance._catch_up_hosted_call_completions = _catch_up_hosted
     instance._catch_up_a2a_tasks = _catch_up_a2a
 
@@ -1118,7 +1119,7 @@ def test_connect_automatically_catches_up_hosted_completions(monkeypatch):
     )
 
     assert asyncio.run(instance.connect()) is True
-    assert order == ["companion", "hosted", "a2a", "connected"]
+    assert order == ["companion", "voice_notes", "hosted", "a2a", "connected"]
     assert asyncio.run(instance._handle_health(None)).status == 200
 
 
