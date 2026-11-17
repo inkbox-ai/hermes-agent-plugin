@@ -58,12 +58,11 @@ def _parts_text(parts: list[dict[str, Any]]) -> str:
     )
 
 
-def _wire_history_text(task: Any) -> str:
-    return "\n".join(
-        _parts_text(message.get("parts", []))
-        for message in task.raw.get("history", [])
-        if isinstance(message, dict)
-    )
+def _wire_final_answer(task: Any) -> str:
+    messages = _wire_worker_messages(task)
+    if not messages:
+        raise AssertionError("A2A task returned no agent answer")
+    return messages[-1]
 
 
 def _wire_history_messages(task: Any) -> list[str]:
@@ -95,7 +94,7 @@ def _wait_for_history_message(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         task = a2a.get_task(target, task_id, history_length=50)
-        for text in _wire_history_messages(task):
+        for text in _wire_worker_messages(task):
             if predicate(text):
                 return task, text
         state = _enum_value(task.state)
@@ -220,7 +219,7 @@ def _inbound_single(a2a: Any, target: Any, timeout: float, run: str) -> None:
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if completion not in _wire_history_text(final):
+        if completion not in _wire_final_answer(final):
             raise AssertionError("Inbound single-turn completion token is missing")
     finally:
         _cancel_if_open(a2a, target, task.id)
@@ -258,7 +257,7 @@ def _inbound_multi(a2a: Any, target: Any, timeout: float, run: str) -> None:
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        history = _wire_history_text(final)
+        history = _wire_final_answer(final)
         if answer not in history or completion not in history:
             raise AssertionError("Inbound multi-turn history is incomplete")
     finally:
@@ -298,7 +297,7 @@ def _inbound_progress(a2a: Any, target: Any, timeout: float, run: str) -> None:
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        history = _wire_history_messages(final)
+        history = _wire_worker_messages(final)
         progress = []
         summaries = []
         for index, text in enumerate(history):
@@ -373,7 +372,7 @@ def _outbound_single(
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if worker_result not in _wire_history_text(final):
+        if worker_result not in _wire_final_answer(final):
             raise AssertionError("Outbound single-turn worker result is missing")
     finally:
         if inner is not None:
@@ -425,7 +424,7 @@ def _outbound_multi(
             expected={"TASK_STATE_COMPLETED"},
             timeout=timeout,
         )
-        if worker_result not in _wire_history_text(final):
+        if worker_result not in _wire_final_answer(final):
             raise AssertionError("Outbound multi-turn worker result is missing")
     finally:
         if inner is not None:
