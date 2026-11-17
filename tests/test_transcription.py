@@ -135,6 +135,57 @@ def test_all_pending_attachments_wait_for_terminal_completion_and_partial_poll_r
     asyncio.run(scenario())
 
 
+def test_partial_completion_does_not_release_the_message_barrier():
+    async def scenario():
+        gate = VoiceNoteGate()
+        original = message()
+        original["media"].append({**deepcopy(original["media"][0]), "id": "audio-2"})
+        poll = AsyncMock()
+        waiter = asyncio.create_task(gate.resolve("imessage", original, poll))
+        await asyncio.sleep(0)
+        current = deepcopy(original)
+        current["media"][0]["transcription"] = {"status": "completed", "text": "First recording"}
+        gate.complete("imessage", current)
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        current["media"][1]["transcription"] = {"status": "failed", "text": None}
+        gate.complete("imessage", current)
+        result = await waiter
+        assert not any(item["transcription"]["status"] == "pending" for item in result["media"])
+        poll.assert_not_called()
+        await gate.close()
+    asyncio.run(scenario())
+
+
+def test_restarted_wait_does_not_reset_an_expired_source_deadline():
+    async def scenario():
+        original = {**message(), "created_at": "2020-01-01T00:00:00Z"}
+        for _ in range(2):
+            gate = VoiceNoteGate()
+            poll = AsyncMock(return_value=message("completed", text="Recovered transcript"))
+            result = await asyncio.wait_for(gate.resolve("text", original, poll), timeout=1)
+            assert result["media"][0]["transcription"]["text"] == "Recovered transcript"
+            poll.assert_awaited_once()
+            await gate.close()
+    asyncio.run(scenario())
+
+
+def test_duplicate_received_is_not_acknowledged_while_its_original_wait_is_unadmitted():
+    from inkbox_plugin.adapter import InkboxAdapter
+    async def scenario():
+        adapter = object.__new__(InkboxAdapter)
+        gate = adapter._voice_note_receiver()
+        waiter = asyncio.create_task(gate.resolve("text", message(), AsyncMock()))
+        await asyncio.sleep(0)
+        assert adapter._voice_note_waiting({"event_type": "text.received", "data": {"text_message": message()}})
+        assert not adapter._voice_note_waiting({"event_type": "imessage.received", "data": {"message": message()}})
+        gate.complete("text", message("completed", text="Speech"))
+        await waiter
+        assert not adapter._voice_note_waiting({"event_type": "text.received", "data": {"text_message": message()}})
+        await gate.close()
+    asyncio.run(scenario())
+
+
 def test_shutdown_cancels_waiters_without_starting_a_poll():
     async def scenario():
         gate = VoiceNoteGate()

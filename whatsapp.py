@@ -147,6 +147,8 @@ async def _receive_message(adapter, envelope):
         return web.Response(status=200, text="WhatsApp receipt retained")
     key = f"whatsapp:{message_id}"
     if adapter._dedup_begin(key):
+        if adapter._voice_note_waiting(envelope):
+            return web.Response(status=503, text="Voice note is still being admitted")
         return web.Response(status=200, text="duplicate")
     try:
         from .transcription import poll_message, voice_note_context

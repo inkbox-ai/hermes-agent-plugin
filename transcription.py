@@ -6,6 +6,7 @@ import copy
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 RECEIVED = {"text.received": "text", "imessage.received": "imessage", "whatsapp.received": "whatsapp"}
@@ -103,6 +104,11 @@ class VoiceNoteGate:
         entry["result"] = copy.deepcopy(message)
         entry["event"].set()
 
+    def waiting(self, channel: str, message_id: str) -> bool:
+        """A duplicate cannot acknowledge a receipt that has not been admitted yet."""
+        task = (self.entries.get((channel, message_id)) or {}).get("task")
+        return task is not None and not task.done()
+
     async def resolve(self, channel: str, message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         """Wait at most one minute, then make one bounded read before fallback."""
         if not pending(message) or not message.get("id"):
@@ -114,8 +120,18 @@ class VoiceNoteGate:
 
     async def _resolve(self, entry: dict[str, Any], message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         """Resolve the timeout/completion race in one owning coroutine."""
+        wait_seconds = self.wait_seconds
+        created_at = message.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                if created.tzinfo is not None:
+                    wait_seconds = min(wait_seconds, max(0, created.timestamp() + self.wait_seconds - time.time()))
+            except ValueError:
+                pass
         try:
-            await asyncio.wait_for(entry["event"].wait(), timeout=self.wait_seconds)
+            if not entry["event"].is_set():
+                await asyncio.wait_for(entry["event"].wait(), timeout=wait_seconds)
             candidate = merge_results(message, entry.get("result") or {})
             if not pending(candidate):
                 return candidate

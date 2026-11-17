@@ -4330,6 +4330,8 @@ class InkboxAdapter(BasePlatformAdapter):
         ) else None
         dedup_id = f"inkbox:event:{event_id}" if isinstance(event_id, str) and event_id else request_id
         if dedup_id and self._dedup_begin(dedup_id):
+            if self._voice_note_waiting(envelope):
+                return web.Response(status=503, text="Voice note is still being admitted")
             return web.Response(status=200, text="duplicate")
 
         try:
@@ -4391,6 +4393,13 @@ class InkboxAdapter(BasePlatformAdapter):
             from .transcription import VoiceNoteGate
             self._voice_notes = VoiceNoteGate()
         return self._voice_notes
+
+    def _voice_note_waiting(self, envelope):
+        """Do not ACK an ordinary retry before its original message is retained."""
+        from .transcription import RECEIVED, message_of
+        channel = RECEIVED.get(envelope.get("event_type"))
+        gate = getattr(self, "_voice_notes", None)
+        return bool(channel and gate and gate.waiting(channel, str(message_of(envelope, channel).get("id") or "")))
 
     async def _route_inkbox_event(self, event_type, envelope, headers=None):
         from .transcription import FINISHED
@@ -7098,6 +7107,8 @@ class InkboxAdapter(BasePlatformAdapter):
         text_id = str(text_msg.get("id") or "").strip()
         event_key = f"text:{text_id}" if text_id else ""
         if self._dedup_begin(event_key):
+            if self._voice_note_waiting(envelope):
+                return web.Response(status=503, text="Voice note is still being admitted")
             return web.Response(status=200, text="duplicate")
         try:
             response = await self._on_text_received_once(envelope)
@@ -7927,6 +7938,8 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=503, text="Native iMessage control retry requires native replies to remain enabled")
         event_key = f"imessage:{message_id}" if message_id else ""
         if self._dedup_begin(event_key):
+            if self._voice_note_waiting(envelope):
+                return web.Response(status=503, text="Voice note is still being admitted")
             return web.Response(status=200, text="duplicate")
         try:
             response = await self._on_imessage_received_once(envelope)
