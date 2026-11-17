@@ -1,7 +1,6 @@
 """Call cleanup retries and per-test ownership without external services."""
 
 import importlib.util
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
