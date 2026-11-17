@@ -41,7 +41,8 @@ def test_live_setup_does_not_mutate_or_cache_managed_generations(name):
     assert 'hermes-agent/venv/' not in workflow
     assert '$HERMES_HOME/bin/uv' not in workflow
     assert 'hermes-ci-bin' not in workflow
-    assert 'hermes gateway run > "$GATEWAY_LOG" 2>&1 &' in workflow
+    verbosity = " -v" if name == "voice" else ""
+    assert f'hermes gateway run{verbosity} > "$GATEWAY_LOG" 2>&1 &' in workflow
     assert 'astral-sh/setup-uv@v8.1.0' in workflow
     assert 'echo "$HERMES_HOME/hermes-agent/.hermes/bin" >> "$GITHUB_PATH"' in workflow
     assert workflow.index('hermes plugins enable inkbox') < workflow.index('tests/ci/check_hermes_runtime.py')
