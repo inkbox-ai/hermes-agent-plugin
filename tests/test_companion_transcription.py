@@ -137,3 +137,25 @@ def test_companion_timeout_fallback_is_saved_and_restart_cannot_wait_or_poll_aga
         await restored.close()
         await instance.adapter._voice_note_receiver().close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel", ["phone", "imessage", "whatsapp"])
+def test_hosted_companion_pending_fallback_is_labelled_without_waiting(factory, monkeypatch, channel):
+    monkeypatch.setenv("INKBOX_HOSTED_MODE", "1")
+
+    async def run():
+        instance = factory("imessage" if channel == "whatsapp" else channel)
+        read = AsyncMock(side_effect=AssertionError("Input was already resolved"))
+        monkeypatch.setattr(transcription, "poll_message", read)
+        try:
+            await instance.receiver.accept(voice_event(instance, channel, "ordinary"))
+            await idle(instance)
+            assert len(instance.inputs) == 1
+            assert "transcript unavailable" in instance.inputs[0].text
+            assert "Original typed caption" in instance.inputs[0].text
+            read.assert_not_called()
+        finally:
+            await instance.receiver.close()
+            await instance.adapter._voice_note_receiver().close()
+
+    asyncio.run(run())

@@ -233,3 +233,22 @@ def test_completion_route_does_not_dispatch_an_incoming_message():
         adapter._on_imessage_received.assert_not_called()
         await adapter._voice_notes.close()
     asyncio.run(scenario())
+
+
+def test_configured_hosted_runtime_never_waits_or_polls_again(monkeypatch):
+    monkeypatch.setenv("INKBOX_HOSTED_MODE", "1")
+
+    async def run():
+        gate = VoiceNoteGate()
+        read = AsyncMock(side_effect=AssertionError("Input was already resolved"))
+        try:
+            for channel in ("text", "imessage", "whatsapp"):
+                item = message()
+                assert await asyncio.wait_for(gate.resolve(channel, item, read), 0.1) is item
+                assert "transcript unavailable" in voice_note_context(item)
+            assert gate.entries == {}
+            read.assert_not_called()
+        finally:
+            await gate.close()
+
+    asyncio.run(run())

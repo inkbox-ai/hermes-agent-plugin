@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import copy
 import time
 from collections import OrderedDict
@@ -119,6 +120,8 @@ class VoiceNoteGate:
     async def resolve(self, channel: str, message: dict[str, Any], poll: Callable[[], Awaitable[dict[str, Any]]],
                       *, deadline: float | None = None) -> dict[str, Any]:
         """Wait at most one minute, then make one bounded read before fallback."""
+        if os.getenv("INKBOX_HOSTED_MODE") == "1":
+            return message
         if not pending(message) or not message.get("id"):
             return message
         entry = self._entry(channel, str(message["id"]))
