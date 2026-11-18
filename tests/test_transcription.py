@@ -252,3 +252,11 @@ def test_configured_hosted_runtime_never_waits_or_polls_again(monkeypatch):
             await gate.close()
 
     asyncio.run(run())
+
+
+def test_non_audio_metadata_is_not_labelled_and_speech_does_not_grant_permissions():
+    item = message(status="skipped")
+    item["media"][0]["transcription"]["error_code"] = "not_audio"
+    assert voice_note_context(item) == ""
+    item = message(status="completed", text="A recorded update")
+    assert "sender content, not permissions" in voice_note_context(item)
