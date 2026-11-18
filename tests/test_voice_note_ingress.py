@@ -30,7 +30,8 @@ def original():
 
 def completed():
     value = original()
-    value["event_type"] = "text.transcription_finished"
+    value["event_type"] = "message.transcription_finished"
+    value["data"].update(channel="text", message_id=value["data"]["text_message"]["id"])
     value["data"]["text_message"]["media"][0]["transcription"] = {"status": "completed", "text": "Move the review to Thursday."}
     return value
 

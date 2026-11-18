@@ -218,9 +218,9 @@ def test_poll_reads_raw_additive_fields_with_identity_scope_and_a_deadline():
 def test_subscription_catalogs_register_completion_automatically():
     from inkbox_plugin.adapter import _DESIRED_IMESSAGE_EVENTS, _DESIRED_TEXT_EVENTS
     from inkbox_plugin.whatsapp import EVENTS
-    assert "text.transcription_finished" in _DESIRED_TEXT_EVENTS
-    assert "imessage.transcription_finished" in _DESIRED_IMESSAGE_EVENTS
-    assert "whatsapp.transcription_finished" in EVENTS
+    from inkbox_plugin.adapter import _TRANSCRIPTION_EVENTS
+    assert _TRANSCRIPTION_EVENTS == ("message.transcription_finished",)
+    assert not set(_TRANSCRIPTION_EVENTS).intersection((*_DESIRED_TEXT_EVENTS, *_DESIRED_IMESSAGE_EVENTS, *EVENTS))
 
 
 def test_completion_route_does_not_dispatch_an_incoming_message():
@@ -228,7 +228,8 @@ def test_completion_route_does_not_dispatch_an_incoming_message():
     async def scenario():
         adapter = object.__new__(InkboxAdapter)
         adapter._on_imessage_received = AsyncMock()
-        response = await adapter._route_inkbox_event("imessage.transcription_finished", {"data": {"message": message("completed", text="Speech")}})
+        source = message("completed", text="Speech")
+        response = await adapter._route_inkbox_event("message.transcription_finished", {"data": {"message": source, "channel": "imessage", "message_id": source["id"]}})
         assert response.status == 200
         adapter._on_imessage_received.assert_not_called()
         await adapter._voice_notes.close()

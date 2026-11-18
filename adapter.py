@@ -689,7 +689,6 @@ _DESIRED_MAIL_EVENTS: tuple[str, ...] = (
 # by _on_text_received / _on_text_lifecycle.
 _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
     "text.received",
-    "text.transcription_finished",
     "text.sent",
     "text.delivered",
     "text.delivery_failed",
@@ -705,13 +704,19 @@ _DESIRED_TEXT_EVENTS: tuple[str, ...] = (
 # not). The agent can also send its own tapbacks via inkbox_send_imessage_reaction.
 _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.received",
-    "imessage.transcription_finished",
     "imessage.sent",
     "imessage.delivered",
     "imessage.delivery_failed",
     "imessage.reaction_received",
 )
 _DESIRED_CALL_EVENTS: tuple[str, ...] = ("call.ended",)
+_TRANSCRIPTION_EVENTS = ("message.transcription_finished",)
+
+
+def _subscription_family(event_type: str) -> str:
+    return event_type if event_type in _TRANSCRIPTION_EVENTS else event_type.split(".", 1)[0]
+
+
 _DESIRED_A2A_EVENTS: tuple[str, ...] = (
     "a2a.task.created",
     "a2a.task.message",
@@ -1152,7 +1157,7 @@ def _reconcile_subscription(
     """
     desired_set = set(desired_events)
     desired_families = {
-        event_type.split(".", 1)[0] for event_type in desired_events
+        _subscription_family(event_type) for event_type in desired_events
     }
     desired_endpoint = urlparse(desired_url)
     desired_route = (
@@ -1160,7 +1165,7 @@ def _reconcile_subscription(
         desired_endpoint.netloc,
         desired_endpoint.path.rstrip("/"),
     )
-    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
+    identity_scope = owner_kwarg == "agent_identity_id" and (desired_families == {"whatsapp"} or desired_events == _TRANSCRIPTION_EVENTS)
     list_kwargs = {owner_kwarg: owner_id}
     if identity_scope:
         list_kwargs["scope"] = "identity"
@@ -1173,7 +1178,7 @@ def _reconcile_subscription(
     for row in existing:
         row_set = set(row.event_types)
         row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
+            _subscription_family(event_type) for event_type in row.event_types
         }
         if (
             row.url == desired_url
@@ -1191,10 +1196,10 @@ def _reconcile_subscription(
             (
                 row
                 for row in existing
-                if (not identity_scope or {event.split(".", 1)[0] for event in row.event_types} == desired_families)
+                if (not identity_scope or {_subscription_family(event) for event in row.event_types} == desired_families)
                 and desired_families
                 & {
-                    event_type.split(".", 1)[0]
+                    _subscription_family(event_type)
                     for event_type in row.event_types
                 }
                 and (
@@ -1235,7 +1240,7 @@ def _reconcile_subscription(
         if row.id == active_id:
             continue
         row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
+            _subscription_family(event_type) for event_type in row.event_types
         }
         row_endpoint = urlparse(row.url)
         row_route = (
@@ -1288,9 +1293,9 @@ def _create_with_409_repair(
 
     desired_set = set(desired_events)
     desired_families = {
-        event_type.split(".", 1)[0] for event_type in desired_events
+        _subscription_family(event_type) for event_type in desired_events
     }
-    identity_scope = owner_kwarg == "agent_identity_id" and desired_families == {"whatsapp"}
+    identity_scope = owner_kwarg == "agent_identity_id" and (desired_families == {"whatsapp"} or desired_events == _TRANSCRIPTION_EVENTS)
     list_kwargs = {owner_kwarg: owner_id}
     if identity_scope:
         list_kwargs["scope"] = "identity"
@@ -1298,7 +1303,7 @@ def _create_with_409_repair(
         if row.url != desired_url:
             continue
         row_families = {
-            event_type.split(".", 1)[0] for event_type in row.event_types
+            _subscription_family(event_type) for event_type in row.event_types
         }
         if not desired_families & row_families:
             continue
@@ -2945,6 +2950,10 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
+            _reconcile_imessage_subscription(
+                self._inkbox, self._identity_id, desired_url=webhook_url,
+                previous_webhook_url=previous_webhook_url, desired_events=_TRANSCRIPTION_EVENTS,
+            )
             from .whatsapp import reconcile_notifications
             if not reconcile_notifications(lambda events: _reconcile_imessage_subscription(
                     self._inkbox, self._identity_id, desired_url=webhook_url,
@@ -4271,10 +4280,11 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=409, text="Invalid or conflicting delivery")
             except (InboxFull, OSError, sqlite3.Error):
                 return web.Response(status=503, text="Temporarily unavailable")
-            from .transcription import FINISHED, message_of
-            completion_channel = FINISHED.get(envelope.get("event_type"))
-            if completion_channel:
-                self._voice_note_receiver().complete(completion_channel, message_of(envelope, completion_channel))
+            from .transcription import FINISHED, completion_channel, message_of
+            if envelope.get("event_type") == FINISHED:
+                channel = completion_channel(envelope)
+                if channel:
+                    self._voice_note_receiver().complete(channel, message_of(envelope, channel))
             return web.json_response(receipt, status=202)
 
         if os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
@@ -4332,7 +4342,7 @@ class InkboxAdapter(BasePlatformAdapter):
         event_type = envelope.get("event_type")
         voice_channel = RECEIVED.get(event_type)
         voice_message = message_of(envelope, voice_channel) if voice_channel else {}
-        if source == "inkbox" and (event_type in FINISHED or (
+        if source == "inkbox" and (event_type == FINISHED or (
             voice_channel and voice_message.get("id") and voice_message.get("direction") != "outbound" and pending(voice_message)
         )):
             # Ordinary callbacks may not retry; retain originals before returning a prompt ACK.
@@ -4340,7 +4350,7 @@ class InkboxAdapter(BasePlatformAdapter):
                 return web.Response(status=401, text="Voice notes require an authenticated Inkbox webhook")
             try:
                 ingress = self._ordinary_voice_note_receiver()
-                if event_type in FINISHED:
+                if event_type == FINISHED:
                     ingress.complete(envelope)
                 else:
                     ingress.accept(envelope)
@@ -4446,9 +4456,11 @@ class InkboxAdapter(BasePlatformAdapter):
 
     async def _route_inkbox_event(self, event_type, envelope, headers=None):
         from .transcription import FINISHED
-        if event_type in FINISHED:
-            from .transcription import message_of
-            self._voice_note_receiver().complete(FINISHED[event_type], message_of(envelope, FINISHED[event_type]))
+        if event_type == FINISHED:
+            from .transcription import completion_channel, message_of
+            channel = completion_channel(envelope)
+            if channel:
+                self._voice_note_receiver().complete(channel, message_of(envelope, channel))
             return web.Response(status=200, text="Voice-note completion recorded")
         if event_type in SLACK_INCOMING_EVENTS or event_type == SLACK_STOP_EVENT:
             response = await self._on_slack_event(envelope)

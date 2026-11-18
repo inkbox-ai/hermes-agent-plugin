@@ -14,7 +14,6 @@ from typing import Any
 
 EVENTS = (
     "whatsapp.received",
-    "whatsapp.transcription_finished",
     "whatsapp.sent",
     "whatsapp.delivered",
     "whatsapp.delivery_failed",

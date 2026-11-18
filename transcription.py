@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 RECEIVED = {"text.received": "text", "imessage.received": "imessage", "whatsapp.received": "whatsapp"}
-FINISHED = {f"{channel}.transcription_finished": channel for channel in RECEIVED.values()}
+FINISHED = "message.transcription_finished"
 
 
 def message_of(envelope: dict[str, Any], channel: str) -> dict[str, Any]:
@@ -19,6 +19,18 @@ def message_of(envelope: dict[str, Any], channel: str) -> dict[str, Any]:
     data = envelope.get("data") or {}
     value = data.get("text_message" if channel == "text" else "message")
     return value if isinstance(value, dict) else {}
+
+
+def completion_channel(envelope: dict[str, Any]) -> str | None:
+    """Correlate the shared callback with its original channel and message."""
+    data = envelope.get("data")
+    if not isinstance(data, dict) or data.get("channel") not in RECEIVED.values():
+        return None
+    channel = data["channel"]
+    message_id = data.get("message_id")
+    if isinstance(message_id, str) and message_id and message_of(envelope, channel).get("id") == message_id:
+        return channel
+    return None
 
 
 def pending(message: dict[str, Any]) -> bool:

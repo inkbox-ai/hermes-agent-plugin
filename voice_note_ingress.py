@@ -12,7 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .managed_inbox import ManagedInbox, boot_id
 from .managed_work import DeliveryWork, scope
-from .transcription import FINISHED, RECEIVED, message_of, pending, poll_message
+from .transcription import completion_channel, RECEIVED, message_of, pending, poll_message
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,9 @@ class VoiceNoteIngress:
 
     def complete(self, envelope: dict) -> None:
         """Persist callbacks without scheduling or waking a model."""
-        channel = FINISHED[envelope["event_type"]]
+        channel = completion_channel(envelope)
+        if not channel:
+            return
         message = message_of(envelope, channel)
         if not message.get("id") or message.get("direction") == "outbound" or pending(message):
             return

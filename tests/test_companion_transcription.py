@@ -48,8 +48,10 @@ def voice_event(instance, channel, phase="initialization", status="pending"):
 def completion_for(value):
     completed = deepcopy(value)
     completed.pop("companion")
-    completed["event_type"] = value["event_type"].replace(".received", ".transcription_finished")
-    source = completed["data"]["text_message" if completed["event_type"].startswith("text.") else "message"]
+    channel = value["event_type"].split(".")[0]
+    source = completed["data"]["text_message" if channel == "text" else "message"]
+    completed["event_type"] = "message.transcription_finished"
+    completed["data"].update(channel=channel, message_id=source["id"])
     source["media"][0]["transcription"] = {"status": "completed", "text": "A recorded update."}
     return completed
 
