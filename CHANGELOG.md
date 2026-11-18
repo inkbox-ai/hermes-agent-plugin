@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.34
+## 0.2.39 (unreleased)
 
 - Wait briefly for voice-note transcripts, read once on timeout, and retain original attachments when transcription is unavailable.
 - Register transcription completion notifications automatically and label transcribed speech separately from typed messages.
