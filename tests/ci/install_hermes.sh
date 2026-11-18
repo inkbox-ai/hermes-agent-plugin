@@ -6,7 +6,7 @@ hermes_commit="bf0203a794a07aac3ff764972ab9087baa4e4f4e" # v0.22.5
 installer_url="https://raw.githubusercontent.com/NousResearch/hermes-agent/${hermes_commit}/scripts/install.sh"
 installer_path="${RUNNER_TEMP:?RUNNER_TEMP must be set}/hermes-install.sh"
 max_attempts="${HERMES_INSTALL_ATTEMPTS:-4}"
-attempt_timeout="${HERMES_INSTALL_TIMEOUT:-120}"
+attempt_timeout="${HERMES_INSTALL_TIMEOUT:-300}"
 
 for attempt in $(seq 1 "$max_attempts"); do
   if curl --fail --silent --show-error --location \

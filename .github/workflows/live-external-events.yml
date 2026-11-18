@@ -49,7 +49,15 @@ jobs:
           echo "HERMES_HOME=$GITHUB_WORKSPACE/.hermes" >> "$GITHUB_ENV"
           echo "GATEWAY_LOG=$RUNNER_TEMP/gateway.log" >> "$GITHUB_ENV"
 
+      - name: Restore Hermes install
+        id: hermes-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .hermes
+          key: hermes-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/ci/install_hermes.sh') }}
+
       - name: Check out Hermes v0.22.5
+        if: steps.hermes-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
@@ -59,8 +67,18 @@ jobs:
 
       - name: Install Hermes (non-interactive)
         run: |
-          bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
+          if [ "${{ steps.hermes-cache.outputs.cache-hit }}" != true ]; then
+            bash "$GITHUB_WORKSPACE/tests/ci/install_hermes.sh" --skip-browser
+          fi
           echo "$HERMES_HOME/hermes-agent/.hermes/bin" >> "$GITHUB_PATH"
+
+      # Save before later steps write the plugin, config and secrets into .hermes.
+      - name: Save Hermes install
+        if: steps.hermes-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .hermes
+          key: ${{ steps.hermes-cache.outputs.cache-primary-key }}
 
       - name: Install plugin into the gateway
         run: |
