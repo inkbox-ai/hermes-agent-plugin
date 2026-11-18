@@ -10,7 +10,7 @@ COMPATIBILITY_NAMES = {
 }
 
 
-def compatibility_arguments(name, arguments, operation_id=None):
+def compatibility_arguments(name, arguments):
     from .tools import _contact_arg, _contact_payload
 
     if name not in COMPATIBILITY_NAMES:
@@ -34,7 +34,7 @@ def compatibility_arguments(name, arguments, operation_id=None):
         return {"limit": 25, **arguments}
     if name in {"inkbox_get_contact", "inkbox_delete_contact"}:
         result = {"contact_id": _contact_arg(arguments, "contact_id", "contactId")}
-        return {**result, "idempotency_key": operation_id} if name == "inkbox_delete_contact" else result
+        return result
     fields = _contact_payload(arguments, require_any=True)
     for key, value_key in (("emails", "value"), ("phones", "value_e164")):
         if key in fields:
@@ -46,4 +46,4 @@ def compatibility_arguments(name, arguments, operation_id=None):
         if name == "inkbox_create_contact"
         else {"contact_id": _contact_arg(arguments, "contact_id", "contactId"), "patch": fields}
     )
-    return {**result, "idempotency_key": operation_id}
+    return result

@@ -809,3 +809,15 @@ See [Remote Inkbox tools](REMOTE_TOOLS.md) for discovery, permissions, retained 
 Set `INKBOX_TOOL_MODE=native_mcp` before loading the plugin when your host integration owns the regular communications MCP catalog. This suppresses both the plugin's remote connector and overlapping SDK tool registrations. The default, `plugin`, preserves existing registration.
 
 Native mode retains the inbound adapter, voice calling, local media upload/download helpers, Vault tools, and inbound A2A completion helpers. The host integration must configure its MCP server and provide the terminal reply helper with durable receipt tracking. Setting this option alone does not configure a replacement tool connection. Keep the existing reply journals when switching modes or restarting.
+
+### Managed diagnostics
+
+When `INKBOX_HOSTED_MODE=1`, doctor reads the secret-free report named by
+`INKBOX_DIAGNOSTICS_FILE`. Reports must match the identity and harness, belong to
+this user, have private file permissions, and be no more than 60 seconds old.
+Missing, stale, or unhealthy reports do not establish readiness. With
+`INKBOX_DIAGNOSTIC_CONTEXT=terminal`, the signing key is checked in the runtime
+report; the key itself is not needed in the terminal. Runtime processes still
+require their own signing key. Managed delivery does not require ordinary webhook
+subscriptions. Standalone diagnostics are unchanged. These checks do not send
+messages or prove end-to-end delivery.

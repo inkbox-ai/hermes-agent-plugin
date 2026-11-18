@@ -106,11 +106,19 @@ if TYPE_CHECKING:
     # import annotations`); both are imported locally where actually called.
     import threading
 
+
+try:
+    from .dependency_diagnostics import report_import_failure as _dependency_import_failure
+except ImportError:
+    from dependency_diagnostics import report_import_failure as _dependency_import_failure
+
+
 try:
     from aiohttp import WSMsgType, web
 
     AIOHTTP_AVAILABLE = True
-except ImportError:
+except ImportError as error:
+    _dependency_import_failure("aiohttp", error)
     web = None  # type: ignore[assignment]
     WSMsgType = None  # type: ignore[assignment]
     AIOHTTP_AVAILABLE = False
@@ -120,7 +128,8 @@ try:
     from inkbox.exceptions import InkboxAPIError
 
     INKBOX_AVAILABLE = True
-except ImportError:
+except ImportError as error:
+    _dependency_import_failure("inkbox", error)
     Inkbox = None  # type: ignore[assignment]
     verify_webhook = None  # type: ignore[assignment]
     InkboxAPIError = Exception  # type: ignore[assignment,misc]

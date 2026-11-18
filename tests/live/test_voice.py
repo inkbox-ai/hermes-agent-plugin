@@ -44,7 +44,7 @@ def _call_me_text() -> str:
     phrasing = _CALL_ME_PHRASINGS[uuid.uuid4().int % len(_CALL_ME_PHRASINGS)]
     return (
         f"{phrasing} This is my authorization to place the call now; "
-        f"please execute the call rather than only describe it. (ref {uuid.uuid4().hex[:6]})"
+        f"use the inkbox_place_call tool to place it. (ref {uuid.uuid4().hex[:6]})"
     )
 
 
@@ -809,6 +809,21 @@ def _gateway_log_text() -> str:
     return "\n".join(chunks)
 
 
+def _assert_realtime_pcm(aut, call_id: str, *, deadline: float) -> None:
+    tts, stt = _aut_speech_mode(aut, call_id)
+    assert tts is False and stt is False, (
+        f"expected realtime speech, got Inkbox tts={tts} stt={stt}"
+    )
+    marker = f"call_id={call_id} audio_format=pcm_s16le sample_rate=16000"
+    log_deadline = min(deadline, time.monotonic() + 10)
+    while True:
+        if marker in _gateway_log_text():
+            return
+        if time.monotonic() >= log_deadline:
+            pytest.fail("realtime call completed without a logged HD 16 kHz PCM negotiation")
+        time.sleep(0.25)
+
+
 def _delete_contacts_by_email(client, email: str) -> None:
     for contact in client.contacts.lookup(email=email) or []:
         contact_id = str(getattr(contact, "id", "") or "")
@@ -930,9 +945,10 @@ def test_outbound_call_realtime_direct_contact_lookup():
             )
             assert agent_said, "agent produced no speech on the contact-lookup call"
 
+            contact_read = re.compile(rf"direct contact read inkbox_\w+ for call_id={re.escape(str(aut_call.id))}\b")
             while time.monotonic() < deadline:
                 recite = _recite_from_aut(aut_call.id)
-                if recite and "direct contact read inkbox_" in _gateway_log_text():
+                if recite and contact_read.search(_gateway_log_text()):
                     break
                 time.sleep(POLL_EVERY_S)
         finally:
@@ -944,18 +960,13 @@ def test_outbound_call_realtime_direct_contact_lookup():
         # tool is invoked.
         log_text = _gateway_log_text()
         assert log_text, "gateway log unavailable to prove the direct contact read"
-        assert "direct contact read inkbox_" in log_text, "gateway logs show no direct contact read during the call"
+        contact_read_seen = contact_read.search(log_text) is not None
+        assert contact_read_seen, "gateway logs show no direct contact read during the call"
         assert recite, (
             "the AUT call transcript did not persist the requested contact details"
         )
 
-        assert f"call_id={aut_call.id} audio_format=pcm_s16le sample_rate=16000" in _gateway_log_text(), (
-            "realtime call did not negotiate HD 16 kHz PCM audio"
-        )
-        tts, stt = _aut_speech_mode(aut, aut_call.id)
-        assert tts is False and stt is False, (
-            f"call must be on the realtime path (Inkbox speech off), got tts={tts} stt={stt}"
-        )
+        _assert_realtime_pcm(aut, aut_call.id, deadline=deadline)
     finally:
         _delete_contacts_by_email(aut, LOOKUP_CONTACT_EMAIL)
 
@@ -1017,13 +1028,7 @@ def test_outbound_call_realtime():
         )
         assert agent_said, "agent produced no speech on the outbound call"
 
-        assert f"call_id={aut_call.id} audio_format=pcm_s16le sample_rate=16000" in _gateway_log_text(), (
-            "realtime call did not negotiate HD 16 kHz PCM audio"
-        )
-        tts, stt = _aut_speech_mode(aut, aut_call.id)
-        assert tts is False and stt is False, (
-            f"outbound call must be powered by the realtime API (Inkbox speech off), got tts={tts} stt={stt}"
-        )
+        _assert_realtime_pcm(aut, aut_call.id, deadline=deadline)
     finally:
         _hangup_fresh_calls(remote, _inbound_from_aut, before)
         _hangup_fresh_calls(aut, _outbound_from_agent, before_aut)

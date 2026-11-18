@@ -227,6 +227,7 @@ def _wait_for_new_call_pair(
     )
 
 
+@pytest.mark.expects_live_call
 def test_email_request_gets_call(xc):
     """Email asks the agent to CALL; a new inbound call must land on the driver."""
     remote, aut = xc["remote"], xc["aut"]
@@ -258,6 +259,7 @@ def test_email_request_gets_call(xc):
     )
 
 
+@pytest.mark.expects_live_call
 def test_sms_request_gets_call(xc):
     """SMS asks the agent to CALL; a new inbound call must land on the driver."""
     remote, aut = xc["remote"], xc["aut"]

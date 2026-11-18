@@ -1,13 +1,13 @@
 [project]
 name = "hermes-agent-plugin"
-version = "0.2.33"
+version = "0.2.38"
 description = "Inkbox platform plugin for Hermes Agent"
 # Inkbox requires Python 3.11 or newer.
 requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
   "audioop-lts>=0.2.1; python_version >= '3.13'",
-  "inkbox>=0.7.38,<1.0.0",
+  "inkbox>=0.7.39,<1.0.0",
   "segno>=1.5",
 ]
 
@@ -33,6 +33,7 @@ line-length = 125
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--import-mode=importlib"]
+markers = ["expects_live_call: allow expected calls to proceed until test teardown"]
 
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "aefaec5a500bd89275f754ac2a4df16c9a8a6146", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "84386f5ea022a9594fb901894f927ee444c2cf91", subdirectory = "sdk/python" }

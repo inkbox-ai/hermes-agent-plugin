@@ -14,7 +14,6 @@ def test_native_contact_schema_preserves_camel_case_and_labeled_entries():
             "phones": [{"value": "+15550000001", "label": "work", "isPrimary": False}],
             "emails": [],
         },
-        "native-call",
     )
     assert result == {
         "contact_id": "contact",
@@ -23,5 +22,4 @@ def test_native_contact_schema_preserves_camel_case_and_labeled_entries():
             "phones": [{"value_e164": "+15550000001", "label": "work", "is_primary": False}],
             "emails": [],
         },
-        "idempotency_key": "native-call",
     }

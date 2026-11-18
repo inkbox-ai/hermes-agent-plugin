@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import hashlib
 import json
 import logging
 import threading
 import time
+from copy import deepcopy
 
 from .config import inkbox_client_kwargs, inkbox_state_path, read_runtime_config
 from .remote_compat import COMPATIBILITY_NAMES, compatibility_arguments
@@ -28,8 +28,8 @@ class RemoteTools:
         self.lock = threading.RLock()
 
     async def discover(self):
-        from inkbox.remote_mcp import RemoteMcp
         from inkbox import Inkbox
+        from inkbox.remote_mcp import RemoteMcp
 
         cfg = read_runtime_config()
         if not cfg.api_key or not cfg.identity:
@@ -53,8 +53,9 @@ class RemoteTools:
             client.close()
 
     def publish(self, remote, catalog):
-        from . import terminal_reply
         from tools.registry import registry
+
+        from . import terminal_reply
 
         if not self.compatibility:
             self.compatibility = {
@@ -153,7 +154,7 @@ class RemoteTools:
         from . import terminal_reply
         def call(arguments, **kwargs):
             try:
-                from tools.approval_context import _approval_session_id, _approval_turn_id, _approval_tool_call_id
+                from tools.approval_context import _approval_session_id, _approval_tool_call_id, _approval_turn_id
 
                 values = [_approval_session_id.get(), _approval_turn_id.get(), _approval_tool_call_id.get()]
                 if not all(isinstance(value, str) and 1 <= len(value) <= 256 for value in values):
@@ -199,7 +200,7 @@ class RemoteTools:
                 result = _run_async(
                     turn[0].call(
                         COMPATIBILITY_NAMES.get(name, name),
-                        compatibility_arguments(name, arguments, operation),
+                        compatibility_arguments(name, arguments),
                         call_identity=operation,
                         before_execute=validate,
                         journal_path=journal,

@@ -1,7 +1,6 @@
 """Call cleanup retries and per-test ownership without external services."""
 
 import importlib.util
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,11 +17,11 @@ def cleanup(monkeypatch):
     return module
 
 
-def start_fixture(module):
+def start_fixture(module, marker=None):
     fixture = module._clean_up_calls_created_by_live_test
     assert fixture._fixture_function_marker.scope == "function"
     fn = fixture.__wrapped__
-    return fn(**{name: None for name in inspect.signature(fn).parameters})
+    return fn(SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda _: marker)))
 
 
 def test_watchdog_retries_until_terminal_and_preserves_preexisting_calls(cleanup, monkeypatch):
@@ -91,8 +90,9 @@ def test_teardown_finishes_this_tests_call_before_next_test(cleanup, monkeypatch
         phone_numbers=SimpleNamespace(list=lambda: [SimpleNamespace(number="local")]),
     )
     monkeypatch.setattr(cleanup, "_client", lambda _: client)
-    monkeypatch.setenv("VOICE_SCENARIO", "synthetic")
-    run = start_fixture(cleanup)
+    monkeypatch.delenv("VOICE_SCENARIO", raising=False)
+    run = start_fixture(cleanup, marker=True)
+    assert not attempts
     next(run)
     calls.append(new)
     with pytest.raises(StopIteration):

@@ -541,7 +541,7 @@ wheels = [
 
 [[package]]
 name = "hermes-agent-plugin"
-version = "0.2.33"
+version = "0.2.38"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -560,7 +560,7 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'", specifier = ">=0.2.1" },
-    { name = "inkbox", git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=aefaec5a500bd89275f754ac2a4df16c9a8a6146" },
+    { name = "inkbox", git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=84386f5ea022a9594fb901894f927ee444c2cf91" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.11.0,<0.16" },
     { name = "segno", specifier = ">=1.5" },
@@ -633,8 +633,8 @@ wheels = [
 
 [[package]]
 name = "inkbox"
-version = "0.7.38"
-source = { git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=aefaec5a500bd89275f754ac2a4df16c9a8a6146#aefaec5a500bd89275f754ac2a4df16c9a8a6146" }
+version = "0.7.39"
+source = { git = "https://github.com/inkbox-ai/inkbox.git?subdirectory=sdk%2Fpython&rev=84386f5ea022a9594fb901894f927ee444c2cf91#84386f5ea022a9594fb901894f927ee444c2cf91" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "certifi" },

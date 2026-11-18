@@ -1,0 +1,777 @@
+[
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contact": {
+          "additionalProperties": false,
+          "properties": {
+            "addresses": {
+              "items": {
+                "properties": {
+                  "city": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "country": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "label": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "postal": {
+                    "anyOf": [
+                      {
+                        "maxLength": 32,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "region": {
+                    "anyOf": [
+                      {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "street": {
+                    "anyOf": [
+                      {
+                        "maxLength": 255,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "birthday": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "company_name": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "custom_fields": {
+              "items": {
+                "properties": {
+                  "label": {
+                    "maxLength": 128,
+                    "type": "string"
+                  },
+                  "value": {
+                    "maxLength": 1024,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "dates": {
+              "items": {
+                "properties": {
+                  "date": {
+                    "format": "date",
+                    "type": "string"
+                  },
+                  "label": {
+                    "maxLength": 64,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "date",
+                  "label"
+                ],
+                "type": "object"
+              },
+              "maxItems": 25,
+              "type": "array"
+            },
+            "emails": {
+              "items": {
+                "properties": {
+                  "is_primary": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "label": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "value": {
+                    "format": "email",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "family_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "given_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "job_title": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "middle_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "name_prefix": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "name_suffix": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "notes": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "phones": {
+              "items": {
+                "properties": {
+                  "is_primary": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "label": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "value_e164": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value_e164"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "preferred_name": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "websites": {
+              "items": {
+                "properties": {
+                  "label": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "url": {
+                    "maxLength": 2048,
+                    "pattern": "^https?://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              },
+              "maxItems": 25,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "contact"
+      ],
+      "type": "object"
+    },
+    "name": "inkbox_contact_create"
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contact_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contact_id"
+      ],
+      "type": "object"
+    },
+    "name": "inkbox_contact_delete"
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "patch": {
+          "additionalProperties": false,
+          "properties": {
+            "addresses": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "city": {
+                        "anyOf": [
+                          {
+                            "maxLength": 128,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "country": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "label": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "postal": {
+                        "anyOf": [
+                          {
+                            "maxLength": 32,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "region": {
+                        "anyOf": [
+                          {
+                            "maxLength": 128,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "street": {
+                        "anyOf": [
+                          {
+                            "maxLength": 255,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "maxItems": 10,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "birthday": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "company_name": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "custom_fields": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "label": {
+                        "maxLength": 128,
+                        "type": "string"
+                      },
+                      "value": {
+                        "maxLength": 1024,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "label",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "dates": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "date": {
+                        "format": "date",
+                        "type": "string"
+                      },
+                      "label": {
+                        "maxLength": 64,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "date",
+                      "label"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 25,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "emails": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "is_primary": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "value": {
+                        "format": "email",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "family_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "given_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "job_title": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "middle_name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "name_prefix": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "name_suffix": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "notes": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "phones": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "is_primary": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "value_e164": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "value_e164"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "preferred_name": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "websites": {
+              "anyOf": [
+                {
+                  "items": {
+                    "properties": {
+                      "label": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null
+                      },
+                      "url": {
+                        "maxLength": 2048,
+                        "pattern": "^https?://",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "url"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 25,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "contact_id",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "name": "inkbox_contact_update"
+  }
+]

@@ -135,12 +135,13 @@ jobs:
           else
             echo "INKBOX_VOICE_STACK=openai_realtime" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_ENABLED=true" >> "$HERMES_HOME/.env"
+            echo "INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false" >> "$HERMES_HOME/.env"
             echo "INKBOX_REALTIME_MODEL=gpt-realtime-2" >> "$HERMES_HOME/.env"
           fi
 
       - name: Start gateway and wait for readiness
         run: |
-          hermes gateway run > "$GATEWAY_LOG" 2>&1 &
+          hermes gateway run -v > "$GATEWAY_LOG" 2>&1 &
           echo $! > "$RUNNER_TEMP/gateway.pid"
           echo "Waiting for the gateway (tunnel + webhooks)…"
           for i in $(seq 1 36); do
