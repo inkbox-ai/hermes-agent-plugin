@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import sqlite3
 from datetime import date, datetime
 from typing import Any, Dict, List
 from urllib.parse import urlsplit, urlunsplit
@@ -376,6 +377,13 @@ def run_doctor() -> Dict[str, Any]:
                     "nativeIMessageEnabled": cfg.imessage_threaded_replies,
                     "vaultKeyConfigured": bool(os.getenv("INKBOX_HERMES_VAULT_KEY")),
                 }
+                from .voice_note_ingress import inbox_path, unconfirmed_ids
+                try:
+                    ids = unconfirmed_ids(inbox_path(inkbox_state_path().parent, cfg.base_url, str(identity.id)))
+                except (OSError, sqlite3.Error):
+                    summary["unconfirmedVoiceNotes"] = {"error": "Cannot read the local inbox"}
+                else:
+                    summary["unconfirmedVoiceNotes"] = {"count": len(ids), "messageIds": ids}
                 summary["channelQueues"] = _local_queue_counts(cfg, identity.id)
                 if cfg.imessage_threaded_replies:
                     capability = _native_imessage_capability(identity)
