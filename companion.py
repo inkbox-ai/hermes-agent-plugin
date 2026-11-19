@@ -685,6 +685,9 @@ class CompanionReceiver:
         channel = {"phone": "text", "imessage": "imessage", "whatsapp": "whatsapp", "slack": "slack"}.get(row["meta"]["channel"])
         envelope = turn.get("envelope")
         item = voice_message(envelope, channel) if envelope and channel else {}
+        # Slack waits only when the transcription message is the verified archive source.
+        if channel == "slack" and str(item.get("id")) != str(message(envelope).get("id")):
+            return
         if not item.get("id") or not any(isinstance(media, dict) and isinstance(media.get("transcription"), dict)
                                          for media in item.get("media") or []):
             return
