@@ -519,7 +519,7 @@ def test_stale_delivery_report_counts_as_done(adapter):
         adapter._report_inbound_failure(_data(), "boom")
 
 
-def test_backoff_and_reporting_count_as_activity(tmp_path):
+def test_backoff_counts_as_activity_but_pending_report_does_not(tmp_path):
     from inkbox_plugin import managed_lifecycle
 
     queue = _queue(tmp_path)
@@ -530,9 +530,79 @@ def test_backoff_and_reporting_count_as_activity(tmp_path):
     adapter = types.SimpleNamespace(is_connected=True, _inbound_events=queue)
     assert managed_lifecycle.status(adapter)["active"] == 1
     queue.fail(KEY, "boom")
-    assert managed_lifecycle.status(adapter)["active"] == 1
-    queue.finish(KEY, "failed")
     assert managed_lifecycle.status(adapter)["active"] == 0
+
+
+def test_running_turn_counts_as_activity(tmp_path):
+    seen = []
+
+    async def run_agent(data, body):
+        seen.append(queue.pending())
+
+    queue = _queue(tmp_path, run_agent)
+    data = _data()
+    queue.accept(data)
+    asyncio.run(queue.process(KEY, data, 0))
+    assert seen == [1] and queue.pending() == 0
+
+
+def test_interrupted_agent_turn_is_reported_not_repeated(tmp_path):
+    reports, turns = [], []
+
+    async def run_agent(data, body):
+        turns.append(body)
+        await asyncio.Event().wait()
+
+    async def stop_mid_turn():
+        queue = _queue(tmp_path, run_agent)
+        queue.start()
+        queue.accept(_data(handler={"type": "script", "command": "echo summary"}))
+        for _ in range(500):
+            if turns:
+                break
+            await asyncio.sleep(0.01)
+        await queue.close()
+
+    asyncio.run(stop_mid_turn())
+    queue = _queue(tmp_path, report=lambda data, error: reports.append(error))  # restart
+    assert _row(queue)[0] == "reporting"
+    _drain_reports(queue, _data())
+    assert turns == ["summary\n"] and reports == ["agent turn was interrupted by a restart"]
+
+
+def test_script_output_turn_failure_reports_without_rerun(tmp_path, monkeypatch):
+    runs, reports = [], []
+
+    async def fake_run(command, data):
+        runs.append(command)
+        return True, "summary", ""
+
+    async def run_agent(data, body):
+        raise RuntimeError("no session")
+
+    monkeypatch.setattr(inbound_events, "run_script", fake_run)
+    queue = _queue(tmp_path, run_agent, lambda data, error: reports.append(error))
+    data = _data(handler={"type": "script", "command": "x"})
+    queue.accept(data)
+    asyncio.run(queue.process(KEY, data, 0))
+    _drain_reports(queue, data)
+    assert runs == ["x"] and reports == ["no session"]
+
+
+@pytest.mark.parametrize(("status", "retried"), [(409, False), (400, False), (404, False), (408, True),
+                                                 (429, True), (500, True), (None, True)])
+def test_failure_report_response_handling(adapter, status, retried):
+    error = OSError("offline") if status is None else type("ApiError", (Exception,), {"status_code": status})()
+
+    def report(*args, **kwargs):
+        raise error
+
+    adapter._inkbox = types.SimpleNamespace(inbound=types.SimpleNamespace(report_inbound_event_result=report))
+    if retried:
+        with pytest.raises(type(error)):
+            adapter._report_inbound_failure(_data(), "boom")
+    else:
+        adapter._report_inbound_failure(_data(), "boom")
 
 
 def test_script_output_is_bounded(tmp_path, monkeypatch):

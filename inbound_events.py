@@ -76,7 +76,7 @@ class InboundEvents:
     """Durable queue processed by one background worker, deduplicated on ``delivery_id``.
 
     ``pending`` events run their handler; ``reporting`` events retry the failure
-    report without running the handler again.
+    report without running the handler again. An agent turn never runs twice.
     """
 
     def __init__(self, path: Path, run_agent, report_failure):
@@ -92,6 +92,7 @@ class InboundEvents:
         self.report_failure = report_failure
         self.wake = asyncio.Event()
         self.task: asyncio.Task | None = None
+        self.turn_running = False
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.loop())
@@ -104,9 +105,9 @@ class InboundEvents:
         self.db.close()
 
     def pending(self) -> int:
-        """Unfinished events, including those waiting out a retry delay."""
+        """Events still to handle, including script retry waits; pending failure reports are not counted."""
         return self.db.execute(
-            "SELECT count(*) FROM inbound_events WHERE state IN ('pending','reporting')").fetchone()[0]
+            "SELECT count(*) FROM inbound_events WHERE state='pending'").fetchone()[0] + self.turn_running
 
     def accept(self, data: dict) -> bool:
         """Store a new event; False when its delivery was already received."""
@@ -166,6 +167,9 @@ class InboundEvents:
                 self.finish(key, "done")
                 return
             body = out
+        # Recorded as failed first so a turn interrupted by a restart is reported, not repeated.
+        self.fail(key, "agent turn was interrupted by a restart")
+        self.turn_running = True
         try:
             await self.run_agent(data, body)
         except asyncio.CancelledError:
@@ -173,6 +177,8 @@ class InboundEvents:
         except Exception as error:
             self.fail(key, (str(error) or f"agent turn failed ({type(error).__name__})")[:500])
             return
+        finally:
+            self.turn_running = False
         self.finish(key, "done")
 
     def fail(self, key: str, error: str) -> None:
