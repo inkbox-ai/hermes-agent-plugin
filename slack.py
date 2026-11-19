@@ -23,6 +23,7 @@ SLACK_ATTENTION_EVENTS = tuple(
 )
 SLACK_STOP_EVENT = "slack.session_stopped"
 SLACK_SUBSCRIPTION_EVENTS = (*SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT)
+TRANSCRIPTION_FINISHED = "message.transcription_finished"
 SLACK_MAX_TEXT_LENGTH = 12000
 
 
@@ -55,29 +56,68 @@ def reconcile_subscription(client: Any, identity_id: Any, url: str) -> None:
     slack_resource(client)
     subscriptions = client.webhooks.subscriptions
     events = list(SLACK_SUBSCRIPTION_EVENTS)
+    rows = [sub for sub in subscriptions.list(agent_identity_id=identity_id, scope="identity", url=url) if sub.url == url]
     covered = set()
     message_subscriptions = []
-    for sub in subscriptions.list(agent_identity_id=identity_id, scope="identity", url=url):
+    for sub in rows:
         overlap = set(sub.event_types) & set(events)
-        if sub.url == url and overlap:
+        if overlap:
             if sub.status != "active":
                 raise RuntimeError("The Slack subscription is paused; resume it before starting")
             covered.update(overlap)
             if overlap.intersection(SLACK_INCOMING_EVENTS):
                 message_subscriptions.append(sub)
     missing = [event for event in events if event not in covered]
-    if not missing:
-        return
-    if message_subscriptions:
+    # Slack transcripts are delivered only to a subscription that also selected the original message.
+    target = next((sub for sub in message_subscriptions if TRANSCRIPTION_FINISHED in sub.event_types), None)
+    if target is None and message_subscriptions:
         # Extend the existing receiver: a second channel-only subscription
         # would deliver mentions again under another event category.
-        sub = max(message_subscriptions, key=lambda item: len(set(item.event_types).intersection(SLACK_INCOMING_EVENTS)))
-        subscriptions.update(sub.id, event_types=list(dict.fromkeys([*sub.event_types, *missing])), scope="identity")
+        target = max(message_subscriptions, key=lambda item: len(set(item.event_types).intersection(SLACK_INCOMING_EVENTS)))
+    finished = target is None or TRANSCRIPTION_FINISHED not in target.event_types
+    if not missing and not finished:
         return
-    # A test receiver must not replace another receiver or another channel.
-    subscriptions.create(
-        agent_identity_id=identity_id, url=url, event_types=missing,
-    )
+    if finished:
+        # One URL holds each event in a single active subscription, so move it here.
+        _release_finished(subscriptions, [sub for sub in rows if sub is not target])
+
+    def apply(wanted: list[str]) -> None:
+        if target is not None:
+            subscriptions.update(target.id, event_types=list(dict.fromkeys([*target.event_types, *wanted])), scope="identity")
+        else:
+            # A test receiver must not replace another receiver or another channel.
+            subscriptions.create(agent_identity_id=identity_id, url=url, event_types=wanted)
+
+    try:
+        apply([*missing, *([TRANSCRIPTION_FINISHED] if finished else [])])
+    except Exception as exc:
+        if not finished or not _finished_unsupported(exc):
+            raise
+        if missing:
+            apply(missing)  # Older APIs without transcription keep Slack delivery unchanged.
+
+
+def _release_finished(subscriptions: Any, rows: list) -> None:
+    for sub in rows:
+        if sub.status != "active" or TRANSCRIPTION_FINISHED not in sub.event_types:
+            continue
+        remaining = [event for event in sub.event_types if event != TRANSCRIPTION_FINISHED]
+        if remaining:
+            subscriptions.update(sub.id, event_types=remaining, scope="identity")
+            continue
+        try:
+            subscriptions.delete(sub.id)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise
+
+
+def _finished_unsupported(exc: Exception) -> bool:
+    """An API that predates transcription rejects only that event name."""
+    errors = getattr(exc, "detail", None)
+    return (getattr(exc, "status_code", None) == 422 and isinstance(errors, list) and bool(errors)
+            and all(isinstance(error, dict) and error.get("type") == "enum"
+                    and error.get("input") == TRANSCRIPTION_FINISHED for error in errors))
 
 
 def inbound_message(envelope: dict, identity_id: str) -> tuple[str, str, dict] | None:
