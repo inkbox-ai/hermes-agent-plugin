@@ -154,7 +154,10 @@ try:
     from .companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from .native_turns import NativeTurns
     from .tunnel_tls import install_tunnel_tls_compatibility
-    from .slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
+    from .slack import (
+        SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription,
+        TRANSCRIPTION_FINISHED, transcription_subscription_unsupported as _transcription_subscription_unsupported,
+    )
     from .slack_activity import SlackActivity
     from .imessage_state import auto_reply_kwargs, source_metadata, require_threading
     from .conversation import ConversationState, reply_route, mode as response_mode, mentions, same_author, raw_text, conversation_control, approval_reply
@@ -204,7 +207,10 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from companion import CompanionReceiver, DEFAULT_MAX_BYTES, IncompatibleCompanionSDK, read_checkpoint
     from native_turns import NativeTurns
     from tunnel_tls import install_tunnel_tls_compatibility
-    from slack import SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription
+    from slack import (
+        SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT, inbound_message, inbound_stop, reconcile_subscription,
+        TRANSCRIPTION_FINISHED, transcription_subscription_unsupported as _transcription_subscription_unsupported,
+    )
     from slack_activity import SlackActivity
     from imessage_state import auto_reply_kwargs, source_metadata, require_threading
     from conversation import ConversationState, reply_route, mode as response_mode, mentions, same_author, raw_text, conversation_control, approval_reply
@@ -713,7 +719,7 @@ _DESIRED_IMESSAGE_EVENTS: tuple[str, ...] = (
     "imessage.reaction_received",
 )
 _DESIRED_CALL_EVENTS: tuple[str, ...] = ("call.ended",)
-_TRANSCRIPTION_EVENTS = ("message.transcription_finished",)
+_TRANSCRIPTION_EVENTS = (TRANSCRIPTION_FINISHED,)
 
 
 def _subscription_family(event_type: str) -> str:
@@ -750,23 +756,6 @@ _A2A_ERROR_PHASE_RANK = {
     "queueing": 4,
     "execution": 5,
 }
-
-
-def _transcription_subscription_unsupported(exc: Exception) -> bool:
-    if isinstance(exc, ValueError):
-        return str(exc).startswith("Identity-wide webhook subscriptions are not supported by this server yet.")
-    errors = getattr(exc, "detail", None)
-    if getattr(exc, "status_code", None) != 422 or not isinstance(errors, list) or not errors:
-        return False
-    # The API reports one enum error per channel when none recognize the event.
-    return all(
-        isinstance(error, dict)
-        and error.get("type") == "enum"
-        and isinstance(error.get("loc"), list)
-        and error["loc"][:3] == ["body", "event_types", 0]
-        and error.get("input") == _TRANSCRIPTION_EVENTS[0]
-        for error in errors
-    )
 
 
 def _is_unsupported_a2a_event_types(exc: Exception) -> bool:
