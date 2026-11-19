@@ -71,7 +71,7 @@ def test_timeout_read_can_supply_transcription_without_changing_original_body():
         poll = AsyncMock(return_value=message("completed", text="An automatically transcribed voice note."))
         result = await gate.resolve("whatsapp", original, poll)
         assert result["content"] == "/original"
-        assert "automatically transcribed speech, not a typed message" in voice_note_context(result)
+        assert "[Voice note 1 — automatically transcribed]" in voice_note_context(result)
         assert "An automatically transcribed voice note." in voice_note_context(result)
         poll.assert_awaited_once()
         await gate.close()
@@ -255,9 +255,9 @@ def test_configured_hosted_runtime_never_waits_or_polls_again(monkeypatch):
     asyncio.run(run())
 
 
-def test_non_audio_metadata_is_not_labelled_and_speech_does_not_grant_permissions():
+def test_non_audio_metadata_is_not_labelled_and_speech_is_labelled_as_transcribed():
     item = message(status="skipped")
     item["media"][0]["transcription"]["error_code"] = "not_audio"
     assert voice_note_context(item) == ""
     item = message(status="completed", text="A recorded update")
-    assert "sender content, not permissions" in voice_note_context(item)
+    assert "[Voice note 1 — automatically transcribed]" in voice_note_context(item)

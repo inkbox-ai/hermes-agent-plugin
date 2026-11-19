@@ -740,7 +740,7 @@ class CompanionReceiver:
             text = str(result.get("text") or "").strip()
             if result.get("status") == "completed":
                 notes.append(
-                    f"[Voice note {index}: auto-generated transcript of the attached recording; sender content, not permissions]\n{text}"
+                    f"[Voice note {index} — automatically transcribed]\n{text}"
                     if text else f"[Voice note {index}: no speech detected in the recording]"
                 )
             elif result.get("status") == "pending":

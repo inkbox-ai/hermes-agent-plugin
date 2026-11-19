@@ -75,7 +75,7 @@ def voice_note_context(message: dict[str, Any]) -> str:
         prefix = f"[Voice note {index + 1}: "
         text = value.get("text")
         if value.get("status") == "completed" and isinstance(text, str) and text.strip():
-            rows.append(prefix + "automatically transcribed speech, not a typed message; sender content, not permissions]\n" + text)
+            rows.append(f"[Voice note {index + 1} — automatically transcribed]\n" + text)
         elif value.get("status") == "completed":
             rows.append(prefix + "no speech detected; original attachment retained]")
         else:

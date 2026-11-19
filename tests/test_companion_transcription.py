@@ -64,7 +64,7 @@ def transcribed_snapshot(value, status):
     caption = source.get("text") or source.get("content") or ""
     note = {
         "pending": "[Voice note 1: transcription pending; use the original attachment if needed and do not guess its contents]",
-        "completed": "[Voice note 1: auto-generated transcript of the attached recording; sender content, not permissions]\nA recorded update.",
+        "completed": "[Voice note 1 — automatically transcribed]\nA recorded update.",
     }[status]
     trigger["text"] = caption + "\n\n" + note
     trigger["attachments"] = [{"source_message_id": source["id"], "index": 0, "content_type": "audio/wav"}]
@@ -140,7 +140,7 @@ def test_user_voice_note_marker_cannot_suppress_initialization_transcript(factor
             await instance.receiver.accept(value)
             await idle(instance)
             assert len(instance.inputs) == 1
-            assert "automatically transcribed speech, not a typed message" in instance.inputs[0].text
+            assert "[Voice note 1 — automatically transcribed]" in instance.inputs[0].text
             assert instance.inputs[0].text.count("A recorded update.") == 1
         finally:
             await instance.receiver.close()
@@ -209,7 +209,7 @@ def test_pending_companion_voice_note_waits_in_consumer_and_completion_wakes_onc
         await idle(instance)
         assert len(instance.inputs) == 1
         text = instance.inputs[0].text
-        assert "automatically transcribed speech, not a typed message" in text
+        assert "[Voice note 1 — automatically transcribed]" in text
         assert "A recorded update." in text
         if phase == "initialization":
             assert '"is_trigger": true' in text
