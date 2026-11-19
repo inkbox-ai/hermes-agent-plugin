@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import copy
 import hashlib
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -15,6 +17,27 @@ from .managed_work import DeliveryWork, scope
 from .transcription import completion_channel, RECEIVED, message_of, pending, poll_message
 
 logger = logging.getLogger(__name__)
+
+
+def inbox_path(root: Path, base_url: str, identity_id: str) -> Path:
+    namespace = hashlib.sha256(json.dumps([base_url, identity_id]).encode()).hexdigest()
+    return root / "inkbox_voice_notes" / namespace / "events.sqlite3"
+
+
+def unconfirmed_ids(path: Path) -> list[str]:
+    """Read original channel and message identifiers, never the saved content."""
+    if not path.exists():
+        return []
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("""
+            SELECT json_extract(payload, '$.original.event_type'),
+                   coalesce(json_extract(payload, '$.original.data.text_message.id'),
+                            json_extract(payload, '$.original.data.message.id'))
+              FROM deliveries
+             WHERE state IN ('dispatching','unknown') AND settled_at IS NULL
+             ORDER BY 1, 2
+        """)
+        return [f"{RECEIVED[event]}:{source}" for event, source in rows]
 
 
 class VoiceNoteIngress:

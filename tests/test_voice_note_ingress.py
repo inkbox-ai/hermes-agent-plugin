@@ -217,3 +217,16 @@ def test_native_whatsapp_startup_refusal_is_recoverable_without_repoll(tmp_path,
         read.assert_awaited_once()
         await close(recovered, inbox)
     asyncio.run(scenario())
+
+
+def test_diagnostics_identify_only_unconfirmed_originals(tmp_path, monkeypatch):
+    async def scenario():
+        adapter, ingress, _, _, _ = receiver(tmp_path, monkeypatch)
+        path = ingress_module.inbox_path(tmp_path, adapter._base_url, adapter._identity_id)
+        ingress.accept(original())
+        assert ingress_module.unconfirmed_ids(path) == []
+        ingress.db.execute("UPDATE deliveries SET state='unknown'")
+        assert ingress_module.unconfirmed_ids(path) == [f"text:{message()['id']}"]
+        assert ingress.db.execute("SELECT state FROM deliveries").fetchone() == ("unknown",)
+        await close(adapter, ingress)
+    asyncio.run(scenario())

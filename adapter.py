@@ -4467,12 +4467,8 @@ class InkboxAdapter(BasePlatformAdapter):
     def _ordinary_voice_note_receiver(self):
         """Keep ordinary fire-and-forget receipts in an identity-scoped inbox."""
         if not hasattr(self, "_ordinary_voice_notes"):
-            from .voice_note_ingress import VoiceNoteIngress
-            import hashlib
-            namespace = hashlib.sha256(json.dumps([
-                self._base_url, self._identity_id,
-            ]).encode()).hexdigest()
-            path = _inkbox_state_path().parent / "inkbox_voice_notes" / namespace / "events.sqlite3"
+            from .voice_note_ingress import VoiceNoteIngress, inbox_path
+            path = inbox_path(_inkbox_state_path().parent, self._base_url, self._identity_id)
             self._ordinary_voice_notes = VoiceNoteIngress(self, path)
         return self._ordinary_voice_notes
 
