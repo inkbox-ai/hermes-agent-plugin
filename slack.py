@@ -91,7 +91,7 @@ def reconcile_subscription(client: Any, identity_id: Any, url: str) -> None:
     try:
         apply([*missing, *([TRANSCRIPTION_FINISHED] if finished else [])])
     except Exception as exc:
-        if not finished or not _finished_unsupported(exc):
+        if not finished or not transcription_subscription_unsupported(exc):
             raise
         if missing:
             apply(missing)  # Older APIs without transcription keep Slack delivery unchanged.
@@ -112,12 +112,24 @@ def _release_finished(subscriptions: Any, rows: list) -> None:
                 raise
 
 
-def _finished_unsupported(exc: Exception) -> bool:
+def transcription_subscription_unsupported(exc: Exception) -> bool:
     """An API that predates transcription rejects only that event name."""
+    if isinstance(exc, ValueError):
+        return str(exc).startswith("Identity-wide webhook subscriptions are not supported by this server yet.")
     errors = getattr(exc, "detail", None)
-    return (getattr(exc, "status_code", None) == 422 and isinstance(errors, list) and bool(errors)
-            and all(isinstance(error, dict) and error.get("type") == "enum"
-                    and error.get("input") == TRANSCRIPTION_FINISHED for error in errors))
+    if getattr(exc, "status_code", None) != 422 or not isinstance(errors, list) or not errors:
+        return False
+    # The API reports one enum error per channel when none recognize the event.
+    return all(
+        isinstance(error, dict)
+        and error.get("type") == "enum"
+        and isinstance(error.get("loc"), list)
+        and error["loc"][:2] == ["body", "event_types"]
+        and len(error["loc"]) > 2
+        and type(error["loc"][2]) is int
+        and error.get("input") == TRANSCRIPTION_FINISHED
+        for error in errors
+    )
 
 
 def inbound_message(envelope: dict, identity_id: str) -> tuple[str, str, dict] | None:
