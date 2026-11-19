@@ -731,11 +731,10 @@ class CompanionReceiver:
                         if str(entry.get("id")) == str(item.get("id")) and entry.get("is_trigger") is True), None)
         if trigger is None:
             return False
-        results = [media["transcription"] for media in item.get("media") or []
-                   if isinstance(media, dict) and isinstance(media.get("transcription"), dict)]
         notes = []
-        for index, result in enumerate(results, 1):
-            if result.get("error_code") == "not_audio":
+        for index, media in enumerate(item.get("media") or [], 1):
+            result = media.get("transcription") if isinstance(media, dict) else None
+            if not isinstance(result, dict) or result.get("error_code") == "not_audio":
                 continue
             text = str(result.get("text") or "").strip()
             if result.get("status") == "completed":

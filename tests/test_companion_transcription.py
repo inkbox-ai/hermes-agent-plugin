@@ -72,6 +72,14 @@ def transcribed_snapshot(value, status):
     return result
 
 
+def test_snapshot_label_uses_original_attachment_position():
+    item = {"id": uid(501), "content": "Caption", "media": [
+        {"content_type": "image/png"}, {"transcription": {"status": "completed", "text": "Spoken."}},
+    ]}
+    entry = {"id": item["id"], "is_trigger": True, "text": "Caption\n\n[Voice note 2 — automatically transcribed]\nSpoken."}
+    assert CompanionReceiver._snapshot_has_voice_note({"entries": [entry]}, item)
+
+
 def test_initialization_refetches_after_completion_without_stale_or_duplicate_transcript(factory, monkeypatch):
     async def run():
         instance = factory("imessage")
