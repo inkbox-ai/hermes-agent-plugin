@@ -309,3 +309,15 @@ def test_slack_transient_connection_read_is_retryable_before_admission(factory, 
         await value.adapter._slack_activity.close()
         await value.adapter._voice_note_receiver().close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("status", "transient"),
+    [(408, True), (429, True), (500, True), (599, True), (403, False), (404, False), (600, False)],
+)
+def test_transient_read_failure_retries_only_timeouts_rate_limits_and_5xx(status, transient):
+    from inkbox_plugin.adapter import _transient_read_failure
+
+    error = Exception("read failed")
+    error.status_code = status
+    assert _transient_read_failure(error) is transient
