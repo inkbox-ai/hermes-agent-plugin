@@ -268,3 +268,44 @@ def test_slack_diagnostics_identify_unconfirmed_originals(tmp_path, monkeypatch)
         assert ingress_module.unconfirmed_ids(path) == [f"slack:{MESSAGE_ID}"]
         await close(adapter, ingress)
     asyncio.run(scenario())
+
+
+def test_slack_original_redelivered_under_another_category_keeps_one_receipt(tmp_path, monkeypatch):
+    async def scenario():
+        adapter, ingress, _, rows, delivered = slack_receiver(tmp_path, monkeypatch)
+        ingress.start()
+        channel = voice_event()
+        channel["event_type"] = "slack.channel_message_received"
+        assert (await adapter._handle_webhook(Request(channel))).status == 202
+        # The same message may come back as a mention; it is a duplicate, not a conflict.
+        assert (await adapter._handle_webhook(Request(voice_event()))).status == 202
+        assert ingress.db.execute("SELECT count(*) FROM deliveries").fetchone()[0] == 1
+        await adapter._handle_webhook(Request(completion()))
+        await asyncio.wait_for(delivered.wait(), 1)
+        await asyncio.sleep(0)
+        assert len(rows) == 1
+        assert rows[0]["event_type"] == "slack.channel_message_received"
+        assert files(rows[0])[0]["transcription"]["text"] == SPEECH
+        await close(adapter, ingress)
+    asyncio.run(scenario())
+
+
+def test_slack_transient_connection_read_is_retryable_before_admission(factory, tmp_path):
+    async def run():
+        value = await slack_host(factory, tmp_path)
+        connections = value.adapter._inkbox.slack.list_connections
+        connections.side_effect = [ConnectionError("reset"), connections.return_value]
+        refused = await value.adapter._on_slack_event(voice_event("completed", text=SPEECH))
+        assert refused.status == 503 and refused.get("native_receiver_starting")
+        assert not value.inputs and not value.queue.rows
+        assert (await value.adapter._on_slack_event(voice_event("completed", text=SPEECH))).status == 202
+        await started(value)
+        assert len(value.inputs) == 1
+        await settle(value.queue)
+        connections.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await value.adapter._on_slack_event(voice_event("completed", text=SPEECH))
+        await value.queue.close()
+        await value.adapter._slack_activity.close()
+        await value.adapter._voice_note_receiver().close()
+    asyncio.run(run())
