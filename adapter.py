@@ -375,6 +375,7 @@ def _write_private_json_atomic(path: Path, value: Any) -> None:
 # Used only for VERIFIED sources (a registered provider validated the signature,
 # or Inkbox itself signed it).
 INBOUND_BODY_LIMIT = 64 * 1024
+INBOUND_TURN_TIMEOUT = 1800
 
 EXTERNAL_EVENT_DIRECTIVE = (
     "You have been woken by an EXTERNAL automated event (a webhook from an "
@@ -4538,12 +4539,9 @@ class InkboxAdapter(BasePlatformAdapter):
         source_info = data.get("source") or {}
         name = str(source_info.get("name") or "inbound").replace("[", "").replace("]", "")
         name = " ".join(name.split())[:80] or "inbound"
-        request = data.get("request") or {}
         if body is None:
-            if request.get("body_encoding") == "base64":
-                body = f"(binary body of type {request.get('content_type') or 'unknown'}, not shown)"
-            else:
-                body = str(request.get("body") or "")
+            from .inbound_events import request_body
+            body = request_body(data.get("request") or {})
         raw = body.encode("utf-8")
         if len(raw) > INBOUND_BODY_LIMIT:
             # "ignore" drops only a character split by the cut.
@@ -4574,7 +4572,10 @@ class InkboxAdapter(BasePlatformAdapter):
         await (await self._enqueue(event))
         if getattr(event, "_gateway_accepted", None) is False:
             raise RuntimeError("agent turn was not started")
-        outcome = await finished
+        try:
+            outcome = await asyncio.wait_for(finished, INBOUND_TURN_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"agent turn did not finish within {INBOUND_TURN_TIMEOUT // 60} minutes") from None
         if str(getattr(outcome, "value", outcome)).lower() != "success":
             raise RuntimeError(f"agent turn ended: {str(getattr(outcome, 'value', outcome)).lower()}")
 

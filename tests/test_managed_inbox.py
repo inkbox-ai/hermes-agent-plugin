@@ -302,3 +302,18 @@ def test_quarantine_after_owner_replacement_unblocks_scope(tmp_path, monkeypatch
         assert inbox.accept(first)['state'] == 'unknown'
     finally:
         inbox.close()
+
+
+def test_size_limit_counts_utf8_bytes(tmp_path):
+    activation = str(uuid4())
+    inbox = ManagedInbox(tmp_path / 'inbox' / 'events.sqlite3', activation)
+    fits = event(activation)
+    # About 1.5 MiB as UTF-8, over 2 MiB once escaped as ASCII.
+    fits['data']['body'] = '\u00e9' * (768 * 1024)
+    assert inbox.accept(fits)['state'] == 'accepted'
+    stored = inbox.db.execute('SELECT payload FROM deliveries').fetchone()[0]
+    assert json.loads(stored)['data']['body'] == fits['data']['body']
+    too_big = event(activation, 2)
+    too_big['data']['body'] = '\u00e9' * (1024 * 1024 + 1)
+    with pytest.raises(InboxError, match='size limit'):
+        inbox.accept(too_big)

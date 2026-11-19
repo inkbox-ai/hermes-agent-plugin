@@ -228,10 +228,30 @@ def test_agent_turn_message_and_session(adapter):
 
 
 def test_agent_turn_notes_binary_body(adapter):
-    data = _data(body=base64.b64encode(b"\x00\x01").decode(), body_encoding="base64", content_type="image/png")
+    data = _data(body=base64.b64encode(b"\x00\x01\xff").decode(), body_encoding="base64", content_type="image/png")
     asyncio.run(adapter._run_inbound_agent(data))
-    assert "(binary body of type image/png, not shown)" in adapter._enqueued[0].text
-    assert "AAE=" not in adapter._enqueued[0].text
+    assert adapter._enqueued[0].text.endswith("Body:\n(binary body, 3 bytes, not shown)")
+
+
+def test_agent_turn_shows_base64_utf8_body(adapter):
+    data = _data(body=base64.b64encode("caf\u00e9 \u2713".encode()).decode(), body_encoding="base64")
+    asyncio.run(adapter._run_inbound_agent(data))
+    assert adapter._enqueued[0].text.endswith("Body:\ncaf\u00e9 \u2713")
+    big = _data(body=base64.b64encode(b"x" * 70000).decode(), body_encoding="base64")
+    asyncio.run(adapter._run_inbound_agent(big))
+    assert adapter._enqueued[1].text.endswith("x" * 65536 + "\n(truncated)")
+
+
+def test_agent_turn_wait_is_bounded(adapter, monkeypatch):
+    monkeypatch.setattr(adapter_mod, "INBOUND_TURN_TIMEOUT", 0.05)
+
+    async def admitted(event):
+        event._gateway_accepted = True
+        return asyncio.create_task(asyncio.sleep(0))
+
+    adapter._enqueue = admitted
+    with pytest.raises(RuntimeError, match="did not finish"):
+        asyncio.run(adapter._run_inbound_agent(_data()))
 
 
 def test_inbound_replies_are_not_delivered(adapter):
@@ -484,7 +504,7 @@ def test_failure_report_is_persisted_and_retried_without_rerun(tmp_path, monkeyp
     assert len(runs) == 5 and calls == ["boom", "boom"]
 
 
-def test_failure_report_gives_up_after_a_day(tmp_path, monkeypatch):
+def test_failure_report_keeps_retrying_past_a_day(tmp_path, monkeypatch):
     def offline(data, error):
         raise OSError("offline")
 
@@ -492,10 +512,62 @@ def test_failure_report_gives_up_after_a_day(tmp_path, monkeypatch):
     data = _data()
     queue.accept(data)
     queue.fail(KEY, "boom")
-    monkeypatch.setattr(inbound_events.time, "time", lambda: queue.db.execute(
-        "SELECT failed_at FROM inbound_events").fetchone()[0] + inbound_events.REPORT_WINDOW)
-    asyncio.run(queue.report(KEY, data, 3))
-    assert _row(queue)[0] == "failed"
+    now = queue.db.execute("SELECT failed_at FROM inbound_events").fetchone()[0] + 2 * 86400
+    monkeypatch.setattr(inbound_events.time, "time", lambda: now)
+    asyncio.run(queue.report(KEY, data, 20))
+    assert _row(queue) == ("reporting", 21, now + 3600)
+
+
+def test_pending_report_is_retried_immediately_on_start(tmp_path):
+    reports = []
+    queue = _queue(tmp_path)
+    queue.accept(_data())
+    queue.fail(KEY, "boom")
+    queue.db.execute("UPDATE inbound_events SET due=due+3600")
+    queue.db.close()
+
+    async def run():
+        restarted = _queue(tmp_path, report=lambda data, error: reports.append(error))
+        restarted.start()
+        for _ in range(200):
+            if _row(restarted)[0] != "reporting":
+                break
+            await asyncio.sleep(0.01)
+        await restarted.close()
+
+    asyncio.run(run())
+    assert reports == ["boom"]
+
+
+def test_script_run_is_counted_before_it_starts(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_run(command, data):
+        seen.append(_row(queue)[1])
+        return False, "", "boom"
+
+    monkeypatch.setattr(inbound_events, "run_script", fake_run)
+    queue = _queue(tmp_path)
+    data = _data(handler={"type": "script", "command": "x"})
+    queue.accept(data)
+    asyncio.run(queue.process(KEY, data, 0))
+    assert seen == [1]
+
+
+def test_interrupted_last_script_run_is_not_repeated(tmp_path, monkeypatch):
+    async def fake_run(command, data):
+        raise AssertionError("sixth run")
+
+    reports = []
+    monkeypatch.setattr(inbound_events, "run_script", fake_run)
+    queue = _queue(tmp_path, report=lambda data, error: reports.append(error))
+    data = _data(handler={"type": "script", "command": "x"})
+    queue.accept(data)
+    # Five runs counted; the fifth was cut off by a restart.
+    queue.db.execute("UPDATE inbound_events SET attempts=5,error='boom'")
+    asyncio.run(queue.process(KEY, data, 5))
+    _drain_reports(queue, data)
+    assert reports == ["boom"]
 
 
 def test_stale_delivery_report_counts_as_done(adapter):
@@ -612,5 +684,5 @@ def test_script_output_is_bounded(tmp_path, monkeypatch):
                "head -c 100000 /dev/zero | tr '\\0' e >&2; printf END >&2")
     ok, out, err = asyncio.run(inbound_events.run_script(command, _data(body=big)))
     assert ok is True
-    assert len(out) == inbound_events.STDOUT_LIMIT + 1
+    assert out == "o" * inbound_events.STDOUT_LIMIT + "\n(truncated)"
     assert len(err) == inbound_events.STDERR_TAIL and err.endswith("END")

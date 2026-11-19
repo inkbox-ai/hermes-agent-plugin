@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -14,15 +16,39 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 RETRY_DELAYS = (10, 30, 120, 600)
+MAX_RUNS = len(RETRY_DELAYS) + 1
 SCRIPT_TIMEOUT = 120
 STDOUT_LIMIT = 64 * 1024
 STDERR_TAIL = 4 * 1024
-REPORT_WINDOW = 86400
+REPORT_MAX_DELAY = 3600
 RETENTION = 7 * 86400
 
 
 def local_delivery() -> bool:
     return os.getenv("INKBOX_DELIVERY_MODE", "").strip().lower() == "local"
+
+
+def request_body(request: dict) -> str:
+    """The request body as text; base64 bodies are shown when they decode to UTF-8."""
+    body = str(request.get("body") or "")
+    if request.get("body_encoding") != "base64":
+        return body
+    try:
+        raw = base64.b64decode(body, validate=True)
+    except binascii.Error:
+        return "(binary body, not shown)"
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"(binary body, {len(raw)} bytes, not shown)"
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 async def _drain(stream, limit: int, *, tail: bool = False) -> bytes:
@@ -59,7 +85,7 @@ async def run_script(command: str, data: dict) -> tuple[bool, str, str]:
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
-        # One byte past the limit lets the agent prompt mark the output as truncated.
+        # One byte past the limit shows whether the output was truncated.
         _, out, err, _ = await asyncio.wait_for(asyncio.gather(
             _feed(proc.stdin, stdin), _drain(proc.stdout, STDOUT_LIMIT + 1),
             _drain(proc.stderr, STDERR_TAIL, tail=True), proc.wait(),
@@ -69,7 +95,8 @@ async def run_script(command: str, data: dict) -> tuple[bool, str, str]:
             os.killpg(proc.pid, signal.SIGKILL)
         await proc.wait()
         return False, "", f"timed out after {SCRIPT_TIMEOUT} s"
-    return proc.returncode == 0, out.decode(errors="replace"), err.decode(errors="replace")
+    stdout = out[:STDOUT_LIMIT].decode(errors="ignore") + ("\n(truncated)" if len(out) > STDOUT_LIMIT else "")
+    return proc.returncode == 0, stdout, err.decode(errors="replace")
 
 
 class InboundEvents:
@@ -82,12 +109,15 @@ class InboundEvents:
     def __init__(self, path: Path, run_agent, report_failure):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, isolation_level=None)
+        # WAL with FULL sync makes each commit durable before the delivery is acknowledged.
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS inbound_events (delivery_id TEXT PRIMARY KEY, payload TEXT,"
             " attempts INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL, error TEXT, failed_at REAL,"
             " state TEXT NOT NULL CHECK(state IN ('pending','reporting','done','failed')), received REAL NOT NULL)"
         )
+        _fsync_dir(path.parent)
         self.run_agent = run_agent
         self.report_failure = report_failure
         self.wake = asyncio.Event()
@@ -95,6 +125,8 @@ class InboundEvents:
         self.turn_running = False
 
     def start(self) -> None:
+        # Pending failure reports are retried right away on every start.
+        self.db.execute("UPDATE inbound_events SET due=? WHERE state='reporting'", (time.time(),))
         self.task = asyncio.create_task(self.loop())
 
     async def close(self) -> None:
@@ -154,14 +186,22 @@ class InboundEvents:
         handler = data.get("handler") or {}
         body = None
         if handler.get("type") == "script":
+            if attempts >= MAX_RUNS:
+                # The last run was cut off by a restart; it is not run again.
+                error = self.db.execute("SELECT error FROM inbound_events WHERE delivery_id=?", (key,)).fetchone()[0]
+                self.fail(key, error or "script run was interrupted by a restart")
+                return
+            attempts += 1
+            # Counted before running so a run cut off by a restart still uses up the attempt.
+            self.db.execute("UPDATE inbound_events SET attempts=? WHERE delivery_id=?", (attempts, key))
             ok, out, err = await run_script(str(handler.get("command") or ""), data)
             if not ok:
-                attempts += 1
-                if attempts <= len(RETRY_DELAYS):
-                    self.db.execute("UPDATE inbound_events SET attempts=?,due=? WHERE delivery_id=?",
-                                    (attempts, time.time() + RETRY_DELAYS[attempts - 1], key))
+                error = (err.strip() or "script failed")[-500:]
+                if attempts < MAX_RUNS:
+                    self.db.execute("UPDATE inbound_events SET due=?,error=? WHERE delivery_id=?",
+                                    (time.time() + RETRY_DELAYS[attempts - 1], error, key))
                     return
-                self.fail(key, (err.strip() or "script failed")[-500:])
+                self.fail(key, error)
                 return
             if not out.strip():
                 self.finish(key, "done")
@@ -189,17 +229,13 @@ class InboundEvents:
         self.wake.set()
 
     async def report(self, key: str, data: dict, attempts: int) -> None:
-        error, failed_at = self.db.execute(
-            "SELECT error,failed_at FROM inbound_events WHERE delivery_id=?", (key,)).fetchone()
+        error = self.db.execute("SELECT error FROM inbound_events WHERE delivery_id=?", (key,)).fetchone()[0]
         try:
             await asyncio.to_thread(self.report_failure, data, error)
         except Exception as exc:
-            if time.time() - failed_at >= REPORT_WINDOW:
-                logger.warning("[Inkbox] Gave up reporting inbound delivery %s (%s)", key, type(exc).__name__)
-                self.finish(key, "failed")
-                return
+            logger.warning("[Inkbox] Reporting inbound delivery %s failed (%s)", key, type(exc).__name__)
             self.db.execute("UPDATE inbound_events SET attempts=?,due=? WHERE delivery_id=?",
-                            (attempts + 1, time.time() + min(30 * 2 ** attempts, 3600), key))
+                            (attempts + 1, time.time() + min(30 * 2 ** attempts, REPORT_MAX_DELAY), key))
             return
         self.finish(key, "failed")
 
