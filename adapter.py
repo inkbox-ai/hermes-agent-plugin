@@ -761,7 +761,7 @@ _A2A_ERROR_PHASE_RANK = {
 def _transient_read_failure(exc: Exception) -> bool:
     """A network or server-side failure that a later attempt may not repeat."""
     status = getattr(exc, "status_code", None)
-    if isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (isinstance(status, int) and status >= 500):
+    if isinstance(exc, (TimeoutError, ConnectionError)) or status in {408, 429} or (isinstance(status, int) and 500 <= status < 600):
         return True
     try:
         from httpx import TransportError
