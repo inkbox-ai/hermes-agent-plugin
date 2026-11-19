@@ -24,7 +24,7 @@ LABEL = "[Voice note 1 — automatically transcribed]\n" + SPEECH
 def voice(number=3, *, phase="initialization", status="pending", message_id=True, **kwargs):
     value = incoming(number, phase=phase, **kwargs)
     if message_id:
-        value["data"]["message_id"] = uid(number)
+        value["data"]["message_id"] = uid(number) if message_id is True else message_id
     value["data"]["event"]["files"] = [{
         "id": "FVOICE1", "name": "voice.m4a", "mimetype": "audio/mp4", "size": 2048,
         "transcription": {"status": status, "text": SPEECH if status == "completed" else None, "error_code": None},
@@ -139,14 +139,16 @@ def test_live_slack_failure_delivers_original_attachment(companion_host, monkeyp
     asyncio.run(run())
 
 
-def test_slack_companion_without_message_id_is_not_held(companion_host, monkeypatch):
+@pytest.mark.parametrize("message_id", [False, uid(99)])
+def test_slack_companion_without_matching_message_id_is_not_held(companion_host, monkeypatch, message_id):
     async def run():
         host = companion_host
         read = AsyncMock()
         monkeypatch.setattr(transcription, "poll_message", read)
-        await host.receiver.accept(voice(message_id=False))
+        await host.receiver.accept(voice(message_id=message_id))
         await idle(host)
         assert len(host.inputs) == 1
+        assert "voice.m4a" in host.inputs[0].text
         assert host.adapter._voice_note_receiver().entries == {}
         turn = next(iter(host.receiver.rows.values()))["turns"][0]
         assert "voice_note_resolution" not in turn
