@@ -148,10 +148,10 @@ def test_slack_companion_without_matching_message_id_is_not_held(companion_host,
         await host.receiver.accept(voice(message_id=message_id))
         await idle(host)
         assert len(host.inputs) == 1
-        assert "voice.m4a" in host.inputs[0].text
         assert host.adapter._voice_note_receiver().entries == {}
         turn = next(iter(host.receiver.rows.values()))["turns"][0]
         assert "voice_note_resolution" not in turn
+        assert turn["envelope"]["data"]["event"]["files"][0]["transcription"]["status"] == "pending"
         read.assert_not_called()
         await stop(host)
     asyncio.run(run())
