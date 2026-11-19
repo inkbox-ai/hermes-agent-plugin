@@ -1171,6 +1171,35 @@ def _reconcile_subscription(
         list_kwargs["scope"] = "identity"
     existing = client.webhooks.subscriptions.list(**list_kwargs)
 
+    if identity_scope and desired_families == {"whatsapp"}:
+        # Disjoint subscriptions may share a URL. Create only the difference;
+        # replacing a shared row could discard another registrant's events.
+        wanted = list(desired_events)
+        while True:
+            covering = [
+                row for row in existing
+                if row.url == desired_url and any(event in wanted for event in row.event_types)
+            ]
+            covered = {event for row in covering for event in row.event_types}
+            missing = [event for event in wanted if event not in covered]
+            if not missing:
+                return covering[0].id
+            try:
+                created = client.webhooks.subscriptions.create(
+                    url=desired_url, event_types=missing, **{owner_kwarg: owner_id}
+                )
+                return created.id
+            except Exception as exc:
+                if getattr(exc, "status_code", None) != 409:
+                    raise
+                existing = client.webhooks.subscriptions.list(**list_kwargs)
+                if not any(
+                    row.url == desired_url and event in missing
+                    for row in existing for event in row.event_types
+                ):
+                    raise
+                wanted = missing
+
     # Same URL + a compatible event superset: adopt verbatim, no writes. A
     # provisioner may attach newer events from this channel before the plugin
     # knows how to consume them; stripping those events can collide with a

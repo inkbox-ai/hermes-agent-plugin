@@ -36,10 +36,11 @@ def reconcile(rows, *, race=False):
 @pytest.mark.parametrize("race", [False, True])
 @pytest.mark.parametrize("mixed", [False, True])
 def test_existing_whatsapp_receiver_is_visible_and_adopted(race, mixed):
-    active = row("active", (*EVENTS, "a2a.task.created") if mixed else EVENTS)
+    active = row("active", (*EVENTS, "whatsapp.future", "a2a.task.created") if mixed else EVENTS)
     other = row("other", ["imessage.received"])
     shared = row("shared", ["whatsapp.sent", "a2a.task.created"], URL + "?shared=1")
     subscriptions, run = reconcile([active, other, shared], race=race)
+    assert run() == "active"
     assert run() == "active"
     assert subscriptions.create.call_count == int(race)
     subscriptions.update.assert_not_called()
@@ -51,8 +52,11 @@ def test_existing_whatsapp_receiver_is_visible_and_adopted(race, mixed):
 def test_incomplete_shared_receiver_is_not_truncated():
     shared = row("shared", ["whatsapp.sent", "a2a.task.created"])
     subscriptions, run = reconcile([shared])
-    with pytest.raises(InkboxAPIError):
-        run()
+    subscriptions.create.side_effect = None
+    subscriptions.create.return_value = row("missing", [])
+    assert run() == "missing"
+    subscriptions.create.assert_called_once_with(agent_identity_id="identity-1", url=URL,
+                                                event_types=[e for e in EVENTS if e != "whatsapp.sent"])
     subscriptions.update.assert_not_called()
     subscriptions.delete.assert_not_called()
 
