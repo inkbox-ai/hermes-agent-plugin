@@ -4483,7 +4483,7 @@ class InkboxAdapter(BasePlatformAdapter):
             and f"{channel}:{message_id}" in getattr(self, "_inflight_request_ids", {})
         ))
 
-    async def _route_inkbox_event(self, event_type, envelope, headers=None):
+    async def _route_inkbox_event(self, event_type, envelope, headers=None, *, saved_voice_note=False):
         from .transcription import FINISHED
         if event_type == FINISHED:
             from .transcription import completion_channel, message_of
@@ -4522,7 +4522,8 @@ class InkboxAdapter(BasePlatformAdapter):
             record_status(self, envelope)
             response = web.Response(status=200, text="WhatsApp delivery status recorded")
         elif event_type == "imessage.received":
-            response = await self._on_imessage_received(envelope)
+            response = (await self._on_imessage_received(envelope, saved_voice_note=True) if saved_voice_note
+                        else await self._on_imessage_received(envelope))
         elif event_type == "imessage.reaction_received":
             response = await self._on_imessage_reaction(envelope)
         elif event_type and event_type.startswith("imessage."):
@@ -8006,7 +8007,7 @@ class InkboxAdapter(BasePlatformAdapter):
             journal.release(chat_id, receipt_id)
         return web.Response(status=202, text="Slack receipt saved")
 
-    async def _on_imessage_received(self, envelope: Dict[str, Any]) -> "web.Response":
+    async def _on_imessage_received(self, envelope: Dict[str, Any], *, saved_voice_note=False) -> "web.Response":
         """Route an inbound iMessage into the contact's Hermes session.
 
         Mirrors ``_on_text_received`` while preserving iMessage-specific
@@ -8030,6 +8031,9 @@ class InkboxAdapter(BasePlatformAdapter):
         except Exception:
             self._dedup_rollback(event_key)
             raise
+        if saved_voice_note and response.get("native_receiver_starting"):
+            self._dedup_rollback(event_key)
+            return response
         self._dedup_commit(event_key)
         return response
 
@@ -8161,7 +8165,8 @@ class InkboxAdapter(BasePlatformAdapter):
         )
         if getattr(self, "_imessage_threaded_replies", False):
             if self._native_turns is None:
-                return web.Response(status=503, text="Native iMessage receiver is not ready")
+                from .transcription import receiver_starting
+                return receiver_starting("Native iMessage receiver is not ready")
             if self._prepare_conversation_event(event):
                 route = event.metadata["inkbox_reply_route"]
                 route.update(source_metadata(message, str(envelope.get("id") or message_id)))

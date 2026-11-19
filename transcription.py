@@ -196,3 +196,11 @@ async def poll_message(adapter: Any, channel: str, message: dict[str, Any]) -> d
         path = f"/{channel}/messages/{message_id}"
         params = {"agent_identity_id": str(adapter._identity_id)}
     return await asyncio.to_thread(adapter._inkbox._api_http.get, path, params=params, timeout=8)
+
+
+def receiver_starting(detail):
+    """This specific refusal occurs before native admission or a durable reservation."""
+    from aiohttp import web
+    response = web.Response(status=503, text=detail)
+    response["native_receiver_starting"] = True
+    return response

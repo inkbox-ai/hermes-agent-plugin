@@ -30,6 +30,8 @@ class VoiceNoteIngress:
             result TEXT, completion TEXT, created REAL NOT NULL)""")
         self.db.execute("DELETE FROM voice_note_resolution WHERE created<? AND event_id NOT IN (SELECT event_id FROM deliveries WHERE state!='completed')",
                         (time.time() - 7 * 86400,))
+        if "retry_at" not in {row[1] for row in self.db.execute("PRAGMA table_info(voice_note_resolution)")}:
+            self.db.execute("ALTER TABLE voice_note_resolution ADD COLUMN retry_at REAL")
         self.tasks: dict[str, asyncio.Task] = {}
         self.running = False
         self.closing = False
@@ -94,14 +96,18 @@ class VoiceNoteIngress:
         row = self.db.execute("SELECT state FROM deliveries WHERE event_id=?", (event_id,)).fetchone()
         if not row or row[0] != "pending":
             return
-        task = self.tasks[event_id] = asyncio.create_task(self._deliver(event_id))
+        task = self.tasks[event_id] = asyncio.create_task(self._resume(event_id))
         def finished(done):
             self.tasks.pop(event_id, None)
             if not done.cancelled() and done.exception() is not None:
                 logger.error("Saved voice-note receipt could not be admitted (%s)", type(done.exception()).__name__)
         task.add_done_callback(finished)
 
-    async def _deliver(self, event_id: str) -> None:
+    async def _resume(self, event_id: str) -> None:
+        while await self._deliver(event_id):
+            pass  # Only an explicit pre-admission refusal restores pending state.
+
+    async def _deliver(self, event_id: str) -> bool | None:
         row = self.db.execute("""SELECT d.payload,r.deadline,r.result,r.completion
             FROM deliveries d JOIN voice_note_resolution r USING(event_id) WHERE d.event_id=? AND d.state='pending'""",
                               (event_id,)).fetchone()
@@ -124,6 +130,12 @@ class VoiceNoteIngress:
             self.db.execute("UPDATE voice_note_resolution SET result=? WHERE event_id=?", (json.dumps(message), event_id))
         else:
             message = json.loads(result)
+        retry_at, = self.db.execute("SELECT retry_at FROM voice_note_resolution WHERE event_id=?", (event_id,)).fetchone()
+        if retry_at and retry_at > time.time():
+            await asyncio.sleep(retry_at - time.time())
+        while not callable(getattr(self.adapter, "_message_handler", None)):
+            self.db.execute("UPDATE voice_note_resolution SET retry_at=? WHERE event_id=?", (time.time() + 5, event_id))
+            await asyncio.sleep(5)
         gate.remember(channel, message)
         envelope["data"]["text_message" if channel == "text" else "message"] = message
         # Keep a wait replayable until it crosses into the existing model-admission path.
@@ -133,18 +145,26 @@ class VoiceNoteIngress:
             return
         completed = False
         rejection = None
+        retry = False
         try:
             work = DeliveryWork()
             with scope((work,)):
-                response = await self.adapter._route_inkbox_event(envelope["event_type"], envelope)
+                response = await self.adapter._route_inkbox_event(envelope["event_type"], envelope, saved_voice_note=True)
             work.seal()
-            completed = 200 <= response.status < 300 and await work.done
+            retry = bool(response.get("native_receiver_starting")) and not work.parts and not work.failed
+            completed = (200 <= response.status < 300 or response.status == 422) and await work.done
             if not completed and not work.uncertain:
                 rejection = work.rejection
         finally:
-            self.inbox.finish(event_id, completed=completed, rejection=rejection)
-            if not completed:
-                logger.error("Voice-note admission outcome requires review before replay")
+            if retry:
+                with self.inbox.transaction():
+                    self.db.execute("UPDATE voice_note_resolution SET retry_at=? WHERE event_id=?", (time.time() + 5, event_id))
+                    self.db.execute("UPDATE deliveries SET state='pending' WHERE event_id=?", (event_id,))
+            else:
+                self.inbox.finish(event_id, completed=completed, rejection=rejection)
+                if not completed and rejection is None:
+                    logger.error("Voice-note admission outcome requires review before replay")
+        return retry
 
     async def close(self) -> None:
         """Keep unresolved originals and deadlines while stopping local waiters."""

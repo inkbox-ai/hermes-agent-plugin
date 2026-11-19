@@ -141,7 +141,8 @@ async def _receive_message(adapter, envelope):
         return web.Response(status=200, text="Unsupported WhatsApp message")
     native = getattr(adapter, "_native_turns", None)
     if native is None:
-        return web.Response(status=503, text="WhatsApp receiver is not ready")
+        from .transcription import receiver_starting
+        return receiver_starting("WhatsApp receiver is not ready")
     if native.acknowledge_control(message_id) or native.acknowledge_source(message_id):
         return web.Response(status=200, text="WhatsApp receipt retained")
     key = f"whatsapp:{message_id}"

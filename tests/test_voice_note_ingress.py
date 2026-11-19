@@ -46,11 +46,12 @@ def receiver(tmp_path, monkeypatch):
     adapter._identity_id = "synthetic-agent"
     adapter._signing_key = "whsec_synthetic"
     adapter._require_signature = True
+    adapter._message_handler = AsyncMock()
     adapter._companion = None
     rows = []
     delivered = asyncio.Event()
 
-    async def route(event_type, envelope, headers=None):
+    async def route(event_type, envelope, headers=None, **kwargs):
         rows.append(deepcopy(envelope))
         delivered.set()
         return web.Response(status=200)
@@ -155,5 +156,61 @@ def test_out_of_order_completion_is_saved_across_restart_without_waking_alone(tm
         await recovered._handle_webhook(Request(original()))
         await asyncio.wait_for(delivered.wait(), timeout=1)
         assert len(rows) == 1
+        await close(recovered, inbox)
+    asyncio.run(scenario())
+
+
+def test_missing_handler_defers_resolved_receipt_across_restart(tmp_path, monkeypatch):
+    async def scenario():
+        adapter, ingress, _, rows, _ = receiver(tmp_path, monkeypatch)
+        adapter._message_handler = None
+        ingress.start()
+        await adapter._handle_webhook(Request(completed()))
+        await adapter._handle_webhook(Request(original()))
+        async def deferred():
+            while not ingress.db.execute("SELECT retry_at FROM voice_note_resolution").fetchone()[0]:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(deferred(), 1)
+        result, retry_at = ingress.db.execute("SELECT result,retry_at FROM voice_note_resolution").fetchone()
+        assert result and retry_at and not rows
+        await close(adapter, ingress)
+        recovered, inbox, _, restored, delivered = receiver(tmp_path, monkeypatch)
+        inbox.db.execute("UPDATE voice_note_resolution SET retry_at=0")
+        inbox.start()
+        await asyncio.wait_for(delivered.wait(), 1)
+        assert restored[0]["data"]["text_message"] == json.loads(result)
+        await close(recovered, inbox)
+    asyncio.run(scenario())
+
+
+def test_native_whatsapp_startup_refusal_is_recoverable_without_repoll(tmp_path, monkeypatch):
+    from tests.test_whatsapp import inbound
+
+    async def scenario():
+        adapter, ingress, _, _, _ = receiver(tmp_path, monkeypatch)
+        del adapter._route_inkbox_event
+        event = inbound(media=message()["media"], agent_identity_id=adapter._identity_id)
+        adapter._voice_notes = VoiceNoteGate(wait_seconds=0)
+        read = AsyncMock(return_value=event["data"]["message"])
+        monkeypatch.setattr(ingress_module, "poll_message", read)
+        ingress.start()
+        await adapter._handle_webhook(Request(event))
+
+        async def deferred():
+            while not ingress.db.execute("SELECT retry_at FROM voice_note_resolution").fetchone()[0]:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(deferred(), 1)
+        await close(adapter, ingress)
+        recovered, inbox, _, _, _ = receiver(tmp_path, monkeypatch)
+        del recovered._route_inkbox_event
+        recovered._native_turns = Mock()
+        recovered._native_turns.acknowledge_control.return_value = False
+        recovered._native_turns.acknowledge_source.return_value = True
+        inbox.db.execute("UPDATE voice_note_resolution SET retry_at=0")
+        inbox.start()
+        await asyncio.wait_for(asyncio.gather(*inbox.tasks.values()), 1)
+        recovered._native_turns.acknowledge_source.assert_called_once_with(event["data"]["message"]["id"])
+        assert inbox.db.execute("SELECT state FROM deliveries").fetchone() == ("completed",)
+        read.assert_awaited_once()
         await close(recovered, inbox)
     asyncio.run(scenario())
