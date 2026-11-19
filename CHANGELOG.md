@@ -3,7 +3,7 @@
 ## 0.2.40 (unreleased)
 
 - Add `INKBOX_DELIVERY_MODE=local`: open no tunnel, register no webhook URL, listen on `127.0.0.1` only, and accept event bodies up to 2 MiB with unchanged signature verification.
-- Handle `inbound.received` events in local delivery mode. Events are queued durably and deduplicated by delivery ID (falling back to event ID), so retries run once and replays run again. The `agent` handler runs one turn per source session with the content marked untrusted and the body capped at 64 KiB; the `script` handler passes the event as JSON on stdin and starts an agent turn when it prints output. Scripts run up to 5 times (retries after 10 s, 30 s, 2 min, and 10 min, 120 s timeout each), then the event is reported as failed.
+- Handle `inbound.received` events in local delivery mode. Each event is stored durably before it is acknowledged, survives restarts, and is deduplicated by `delivery_id`, so retries run once and replays run again. A valid Inkbox signature is always required. The `agent` handler runs one turn per source session with the content marked untrusted and the body capped at 64 KiB; the event completes only when that turn succeeds. The `script` handler passes the event as JSON on stdin and starts an agent turn when it prints output; up to 64 KiB of stdout and the last 4 KiB of stderr are kept. Scripts run up to 5 times (retries after 10 s, 30 s, 2 min, and 10 min, 120 s timeout each). Script and agent failures are reported to Inkbox, with the report retried for up to 24 hours without running the handler again. Queued events, including retry waits, count as activity for hosted agents.
 - Require Inkbox SDK 0.7.41.
 
 ## 0.2.39 (unreleased)

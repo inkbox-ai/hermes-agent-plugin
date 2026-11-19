@@ -4506,8 +4506,14 @@ class InkboxAdapter(BasePlatformAdapter):
         ):
             return web.Response(status=401, text="Invalid signature")
         data = envelope.get("data")
-        if not isinstance(data, dict) or not isinstance(data.get("event_id"), str) or not data["event_id"]:
+        if (not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data[k]
+                                                  for k in ("event_id", "delivery_id"))):
             return web.Response(status=400, text="Invalid inbound event")
+        hosted = envelope.get("hosted_delivery")
+        activation = os.getenv("INKBOX_HOSTED_ACTIVATION_ID")
+        if hosted is not None and activation and (not isinstance(hosted, dict)
+                                                  or hosted.get("activation_id") != activation):
+            return web.Response(status=409, text="Invalid or conflicting delivery")
         receiver = getattr(self, "_inbound_events", None)
         if receiver is None:
             return web.Response(status=503, text="Temporarily unavailable")
@@ -4563,7 +4569,14 @@ class InkboxAdapter(BasePlatformAdapter):
             channel_prompt=EXTERNAL_EVENT_DIRECTIVE,
             internal=True,
         )
-        await self._enqueue(event)
+        finished = asyncio.get_running_loop().create_future()
+        event._inkbox_inbound_finished = finished
+        await (await self._enqueue(event))
+        if getattr(event, "_gateway_accepted", None) is False:
+            raise RuntimeError("agent turn was not started")
+        outcome = await finished
+        if str(getattr(outcome, "value", outcome)).lower() != "success":
+            raise RuntimeError(f"agent turn ended: {str(getattr(outcome, 'value', outcome)).lower()}")
 
     def _report_inbound_failure(self, data, error):
         report = getattr(getattr(self._inkbox, "inbound", None), "report_inbound_event_result", None)
@@ -4571,8 +4584,16 @@ class InkboxAdapter(BasePlatformAdapter):
             # Older SDKs cannot report results; the event stays failed locally.
             logger.warning("[Inkbox] Inbound event %s failed: %s", data.get("event_id"), error)
             return
-        report(self._identity_handle, (data.get("source") or {}).get("id"), data["event_id"],
-               status="failed", error=error)
+        try:
+            report(self._identity_handle, (data.get("source") or {}).get("id"), data["event_id"],
+                   status="failed", error=error, delivery_id=data["delivery_id"])
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            # 409 stale_delivery: the event was delivered again meanwhile. Other 4xx cannot succeed later.
+            if not isinstance(status, int) or not 400 <= status < 500 or status in (408, 429):
+                raise
+            logger.warning("[Inkbox] Inbound event %s failure report not recorded (HTTP %s)",
+                           data.get("event_id"), status)
 
     def _record_companion_delivery_failure(self, envelope):
         """Handle a verified failure through the same policy for both ingress paths."""
@@ -6193,6 +6214,9 @@ class InkboxAdapter(BasePlatformAdapter):
         outcome: Any,
     ) -> None:
         from .native_envelope import route_for
+        finished = getattr(event, "_inkbox_inbound_finished", None)
+        if finished is not None and not finished.done():
+            finished.set_result(outcome)
         actual = getattr(event, "_inkbox_execution_event", event)
         if getattr(event, "_inkbox_plain_voice", False):
             self._conversation_state().complete(str(event.source.chat_id), str(event.message_id))
