@@ -83,8 +83,10 @@ class VoiceNoteIngress:
         channel = RECEIVED[envelope["event_type"]]
         message = message_of(envelope, channel)
         event_id = self.key(channel, str(message["id"]))
+        # One receipt kind per channel: Slack may redeliver a message under another
+        # category once it learns of a mention; the original keeps its own type.
         receipt = {
-            "id": event_id, "event_type": envelope["event_type"],
+            "id": event_id, "event_type": f"{channel}.received",
             "original": copy.deepcopy(envelope),
             "hosted_delivery": {"version": 1, "activation_id": self.inbox.activation_id,
                                 "event_id": event_id, "starts_agent": True},
