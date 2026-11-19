@@ -77,7 +77,7 @@ If transcription fails or remains unavailable after that read, Hermes receives t
 original message through the normal attachment flow. A late completion does not
 wake the agent again. Completion notifications are registered automatically when
 the plugin manages its webhook subscriptions.
-Slack audio files follow the same wait, single read, fallback, and label; their completions are added to the plugin's Slack subscription.
+Slack audio files, including Companion turns, follow the same wait, single read, fallback, and label; their completions are added to the plugin's Slack subscription.
 
 ### Agent self-setup for an assigned identity
 

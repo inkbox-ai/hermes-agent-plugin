@@ -32,8 +32,10 @@ def slack_message(data: dict[str, Any]) -> dict[str, Any]:
     """Present a Slack event's retained message ID and files as the shared message shape."""
     event = data.get("event")
     files = event.get("files") if isinstance(event, dict) else None
+    text = event.get("text") if isinstance(event, dict) else None
     return {"id": data.get("message_id"), "connection_id": data.get("connection_id"),
-            "conversation_id": data.get("conversation_id"), "media": files if isinstance(files, list) else []}
+            "conversation_id": data.get("conversation_id"), "text": text if isinstance(text, str) else "",
+            "media": files if isinstance(files, list) else []}
 
 
 def with_message(envelope: dict[str, Any], channel: str, message: dict[str, Any]) -> dict[str, Any]:
