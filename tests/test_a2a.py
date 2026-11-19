@@ -124,6 +124,17 @@ def _event(event_id="evt-1", event_type="a2a.task.created"):
     }
 
 
+def test_unknown_transcription_event_requires_an_event_enum_rejection():
+    from inkbox.exceptions import InkboxAPIError
+
+    issue = {"type": "enum", "loc": ["body", "event_types", 0, "MailWebhookEventType"],
+             "input": "message.transcription_finished"}
+    assert adapter_mod._transcription_subscription_unsupported(InkboxAPIError(422, [issue]))
+    assert not adapter_mod._transcription_subscription_unsupported(
+        InkboxAPIError(422, [issue, {"loc": ["body", "url"], "type": "url_scheme"}])
+    )
+
+
 def test_detects_only_unsupported_a2a_event_validation_errors():
     unsupported = types.SimpleNamespace(
         status_code=422,

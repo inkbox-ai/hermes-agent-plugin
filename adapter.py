@@ -749,6 +749,23 @@ _A2A_ERROR_PHASE_RANK = {
 }
 
 
+def _transcription_subscription_unsupported(exc: Exception) -> bool:
+    if isinstance(exc, ValueError):
+        return str(exc).startswith("Identity-wide webhook subscriptions are not supported by this server yet.")
+    errors = getattr(exc, "detail", None)
+    if getattr(exc, "status_code", None) != 422 or not isinstance(errors, list) or not errors:
+        return False
+    # The API reports one enum error per channel when none recognize the event.
+    return all(
+        isinstance(error, dict)
+        and error.get("type") == "enum"
+        and isinstance(error.get("loc"), list)
+        and error["loc"][:3] == ["body", "event_types", 0]
+        and error.get("input") == _TRANSCRIPTION_EVENTS[0]
+        for error in errors
+    )
+
+
 def _is_unsupported_a2a_event_types(exc: Exception) -> bool:
     detail = str(getattr(exc, "detail", exc))
     return (
@@ -2981,10 +2998,15 @@ class InkboxAdapter(BasePlatformAdapter):
                     "[Inkbox] API does not support A2A webhook events yet; "
                     "continuing without A2A delivery until the backend is upgraded",
                 )
-            _reconcile_imessage_subscription(
-                self._inkbox, self._identity_id, desired_url=webhook_url,
-                previous_webhook_url=previous_webhook_url, desired_events=_TRANSCRIPTION_EVENTS,
-            )
+            try:
+                _reconcile_imessage_subscription(
+                    self._inkbox, self._identity_id, desired_url=webhook_url,
+                    previous_webhook_url=previous_webhook_url, desired_events=_TRANSCRIPTION_EVENTS,
+                )
+            except Exception as exc:
+                if not _transcription_subscription_unsupported(exc):
+                    raise
+                logger.warning("Transcription callbacks are unavailable on this API version")
             from .whatsapp import reconcile_notifications
             if not reconcile_notifications(lambda events: _reconcile_imessage_subscription(
                     self._inkbox, self._identity_id, desired_url=webhook_url,
