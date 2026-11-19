@@ -2600,6 +2600,8 @@ class InkboxAdapter(BasePlatformAdapter):
         # forwarding immediately, so the local server has to be accepting
         # before we hand inkboxwire.com a forward-to URL.
         try:
+            if not os.getenv("INKBOX_HOSTED_ACTIVATION_ID"):
+                self._ordinary_voice_note_receiver()  # Know saved sources before accepting retries.
             self._app = web.Application()
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_post(self._webhook_path, self._handle_webhook)
@@ -4371,8 +4373,11 @@ class InkboxAdapter(BasePlatformAdapter):
         event_type = envelope.get("event_type")
         voice_channel = RECEIVED.get(event_type)
         voice_message = message_of(envelope, voice_channel) if voice_channel else {}
+        saved_voice_notes = getattr(self, "_ordinary_voice_notes", None)
         if source == "inkbox" and (event_type == FINISHED or (
-            voice_channel and voice_message.get("id") and voice_message.get("direction") != "outbound" and pending(voice_message)
+            voice_channel and voice_message.get("id") and voice_message.get("direction") != "outbound" and (
+                pending(voice_message) or (saved_voice_notes and saved_voice_notes.owns(voice_channel, str(voice_message["id"])))
+            )
         )):
             # Ordinary callbacks may not retry; retain originals before returning a prompt ACK.
             if not provider.verify(body=body, headers=dict(request.headers), url=str(request.url), secret=self._provider_secret("inkbox")):

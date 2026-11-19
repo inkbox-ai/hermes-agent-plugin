@@ -88,6 +88,9 @@ def test_real_ordinary_handler_acknowledges_saved_original_promptly_and_recovers
         assert restored[0]["data"]["text_message"]["media"][0]["transcription"]["text"] == "Move the review to Thursday."
         assert inbox.db.execute("SELECT state FROM deliveries").fetchone()[0] == "completed"
         await recovered._handle_webhook(Request(original()))
+        refreshed = original()
+        refreshed["data"]["text_message"]["media"] = []
+        assert (await recovered._handle_webhook(Request(refreshed))).status == 202
         await recovered._handle_webhook(Request(completed()))
         await asyncio.sleep(0)
         assert len(restored) == 1

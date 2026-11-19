@@ -49,6 +49,11 @@ class VoiceNoteIngress:
         if self.db.execute("SELECT 1 FROM deliveries WHERE state='unknown' LIMIT 1").fetchone():
             logger.error("A voice-note admission has an unknown outcome and requires review before replay")
 
+    def owns(self, channel: str, message_id: str) -> bool:
+        """Redeliveries of an enrolled source belong to its original receipt."""
+        return self.db.execute("SELECT 1 FROM deliveries WHERE event_id=?",
+                               (self.key(channel, message_id),)).fetchone() is not None
+
     def accept(self, envelope: dict) -> None:
         """Persist the unchanged signed envelope and original deadline before ACK."""
         channel = RECEIVED[envelope["event_type"]]
