@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "aiohttp>=3.9",
   "audioop-lts>=0.2.1; python_version >= '3.13'",
-  "inkbox @ git+https://github.com/inkbox-ai/inkbox@c173831c7ac6a78649090741e06977627568ce95#subdirectory=sdk/python",
+  "inkbox>=0.7.41,<1.0.0",
   "segno>=1.5",
 ]
 
