@@ -4508,7 +4508,8 @@ class InkboxAdapter(BasePlatformAdapter):
             return web.Response(status=401, text="Invalid signature")
         data = envelope.get("data")
         if (not isinstance(data, dict) or not all(isinstance(data.get(k), str) and data[k]
-                                                  for k in ("event_id", "delivery_id"))):
+                                                  for k in ("event_id", "delivery_id"))
+                or not isinstance(data.get("source"), dict) or not data["source"].get("id")):
             return web.Response(status=400, text="Invalid inbound event")
         hosted = envelope.get("hosted_delivery")
         activation = os.getenv("INKBOX_HOSTED_ACTIVATION_ID")
@@ -4519,9 +4520,10 @@ class InkboxAdapter(BasePlatformAdapter):
         if receiver is None:
             return web.Response(status=503, text="Temporarily unavailable")
         import sqlite3
+        from .inbound_events import InboundFull
         try:
             added = receiver.accept(data)
-        except (OSError, sqlite3.Error):
+        except (InboundFull, OSError, sqlite3.Error):
             return web.Response(status=503, text="Temporarily unavailable")
         return web.Response(status=202 if added else 200, text="accepted" if added else "duplicate")
 
@@ -4553,7 +4555,8 @@ class InkboxAdapter(BasePlatformAdapter):
         if source_info.get("instructions"):
             parts += ["", "Instructions for this source:", str(source_info["instructions"])]
         parts += ["", "Body:", body]
-        chat_id = f"inbound:{name}"
+        # Names are neither unique nor stable; the source id keys the session.
+        chat_id = f"inbound:{source_info.get('id')}"
         event_id = str(data.get("event_id") or "")
         event = MessageEvent(
             text="\n".join(parts),
@@ -4567,27 +4570,48 @@ class InkboxAdapter(BasePlatformAdapter):
             channel_prompt=EXTERNAL_EVENT_DIRECTIVE,
             internal=True,
         )
-        finished = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        started, finished = loop.create_future(), loop.create_future()
+        event._inkbox_inbound_started = started
         event._inkbox_inbound_finished = finished
         await (await self._enqueue(event))
         if getattr(event, "_gateway_accepted", None) is False:
             raise RuntimeError("agent turn was not started")
-        try:
-            outcome = await asyncio.wait_for(finished, INBOUND_TURN_TIMEOUT)
-        except asyncio.TimeoutError:
-            raise RuntimeError(f"agent turn did not finish within {INBOUND_TURN_TIMEOUT // 60} minutes") from None
+        # The turn gets its full budget from when it starts, not from when it was queued.
+        await asyncio.wait({started, finished}, timeout=INBOUND_TURN_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        if not finished.done() and started.done():
+            await asyncio.wait({finished}, timeout=INBOUND_TURN_TIMEOUT)
+        if not finished.done():
+            await self._stop_inbound_turn(event)
+            phase = "finish" if started.done() else "start"
+            raise RuntimeError(f"agent turn did not {phase} within {INBOUND_TURN_TIMEOUT // 60} minutes")
+        outcome = finished.result()
         if str(getattr(outcome, "value", outcome)).lower() != "success":
             raise RuntimeError(f"agent turn ended: {str(getattr(outcome, 'value', outcome)).lower()}")
 
-    def _report_inbound_failure(self, data, error):
-        report = getattr(getattr(self._inkbox, "inbound", None), "report_inbound_event_result", None)
-        if report is None:
-            # Older SDKs cannot report results; the event stays failed locally.
-            logger.warning("[Inkbox] Inbound event %s failed: %s", data.get("event_id"), error)
-            return
+    async def _stop_inbound_turn(self, event):
+        """Interrupt a timed-out inbound turn and drop it if it is still queued."""
         try:
-            report(self._identity_handle, (data.get("source") or {}).get("id"), data["event_id"],
-                   status="failed", error=error, delivery_id=data["delivery_id"])
+            key = self._event_session_key(event)
+            owner = getattr(self, "gateway_runner", None) or getattr(getattr(self, "_message_handler", None), "__self__", None)
+            peek = getattr(owner, "_peek_session_state", None)
+            turn = getattr(peek(key), "turn", None) if callable(peek) else None
+            agent = getattr(turn, "agent", None)
+            if getattr(turn, "event", None) is event and callable(getattr(agent, "interrupt", None)):
+                agent.interrupt()
+                evict = getattr(owner, "_evict_cached_agent", None)
+                if callable(evict):
+                    # Never reuse the interrupted agent for the next inbound turn.
+                    evict(key)
+            await self.cancel_session_processing(key)
+        except Exception as exc:
+            logger.error("[Inkbox] Stopping a timed-out inbound turn failed (%s)", type(exc).__name__)
+
+    def _report_inbound_failure(self, data, error):
+        try:
+            self._inkbox.inbound.report_inbound_event_result(
+                self._identity_handle, (data.get("source") or {}).get("id"), data["event_id"],
+                status="failed", error=error, delivery_id=data["delivery_id"])
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             # 409 stale_delivery: the event was delivered again meanwhile. Other 4xx cannot succeed later.
@@ -6136,6 +6160,9 @@ class InkboxAdapter(BasePlatformAdapter):
         return web.Response(status=200, text="ok")
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        started = getattr(event, "_inkbox_inbound_started", None)
+        if started is not None and not started.done():
+            started.set_result(None)
         event_key = getattr(self, "_event_session_key", None)
         if getattr(self, "_active_sessions", None) and callable(event_key):
             guard = self._active_sessions.get(event_key(event))

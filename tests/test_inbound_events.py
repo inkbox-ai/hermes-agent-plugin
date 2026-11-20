@@ -220,7 +220,7 @@ def test_rejects_other_activation_and_missing_delivery_id(adapter, tmp_path, mon
 def test_agent_turn_message_and_session(adapter):
     asyncio.run(adapter._run_inbound_agent(_data()))
     event = adapter._enqueued[0]
-    assert event.source.chat_id == "inbound:payments"
+    assert event.source.chat_id == "inbound:inbsrc_1"
     assert getattr(event.source, "thread_id", None) is None
     assert event.internal is True
     assert event.text.startswith("[inkbox:inbound source=payments] UNTRUSTED external content")
@@ -250,8 +250,128 @@ def test_agent_turn_wait_is_bounded(adapter, monkeypatch):
         return asyncio.create_task(asyncio.sleep(0))
 
     adapter._enqueue = admitted
-    with pytest.raises(RuntimeError, match="did not finish"):
+    with pytest.raises(RuntimeError, match="did not start"):
         asyncio.run(adapter._run_inbound_agent(_data()))
+
+
+def _stoppable(adapter, monkeypatch, timeout):
+    """Admit turns without finishing them and record how a timeout stops them."""
+    monkeypatch.setattr(adapter_mod, "INBOUND_TURN_TIMEOUT", timeout)
+    calls = []
+    agent = types.SimpleNamespace(interrupt=lambda: calls.append("interrupt"))
+    state = types.SimpleNamespace(turn=types.SimpleNamespace(event=None, agent=agent))
+    adapter.gateway_runner = types.SimpleNamespace(
+        _peek_session_state=lambda key: state, _evict_cached_agent=lambda key: calls.append(("evict", key)))
+    adapter._event_session_key = lambda event: "key:" + event.source.chat_id
+
+    async def cancel(key, **kwargs):
+        calls.append(("cancel", key))
+
+    adapter.cancel_session_processing = cancel
+
+    async def admitted(event):
+        event._gateway_accepted = True
+        adapter._enqueued.append(event)
+        return asyncio.create_task(asyncio.sleep(0))
+
+    adapter._enqueue = admitted
+    return calls, state
+
+
+def test_timed_out_running_turn_is_interrupted(adapter, monkeypatch):
+    calls, state = _stoppable(adapter, monkeypatch, 0.05)
+
+    async def run():
+        turn = asyncio.create_task(adapter._run_inbound_agent(_data()))
+        await asyncio.sleep(0.01)
+        event = adapter._enqueued[0]
+        state.turn.event = event
+        await adapter.on_processing_start(event)
+        with pytest.raises(RuntimeError, match="did not finish"):
+            await turn
+
+    asyncio.run(run())
+    assert calls == ["interrupt", ("evict", "key:inbound:inbsrc_1"), ("cancel", "key:inbound:inbsrc_1")]
+
+
+def test_turn_that_never_starts_is_dropped_before_reporting(adapter, monkeypatch):
+    calls, _ = _stoppable(adapter, monkeypatch, 0.05)
+    with pytest.raises(RuntimeError, match="did not start"):
+        asyncio.run(adapter._run_inbound_agent(_data()))
+    assert calls == [("cancel", "key:inbound:inbsrc_1")]
+
+
+def test_queue_wait_does_not_count_toward_turn_timeout(adapter, monkeypatch):
+    calls, _ = _stoppable(adapter, monkeypatch, 0.2)
+
+    async def run():
+        turn = asyncio.create_task(adapter._run_inbound_agent(_data()))
+        await asyncio.sleep(0.15)
+        event = adapter._enqueued[0]
+        await adapter.on_processing_start(event)
+        await asyncio.sleep(0.15)
+        await adapter.on_processing_complete(event, types.SimpleNamespace(value="success"))
+        await turn
+
+    asyncio.run(run())
+    assert calls == []
+
+
+def test_session_is_keyed_by_source_id(adapter):
+    def named(source_id, name):
+        data = _data()
+        data["source"] = {"id": source_id, "name": name}
+        return data
+
+    for data in (named("inbsrc_a", "build[1]"), named("inbsrc_b", "build1"),
+                 named("inbsrc_c", "deploy"), named("inbsrc_d", "deploy"), named("inbsrc_a", "renamed")):
+        asyncio.run(adapter._run_inbound_agent(data))
+    chats = [event.source.chat_id for event in adapter._enqueued]
+    assert chats == ["inbound:inbsrc_a", "inbound:inbsrc_b", "inbound:inbsrc_c", "inbound:inbsrc_d", "inbound:inbsrc_a"]
+    assert adapter._enqueued[4].text.startswith("[inkbox:inbound source=renamed]")
+
+
+def test_rejects_missing_source_id(adapter, tmp_path, monkeypatch):
+    monkeypatch.setenv("INKBOX_HOSTED_ACTIVATION_ID", ACTIVATION)
+
+    async def run():
+        adapter._inbound_events = _queue(tmp_path)
+        data = _data()
+        del data["source"]["id"]
+        response = await adapter._handle_webhook(_signed(_envelope(data)))
+        await adapter._inbound_events.close()
+        return response.status
+
+    assert asyncio.run(run()) == 400
+
+
+def test_full_backlog_is_refused_before_ack(adapter, tmp_path, monkeypatch):
+    monkeypatch.setenv("INKBOX_HOSTED_ACTIVATION_ID", ACTIVATION)
+    monkeypatch.setattr(inbound_events, "MAX_PENDING_EVENTS", 2)
+
+    def delivery(n):
+        return _data(delivery_id=f"7b1c2d3e-0000-4000-8000-00000000000{n}")
+
+    async def run():
+        adapter._inbound_events = _queue(tmp_path)
+        statuses = [(await adapter._handle_webhook(_signed(_envelope(delivery(n))))).status for n in (1, 2, 3)]
+        duplicate = await adapter._handle_webhook(_signed(_envelope(delivery(1))))
+        count = adapter._inbound_events.pending()
+        adapter._inbound_events.finish("7b1c2d3e-0000-4000-8000-000000000001", "done")
+        after = (await adapter._handle_webhook(_signed(_envelope(delivery(3))))).status
+        await adapter._inbound_events.close()
+        return statuses, (duplicate.status, duplicate.text), count, after
+
+    assert asyncio.run(run()) == ([202, 202, 503], (200, "duplicate"), 2, 202)
+
+
+def test_backlog_bytes_are_capped(tmp_path, monkeypatch):
+    queue = _queue(tmp_path)
+    monkeypatch.setattr(inbound_events, "MAX_PENDING_BYTES", len(json.dumps(_data())) + 10)
+    assert queue.accept(_data()) is True
+    with pytest.raises(inbound_events.InboundFull):
+        queue.accept(_data(delivery_id="7b1c2d3e-0000-4000-8000-000000000002"))
+    assert queue.accept(_data()) is False
 
 
 def test_inbound_replies_are_not_delivered(adapter):
@@ -400,8 +520,6 @@ def test_failure_report_uses_sdk_when_available(adapter):
         report_inbound_event_result=lambda *args, **kwargs: calls.append((args, kwargs))))
     adapter._report_inbound_failure(_data(), "boom")
     assert calls == [(("agent", "inbsrc_1", "inbev_1"), {"status": "failed", "error": "boom", "delivery_id": KEY})]
-    adapter._inkbox = object()
-    adapter._report_inbound_failure(_data(), "boom")
 
 
 def test_agent_turn_fails_unless_it_succeeds(adapter):
@@ -686,3 +804,39 @@ def test_script_output_is_bounded(tmp_path, monkeypatch):
     assert ok is True
     assert out == "o" * inbound_events.STDOUT_LIMIT + "\n(truncated)"
     assert len(err) == inbound_events.STDERR_TAIL and err.endswith("END")
+
+
+def test_cancelled_script_kills_its_process_group(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pid_file = tmp_path / "child.pid"
+
+    async def run():
+        task = asyncio.create_task(inbound_events.run_script(f"sleep 30 & echo $! > {pid_file}; wait", _data()))
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return int(pid_file.read_text())
+
+    pid = asyncio.run(run())
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        # A killed child stays a zombie until reaped by its parent; treat that as gone.
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z":
+                return
+        except OSError:
+            return
+        import time
+        time.sleep(0.02)
+    os.kill(pid, signal.SIGKILL)
+    pytest.fail("script child outlived cancellation")

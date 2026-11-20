@@ -22,6 +22,12 @@ STDOUT_LIMIT = 64 * 1024
 STDERR_TAIL = 4 * 1024
 REPORT_MAX_DELAY = 3600
 RETENTION = 7 * 86400
+MAX_PENDING_EVENTS = 100
+MAX_PENDING_BYTES = 64 * 1024 * 1024
+
+
+class InboundFull(Exception):
+    """The local queue is full; the delivery should be retried later."""
 
 
 def local_delivery() -> bool:
@@ -91,12 +97,19 @@ async def run_script(command: str, data: dict) -> tuple[bool, str, str]:
             _drain(proc.stderr, STDERR_TAIL, tail=True), proc.wait(),
         ), SCRIPT_TIMEOUT)
     except asyncio.TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
+        _kill(proc)
         await proc.wait()
         return False, "", f"timed out after {SCRIPT_TIMEOUT} s"
+    except BaseException:
+        _kill(proc)
+        raise
     stdout = out[:STDOUT_LIMIT].decode(errors="ignore") + ("\n(truncated)" if len(out) > STDOUT_LIMIT else "")
     return proc.returncode == 0, stdout, err.decode(errors="replace")
+
+
+def _kill(proc) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 class InboundEvents:
@@ -142,18 +155,27 @@ class InboundEvents:
             "SELECT count(*) FROM inbound_events WHERE state='pending'").fetchone()[0] + self.turn_running
 
     def accept(self, data: dict) -> bool:
-        """Store a new event; False when its delivery was already received."""
+        """Store a new event; False when its delivery was already received.
+
+        Raises ``InboundFull`` when the backlog is at its cap, before anything is stored.
+        """
         now = time.time()
         self.db.execute("DELETE FROM inbound_events WHERE state IN ('done','failed') AND received<?",
                         (now - RETENTION,))
-        added = self.db.execute(
-            "INSERT OR IGNORE INTO inbound_events(delivery_id,payload,due,state,received)"
-            " VALUES(?,?,?,'pending',?)",
-            (data["delivery_id"], json.dumps(data), now, now),
-        ).rowcount
-        if added:
-            self.wake.set()
-        return bool(added)
+        if self.db.execute("SELECT 1 FROM inbound_events WHERE delivery_id=?", (data["delivery_id"],)).fetchone():
+            return False
+        payload = json.dumps(data)
+        count, used = self.db.execute(
+            "SELECT count(*), coalesce(sum(length(CAST(payload AS BLOB))),0) FROM inbound_events"
+            " WHERE state IN ('pending','reporting')").fetchone()
+        if count >= MAX_PENDING_EVENTS or used + len(payload.encode()) > MAX_PENDING_BYTES:
+            raise InboundFull("inbound queue is full")
+        self.db.execute(
+            "INSERT INTO inbound_events(delivery_id,payload,due,state,received) VALUES(?,?,?,'pending',?)",
+            (data["delivery_id"], payload, now, now),
+        )
+        self.wake.set()
+        return True
 
     async def loop(self) -> None:
         while True:
