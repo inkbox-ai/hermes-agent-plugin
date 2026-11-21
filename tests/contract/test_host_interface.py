@@ -230,3 +230,15 @@ def test_host_exposes_session_work_signals():
 
     base = importlib.import_module("gateway.platforms.base")
     assert "self._active_sessions" in inspect.getsource(base.BasePlatformAdapter.__init__)
+
+
+def test_host_supports_stopping_a_timed_out_inbound_turn():
+    from gateway.platforms.base import BasePlatformAdapter
+    from gateway.run import GatewayRunner
+
+    for name in ("on_processing_start", "on_processing_complete", "_event_session_key"):
+        assert callable(getattr(BasePlatformAdapter, name, None)), name
+    params = inspect.signature(BasePlatformAdapter.cancel_session_processing).parameters
+    assert {"session_key", "release_guard", "discard_pending"} <= set(params)
+    for name in ("_peek_session_state", "_evict_cached_agent"):
+        assert callable(getattr(GatewayRunner, name, None)), name

@@ -114,9 +114,9 @@ class ManagedInbox:
                 or not re.fullmatch(r'evt_[a-f0-9]{64}', metadata['event_id'])
                 or envelope.get('id') != metadata['event_id']):
             raise InboxError('Invalid delivery identity')
-        payload = json.dumps(envelope, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        payload = json.dumps(envelope, sort_keys=True, separators=(',', ':'), allow_nan=False, ensure_ascii=False)
         size = len(payload.encode())
-        if size > 512 * 1024:
+        if size > 2 * 1024 * 1024:
             raise InboxError('Delivery exceeds size limit')
         # Rehydrated attachment URLs and source projections can change on retry.
         content = {'event_type': envelope.get('event_type'), 'hosted_delivery': metadata}
