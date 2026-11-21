@@ -7,8 +7,10 @@ import binascii
 import json
 import logging
 import os
+import shutil
 import signal
 import sqlite3
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -22,6 +24,7 @@ STDOUT_LIMIT = 64 * 1024
 STDERR_TAIL = 4 * 1024
 REPORT_MAX_DELAY = 3600
 RETENTION = 7 * 86400
+SWEEP_INTERVAL = 3600
 MAX_PENDING_EVENTS = 100
 MAX_PENDING_BYTES = 64 * 1024 * 1024
 
@@ -34,19 +37,54 @@ def local_delivery() -> bool:
     return os.getenv("INKBOX_DELIVERY_MODE", "").strip().lower() == "local"
 
 
-def request_body(request: dict) -> str:
-    """The request body as text; base64 bodies are shown when they decode to UTF-8."""
+def request_bytes(request: dict) -> bytes:
+    """The request body as received, decoded by its ``body_encoding``."""
     body = str(request.get("body") or "")
-    if request.get("body_encoding") != "base64":
-        return body
+    if request.get("body_encoding") == "base64":
+        with suppress(binascii.Error):
+            return base64.b64decode(body, validate=True)
+    return body.encode("utf-8")
+
+
+def write_event_files(events: Path, data: dict, body: bytes) -> Path:
+    """Write ``body`` and ``request.json`` to ``events/<event_id>``, replacing any earlier copy."""
+    event_id = str(data.get("event_id") or "")
+    if not event_id.replace("_", "").replace("-", "").isalnum() or not event_id.isascii():
+        raise ValueError("invalid event id")
+    request = data.get("request") or {}
+    source = data.get("source") or {}
+    meta = {
+        "event_id": event_id, "delivery_id": data.get("delivery_id"), "received_at": data.get("received_at"),
+        "source": {"id": source.get("id"), "name": source.get("name")},
+        "signature_verified": data.get("signature_verified") is True,
+        **{k: request.get(k) for k in ("method", "query", "headers", "content_type")},
+        "body_encoding": request.get("body_encoding") or "utf8",
+        "body_bytes": len(request_bytes(request)),
+    }
+    events.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=events))
     try:
-        raw = base64.b64decode(body, validate=True)
-    except binascii.Error:
-        return "(binary body, not shown)"
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return f"(binary body, {len(raw)} bytes, not shown)"
+        for name, content in (("body", body), ("request.json", json.dumps(meta, indent=2).encode() + b"\n")):
+            fd = os.open(tmp / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
+        target = events / event_id
+        shutil.rmtree(target, ignore_errors=True)
+        os.rename(tmp, target)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return target
+
+
+def sweep_event_files(events: Path) -> None:
+    """Delete event directories older than the retention period; errors are ignored."""
+    cutoff = time.time() - RETENTION
+    with suppress(OSError):
+        for entry in events.iterdir():
+            with suppress(OSError):
+                if entry.lstat().st_mtime < cutoff:
+                    shutil.rmtree(entry)
 
 
 def _fsync_dir(path: Path) -> None:
@@ -136,6 +174,8 @@ class InboundEvents:
         self.wake = asyncio.Event()
         self.task: asyncio.Task | None = None
         self.turn_running = False
+        self.events = path.parent / "events"
+        self.swept = 0.0
 
     def start(self) -> None:
         # Pending failure reports are retried right away on every start.
@@ -180,6 +220,9 @@ class InboundEvents:
     async def loop(self) -> None:
         while True:
             self.wake.clear()
+            if time.time() - self.swept >= SWEEP_INTERVAL:
+                self.swept = time.time()
+                sweep_event_files(self.events)
             row = self.db.execute(
                 "SELECT delivery_id,payload,attempts,due,state FROM inbound_events"
                 " WHERE state IN ('pending','reporting') ORDER BY due LIMIT 1"
