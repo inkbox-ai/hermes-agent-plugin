@@ -7,6 +7,7 @@ import binascii
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -46,15 +47,20 @@ def request_bytes(request: dict) -> bytes:
     return body.encode("utf-8")
 
 
+def events_dir() -> Path:
+    # Under the home directory so a sandboxed agent can read its event files.
+    return Path.home() / ".inkbox" / "inbound" / "events"
+
+
 def write_event_files(events: Path, data: dict, body: bytes) -> Path:
-    """Write ``body`` and ``request.json`` to ``events/<event_id>``, replacing any earlier copy."""
-    event_id = str(data.get("event_id") or "")
-    if not event_id.replace("_", "").replace("-", "").isalnum() or not event_id.isascii():
-        raise ValueError("invalid event id")
+    """Write ``body`` and ``request.json`` to ``events/<delivery_id>``, replacing any earlier copy."""
+    delivery_id = str(data.get("delivery_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", delivery_id):
+        raise ValueError("invalid delivery id")
     request = data.get("request") or {}
     source = data.get("source") or {}
     meta = {
-        "event_id": event_id, "delivery_id": data.get("delivery_id"), "received_at": data.get("received_at"),
+        "event_id": data.get("event_id"), "delivery_id": delivery_id, "received_at": data.get("received_at"),
         "source": {"id": source.get("id"), "name": source.get("name")},
         "signature_verified": data.get("signature_verified") is True,
         **{k: request.get(k) for k in ("method", "query", "headers", "content_type")},
@@ -68,11 +74,12 @@ def write_event_files(events: Path, data: dict, body: bytes) -> Path:
             fd = os.open(tmp / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as f:
                 f.write(content)
-        target = events / event_id
+        target = events / delivery_id
         shutil.rmtree(target, ignore_errors=True)
         os.rename(tmp, target)
     except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
+        with suppress(Exception):
+            shutil.rmtree(tmp)
         raise
     return target
 
@@ -174,19 +181,20 @@ class InboundEvents:
         self.wake = asyncio.Event()
         self.task: asyncio.Task | None = None
         self.turn_running = False
-        self.events = path.parent / "events"
-        self.swept = 0.0
+        self.sweeper: asyncio.Task | None = None
 
     def start(self) -> None:
         # Pending failure reports are retried right away on every start.
         self.db.execute("UPDATE inbound_events SET due=? WHERE state='reporting'", (time.time(),))
         self.task = asyncio.create_task(self.loop())
+        self.sweeper = asyncio.create_task(self.sweep())
 
     async def close(self) -> None:
-        if self.task is not None:
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
-            self.task = None
+        for task in (self.task, self.sweeper):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.task = self.sweeper = None
         self.db.close()
 
     def pending(self) -> int:
@@ -220,9 +228,6 @@ class InboundEvents:
     async def loop(self) -> None:
         while True:
             self.wake.clear()
-            if time.time() - self.swept >= SWEEP_INTERVAL:
-                self.swept = time.time()
-                sweep_event_files(self.events)
             row = self.db.execute(
                 "SELECT delivery_id,payload,attempts,due,state FROM inbound_events"
                 " WHERE state IN ('pending','reporting') ORDER BY due LIMIT 1"
@@ -246,6 +251,11 @@ class InboundEvents:
                     self.fail(key, f"handler error ({type(error).__name__})")
                 else:
                     self.finish(key, "failed")
+
+    async def sweep(self) -> None:
+        while True:
+            sweep_event_files(events_dir())
+            await asyncio.sleep(SWEEP_INTERVAL)
 
     async def process(self, key: str, data: dict, attempts: int) -> None:
         handler = data.get("handler") or {}

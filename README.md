@@ -481,7 +481,7 @@ After the gateway starts:
 | `INKBOX_SKIP_WEBHOOK_RECONCILE` | no | `false` | Leave webhook subscriptions untouched on connect. For deployments that provision them ahead of time, where the destination is fixed or the agent's key may not change it. The subscriptions must already point at this agent's webhook URL, or nothing will arrive. |
 | `INKBOX_BASE_URL` | no | SDK default | Override Inkbox API base URL. |
 | `INKBOX_PUBLIC_URL` | no | - | Public Hermes gateway URL. If omitted, the plugin opens an Inkbox tunnel. |
-| `INKBOX_DELIVERY_MODE` | no | - | Set to `local` when events are delivered to the listener on this machine: the plugin opens no tunnel, registers no webhook URL, listens on `127.0.0.1` only, accepts bodies up to 2 MiB, and handles `inbound.received` events. Signatures are still verified. |
+| `INKBOX_DELIVERY_MODE` | no | - | Set to `local` when events are delivered to the listener on this machine: the plugin opens no tunnel, registers no webhook URL, listens on `127.0.0.1` only, accepts bodies up to 2 MiB, and handles `inbound.received` events, writing each event to `~/.inkbox/inbound/events/<delivery_id>/` for the agent (kept 7 days). Signatures are still verified. |
 | `INKBOX_TUNNEL_NAME` | no | identity handle | Override Inkbox tunnel name. |
 | `INKBOX_HOME_CHANNEL` | no | - | Default Inkbox chat/contact id for cron or notification delivery. |
 | `INKBOX_ALLOWED_USERS` | no | - | Optional comma-separated local allowlist. Usually leave empty and use Inkbox contact rules. |
