@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .managed_inbox import ManagedInbox, boot_id
 from .managed_work import DeliveryWork, scope
-from .transcription import completion_channel, RECEIVED, message_of, pending, poll_message
+from .transcription import completion_channel, RECEIVED, message_of, pending, poll_message, with_message
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ def unconfirmed_ids(path: Path) -> list[str]:
         rows = db.execute("""
             SELECT json_extract(payload, '$.original.event_type'),
                    coalesce(json_extract(payload, '$.original.data.text_message.id'),
-                            json_extract(payload, '$.original.data.message.id'))
+                            json_extract(payload, '$.original.data.message.id'),
+                            json_extract(payload, '$.original.data.message_id'))
               FROM deliveries
              WHERE state IN ('dispatching','unknown') AND settled_at IS NULL
              ORDER BY 1, 2
@@ -82,8 +83,10 @@ class VoiceNoteIngress:
         channel = RECEIVED[envelope["event_type"]]
         message = message_of(envelope, channel)
         event_id = self.key(channel, str(message["id"]))
+        # One receipt kind per channel: Slack may redeliver a message under another
+        # category once it learns of a mention; the original keeps its own type.
         receipt = {
-            "id": event_id, "event_type": envelope["event_type"],
+            "id": event_id, "event_type": f"{channel}.received",
             "original": copy.deepcopy(envelope),
             "hosted_delivery": {"version": 1, "activation_id": self.inbox.activation_id,
                                 "event_id": event_id, "starts_agent": True},
@@ -165,7 +168,7 @@ class VoiceNoteIngress:
             self.db.execute("UPDATE voice_note_resolution SET retry_at=? WHERE event_id=?", (time.time() + 5, event_id))
             await asyncio.sleep(5)
         gate.remember(channel, message)
-        envelope["data"]["text_message" if channel == "text" else "message"] = message
+        envelope = with_message(envelope, channel, message)
         # Keep a wait replayable until it crosses into the existing model-admission path.
         claimed = self.db.execute("UPDATE deliveries SET state='dispatching',boot_id=? WHERE event_id=? AND state='pending'",
                                   (boot_id(), event_id))
