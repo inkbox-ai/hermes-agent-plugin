@@ -4608,8 +4608,13 @@ class InkboxAdapter(BasePlatformAdapter):
             logger.error("[Inkbox] Stopping a timed-out inbound turn failed (%s)", type(exc).__name__)
 
     def _report_inbound_failure(self, data, error):
+        inbound = getattr(self._inkbox, "inbound", None)
+        if inbound is None:
+            logger.warning("[Inkbox] Inbound event %s failure not reported: Inkbox SDK 0.7.41 or newer is required",
+                           data.get("event_id"))
+            return
         try:
-            self._inkbox.inbound.report_inbound_event_result(
+            inbound.report_inbound_event_result(
                 self._identity_handle, (data.get("source") or {}).get("id"), data["event_id"],
                 status="failed", error=error, delivery_id=data["delivery_id"])
         except Exception as exc:

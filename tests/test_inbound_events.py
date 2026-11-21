@@ -709,6 +709,11 @@ def test_stale_delivery_report_counts_as_done(adapter):
         adapter._report_inbound_failure(_data(), "boom")
 
 
+def test_failure_report_without_inbound_sdk_is_not_retried(adapter):
+    adapter._inkbox = types.SimpleNamespace()
+    adapter._report_inbound_failure(_data(), "boom")
+
+
 def test_backoff_counts_as_activity_but_pending_report_does_not(tmp_path):
     from inkbox_plugin import managed_lifecycle
 

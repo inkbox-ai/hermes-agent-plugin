@@ -36,4 +36,4 @@ addopts = ["--import-mode=importlib"]
 markers = ["expects_live_call: allow expected calls to proceed until test teardown"]
 
 [tool.uv.sources]
-inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "c173831c7ac6a78649090741e06977627568ce95", subdirectory = "sdk/python" }
+inkbox = { git = "https://github.com/inkbox-ai/inkbox.git", rev = "dbcc15ccd2304e6104e6dd5286155d923698294e", subdirectory = "sdk/python" }
