@@ -68,7 +68,7 @@ def reconcile_subscription(client: Any, identity_id: Any, url: str) -> None:
             if overlap.intersection(SLACK_INCOMING_EVENTS):
                 message_subscriptions.append(sub)
     missing = [event for event in events if event not in covered]
-    # Slack transcripts are delivered only to a subscription that also selected the original message.
+    # Keep the completion on the Slack message subscription; a URL holds each event once.
     target = next((sub for sub in message_subscriptions if TRANSCRIPTION_FINISHED in sub.event_types), None)
     if target is None and message_subscriptions:
         # Extend the existing receiver: a second channel-only subscription
