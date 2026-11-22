@@ -3727,6 +3727,14 @@ class InkboxAdapter(BasePlatformAdapter):
             and recovery_target.get("mode") == mode
             and mode in {"sms", "imessage", "email"}
         )
+        # A reply produced by a live inbound text turn belongs to that turn,
+        # even if a call for the same contact ended while it was generating.
+        live_text_turn = bool(
+            origin
+            and origin.get("chat_id") == str(chat_id)
+            and origin.get("mode") in {"sms", "imessage", "email", "whatsapp"}
+        )
+        source_bound = source_bound_recovery or live_text_turn
 
         # End-of-call grace window: when a voice call ends, the agent's last
         # in-flight turn often finishes generating *after* the WS has closed.
@@ -3749,7 +3757,7 @@ class InkboxAdapter(BasePlatformAdapter):
         active_hosted_turns = getattr(
             self, "_hosted_post_call_active_chats", {},
         )
-        if active_hosted_turns.get(chat_key, 0) > 0 and not source_bound_recovery:
+        if active_hosted_turns.get(chat_key, 0) > 0 and not source_bound:
             logger.info(
                 "[Inkbox] Suppressed hosted post-call model text for chat %s: %s…",
                 chat_id, (content or "")[:60].replace("\n", " "),
@@ -3764,7 +3772,7 @@ class InkboxAdapter(BasePlatformAdapter):
         pending_failure_replies = failure_replies.get(chat_key, 0)
         if (
             pending_failure_replies > 0
-            and not source_bound_recovery
+            and not source_bound
             and (content or "").startswith("Sorry, I encountered an error (")
         ):
             if pending_failure_replies == 1:
@@ -3785,13 +3793,18 @@ class InkboxAdapter(BasePlatformAdapter):
             and (time.time() - closed_at) < VOICE_GRACE_SECONDS
             and chat_id not in self._active_call_ws
             and not self._last_inbound_modality.get(str(chat_id))
-            and not source_bound_recovery
+            and not source_bound
         ):
             logger.info(
                 "[Inkbox] Suppressed post-call voice-leakage for chat %s: %s…",
                 chat_id, (content or "")[:60].replace("\n", " "),
             )
             return SendResult(success=True, message_id="suppressed-post-call-leak")
+        if live_text_turn and (closed_at is not None or active_hosted_turns.get(chat_key, 0) > 0):
+            logger.info(
+                "[Inkbox] Delivering %s reply for chat %s despite recent call activity",
+                origin.get("mode"), chat_id,
+            )
         # Garbage-collect stale entries so the dict doesn't grow unbounded.
         if closed_at is not None and (time.time() - closed_at) > VOICE_GRACE_SECONDS:
             self._voice_recently_closed.pop(str(chat_id), None)
@@ -4103,8 +4116,13 @@ class InkboxAdapter(BasePlatformAdapter):
                         email_rfc_message_id=in_reply_to or None,
                         email_subject=subject,
                     )
+                logger.info(
+                    "[Inkbox] Sent email for chat %s id=%s reply=%s",
+                    chat_id, msg_id or "?", bool(reply_to or stored_id or stash),
+                )
                 return SendResult(success=True, message_id=msg_id)
             except Exception as exc:
+                logger.warning("[Inkbox] Email send failed for chat %s: %s", chat_id, exc)
                 failure = SendResult(success=False, error=f"send_email failed: {exc}")
                 await self._maybe_wake_on_send_rejection(
                     mode="email",
@@ -6698,6 +6716,10 @@ class InkboxAdapter(BasePlatformAdapter):
             auto_skill=auto_skill,
         )
         await self._enqueue(event)
+        logger.info(
+            "[Inkbox] Enqueued inbound email for chat %s id=%s",
+            chat_id, message.get("id") or "?",
+        )
         return web.Response(status=200, text="ok")
 
     async def _on_mail_delivery_failure(self, envelope: Dict[str, Any]) -> "web.Response":

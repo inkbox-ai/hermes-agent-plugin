@@ -1277,3 +1277,38 @@ def test_sms_correction_preserves_exact_action_body(tmp_path, monkeypatch):
     asyncio.run(instance.on_processing_complete(events[0], "success"))
     assert body in events[1].text
     assert "Email the release details" not in events[1].text
+
+
+@pytest.mark.parametrize("hosted_turn_running", [False, True])
+def test_live_email_turn_reply_survives_call_completion(tmp_path, hosted_turn_running):
+    from inkbox_plugin.conversation import reply_route
+
+    instance, events = _adapter(tmp_path)
+    sent = []
+    instance._inkbox = types.SimpleNamespace(get_identity=lambda _handle: types.SimpleNamespace(
+        reply_all_email=lambda stored_id, body_text: sent.append((stored_id, body_text)) or types.SimpleNamespace(id="out-1"),
+    ))
+    instance._last_inbound_email = {"contact-1": {
+        "from_address": "sender@example.com", "stored_message_id": "mail-1",
+    }}
+    instance._remember_outbound_context = lambda **_kwargs: None
+    instance._last_inbound_modality["contact-1"] = "email"
+    asyncio.run(instance._on_call_ended(_payload()))
+    if hosted_turn_running:
+        asyncio.run(instance.on_processing_start(events[0]))
+
+    async def email_turn_reply():
+        reply_route.set({
+            "chat_id": "contact-1", "mode": "email", "message_id": "mail-1",
+            "stored_message_id": "mail-1", "from_address": "sender@example.com",
+        })
+        return await instance.send("contact-1", "I received your email.")
+
+    result = asyncio.run(email_turn_reply())
+
+    assert result.success is True
+    assert result.message_id == "out-1"
+    assert sent == [("mail-1", "I received your email.")]
+    # The call-review turn's own text, with no inbound route, stays suppressed.
+    stale = asyncio.run(instance.send("contact-1", "Call reflection."))
+    assert stale.message_id.startswith("suppressed-")
