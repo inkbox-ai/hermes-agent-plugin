@@ -28,6 +28,9 @@ def status(adapter):
             tasks = tasks.values()
         active += sum(not task.done() for task in tasks)
     active += sum(getattr(adapter, "_hosted_post_call_active_chats", {}).values())
+    inbound = getattr(adapter, "_inbound_events", None)
+    if inbound is not None:
+        active += inbound.pending()
     for name in ("_companion", "_native_turns"):
         receiver = getattr(adapter, name, None)
         if receiver is None:
