@@ -2100,11 +2100,12 @@ def _imessage_send_failure(exc: Exception, *, target: str) -> SendResult:
     )
 
 
-def _extract_text_media(
+async def _cache_text_media(
     text_msg: Dict[str, Any],
     *,
     marker_label: str = "MMS",
 ) -> Tuple[list[str], list[str], list[str]]:
+    """Return aligned Hermes cache paths and MIME types, with notes for unavailable attachments."""
     media_items = (
         text_msg.get("media")
         or text_msg.get("attachments")
@@ -2116,7 +2117,7 @@ def _extract_text_media(
     if not isinstance(media_items, list):
         media_items = [media_items]
 
-    urls: list[str] = []
+    paths: list[str] = []
     types: list[str] = []
     markers: list[str] = []
     for item in media_items:
@@ -2139,16 +2140,36 @@ def _extract_text_media(
                 or item.get("mime_type")
                 or item.get("type")
             )
-        if url:
-            urls.append(url)
-        media_type = content_type or "unknown"
-        types.append(media_type)
-        markers.append(f"[{marker_label} attachment received: {media_type}]")
+        media_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if url and media_type in ("", "application/octet-stream"):
+            media_type = mimetypes.guess_type(url.split("?", 1)[0].split("#", 1)[0])[0] or media_type
+        if url and media_type.startswith(("image/", "audio/")):
+            try:
+                from gateway.platforms import base
+
+                if media_type.startswith("image/"):
+                    cache = base.cache_image_from_url
+                    ext = mimetypes.guess_extension(media_type) or ".jpg"
+                else:
+                    cache = base.cache_audio_from_url
+                    ext = mimetypes.guess_extension(media_type) or ".ogg"
+                path = await cache(url, ext=ext)
+                if not Path(path).is_absolute() or not Path(path).is_file():
+                    raise ValueError("Attachment cache did not return a local file")
+            except Exception as exc:
+                # Signed attachment URLs can appear in exception messages.
+                logger.warning("[Inkbox] %s attachment could not be cached (%s)", marker_label, type(exc).__name__)
+            else:
+                paths.append(path)
+                types.append(media_type)
+                markers.append(f"[{marker_label} attachment received: {media_type}]")
+                continue
+        markers.append(f"[{marker_label} attachment could not be retrieved: {media_type or 'unknown'}]")
     from .transcription import voice_note_context
     voice_context = voice_note_context(text_msg)
     if voice_context:
         markers.append(voice_context)
-    return urls, types, markers
+    return paths, types, markers
 
 
 def _text_message_metadata(message: Any, *, mode: str) -> Dict[str, Any]:
@@ -7505,10 +7526,6 @@ class InkboxAdapter(BasePlatformAdapter):
         if contact_name is None and sender_identity:
             contact_name = sender_identity["name"] or sender_identity["handle"] or None
         raw_body = text_msg.get("text") or ""
-        body = raw_body
-        media_urls, media_types, media_markers = _extract_text_media(text_msg)
-        if media_markers:
-            body = "\n".join(part for part in [body, *media_markers] if part)
         timestamp = _parse_inkbox_timestamp(text_msg.get("created_at"))
         contact_memories = self._contact_memories(
             envelope,
@@ -7527,6 +7544,8 @@ class InkboxAdapter(BasePlatformAdapter):
             )
             return web.Response(status=200, text="ok")
 
+        media_urls, media_types, media_markers = await _cache_text_media(text_msg)
+        body = "\n".join(part for part in [raw_body, *media_markers] if part)
         self._last_inbound_modality[str(chat_id)] = "sms"
         sms_state = {
             "conversation_id": conversation_id,
@@ -8344,7 +8363,7 @@ class InkboxAdapter(BasePlatformAdapter):
             contact_name = sender_identity["name"] or sender_identity["handle"] or None
         raw_body = message.get("content") or ""
         body = raw_body
-        media_urls, media_types, media_markers = _extract_text_media(
+        media_urls, media_types, media_markers = await _cache_text_media(
             message, marker_label="iMessage",
         )
         if media_markers:

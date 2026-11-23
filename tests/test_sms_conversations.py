@@ -223,8 +223,23 @@ def test_adapter_sms_reply_uses_thread_conversation_id(monkeypatch):
     assert identity.sent_texts == [{"conversation_id": "conv-456", "text": "reply"}]
 
 
-def test_inbound_group_sms_injects_silence_policy(monkeypatch):
+def test_inbound_group_sms_injects_silence_policy(monkeypatch, tmp_path, caplog):
+    from gateway.platforms import base
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     identity = FakeIdentity()
+    cached = tmp_path / "photo.png"
+    cached.write_bytes(b"synthetic cached image")
+    expired_url = "https://example.test/expired.jpg?signature=synthetic-secret"
+    photo_url = "https://example.test/photo.png?signature=synthetic"
+
+    async def cache_image(url, *, ext):
+        if url == expired_url:
+            raise ValueError(expired_url)
+        assert (url, ext) == (photo_url, ".png")
+        return str(cached)
+
+    monkeypatch.setattr(base, "cache_image_from_url", cache_image, raising=False)
 
     async def _inline_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -262,6 +277,11 @@ def test_inbound_group_sms_injects_silence_policy(monkeypatch):
                 "local_phone_number": "+15555550100",
                 "conversation_id": "conv-123",
                 "text": "Dinner moved to 7.",
+                "media": [
+                    {"url": expired_url, "content_type": "image/jpeg"},
+                    {"content_type": "image/gif"},
+                    {"url": photo_url},
+                ],
             },
         },
     }))
@@ -273,6 +293,13 @@ def test_inbound_group_sms_injects_silence_policy(monkeypatch):
     assert "participants=+15555550101,+15555550102" in events[0].text
     assert "Group SMS response policy" in events[0].text
     assert "return exactly [SILENT]" in events[0].text
+    assert "Dinner moved to 7." in events[0].text
+    assert "attachment could not be retrieved: image/jpeg" in events[0].text
+    assert "attachment could not be retrieved: image/gif" in events[0].text
+    assert events[0].media_urls == [str(cached)]
+    assert events[0].media_types == ["image/png"]
+    assert "attachment could not be cached (ValueError)" in caplog.text
+    assert expired_url not in caplog.text
     assert events[0].source.thread_id == "sms:conv-123"
     assert adapter._last_inbound_sms["sms:conv-123"]["conversation_id"] == "conv-123"
     assert events[0].source.chat_id == "sms:conv-123"
