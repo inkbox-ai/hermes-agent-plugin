@@ -492,8 +492,20 @@ def test_adapter_imessage_reply_uses_thread_conversation_id(monkeypatch):
     assert identity.sent_imessages == [{"conversation_id": "imconv-456", "text": "reply"}]
 
 
-def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
+def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch, tmp_path):
+    from gateway.platforms import base
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     identity = FakeIdentity()
+    cached = tmp_path / "photo.png"
+    cached.write_bytes(b"synthetic cached image")
+    signed_url = "https://example.test/photo.png?signature=synthetic"
+
+    async def cache_image(url, *, ext):
+        assert (url, ext) == (signed_url, ".png")
+        return str(cached)
+
+    monkeypatch.setattr(base, "cache_image_from_url", cache_image, raising=False)
 
     async def _inline_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -530,6 +542,7 @@ def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
                 "remote_number": "+15555550101",
                 "conversation_id": "imconv-123",
                 "content": "Dinner moved to 7.",
+                "attachments": [{"download_url": signed_url, "mime_type": "image/png"}],
             },
         },
     }))
@@ -538,6 +551,9 @@ def test_inbound_imessage_builds_marker_and_stashes_state(monkeypatch):
     assert len(events) == 1
     assert events[0].text.startswith("[inkbox:imessage from=+15555550101 conversation_id=imconv-123")
     assert "Dinner moved to 7." in events[0].text
+    assert events[0].media_urls == [str(cached)]
+    assert events[0].media_types == ["image/png"]
+    assert signed_url not in events[0].text
     assert events[0].source.thread_id == "imessage:imconv-123"
     assert adapter._last_inbound_modality["contact-123"] == "imessage"
     assert adapter._last_inbound_imessage["contact-123"]["conversation_id"] == "imconv-123"

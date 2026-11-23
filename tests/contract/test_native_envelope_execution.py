@@ -230,9 +230,9 @@ def test_real_authority_restores_owned_event_and_delivers_once(tmp_path, monkeyp
                 "imessage_reply_target": original.message_id, "imessage_event_ids": [original.message_id],
                 "imessage_sources": [{"id": original.message_id}]}}
         if scenario == "remote_media":
-            from inkbox_plugin.adapter import _extract_text_media
-            original.media_urls, original.media_types, _ = _extract_text_media({"media": [
-                {"url": "https://example.test/unavailable.png", "content_type": "image/png"}]})
+            # Exercise the host fallback independently of Inkbox's caching.
+            original.media_urls = ["https://example.test/unavailable.png"]
+            original.media_types = ["image/png"]
         if mode == "imessage":
             original.metadata["inkbox_buffer_context"] = True
         try:
