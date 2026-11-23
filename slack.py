@@ -23,6 +23,7 @@ SLACK_ATTENTION_EVENTS = tuple(
 )
 SLACK_STOP_EVENT = "slack.session_stopped"
 SLACK_SUBSCRIPTION_EVENTS = (*SLACK_INCOMING_EVENTS, SLACK_STOP_EVENT)
+TRANSCRIPTION_FINISHED = "message.transcription_finished"
 SLACK_MAX_TEXT_LENGTH = 12000
 
 
@@ -55,28 +56,79 @@ def reconcile_subscription(client: Any, identity_id: Any, url: str) -> None:
     slack_resource(client)
     subscriptions = client.webhooks.subscriptions
     events = list(SLACK_SUBSCRIPTION_EVENTS)
+    rows = [sub for sub in subscriptions.list(agent_identity_id=identity_id, scope="identity", url=url) if sub.url == url]
     covered = set()
     message_subscriptions = []
-    for sub in subscriptions.list(agent_identity_id=identity_id, scope="identity", url=url):
+    for sub in rows:
         overlap = set(sub.event_types) & set(events)
-        if sub.url == url and overlap:
+        if overlap:
             if sub.status != "active":
                 raise RuntimeError("The Slack subscription is paused; resume it before starting")
             covered.update(overlap)
             if overlap.intersection(SLACK_INCOMING_EVENTS):
                 message_subscriptions.append(sub)
     missing = [event for event in events if event not in covered]
-    if not missing:
-        return
-    if message_subscriptions:
+    # Keep the completion on the Slack message subscription; a URL holds each event once.
+    target = next((sub for sub in message_subscriptions if TRANSCRIPTION_FINISHED in sub.event_types), None)
+    if target is None and message_subscriptions:
         # Extend the existing receiver: a second channel-only subscription
         # would deliver mentions again under another event category.
-        sub = max(message_subscriptions, key=lambda item: len(set(item.event_types).intersection(SLACK_INCOMING_EVENTS)))
-        subscriptions.update(sub.id, event_types=list(dict.fromkeys([*sub.event_types, *missing])), scope="identity")
+        target = max(message_subscriptions, key=lambda item: len(set(item.event_types).intersection(SLACK_INCOMING_EVENTS)))
+    finished = target is None or TRANSCRIPTION_FINISHED not in target.event_types
+    if not missing and not finished:
         return
-    # A test receiver must not replace another receiver or another channel.
-    subscriptions.create(
-        agent_identity_id=identity_id, url=url, event_types=missing,
+    if finished:
+        # One URL holds each event in a single active subscription, so move it here.
+        _release_finished(subscriptions, [sub for sub in rows if sub is not target])
+
+    def apply(wanted: list[str]) -> None:
+        if target is not None:
+            subscriptions.update(target.id, event_types=list(dict.fromkeys([*target.event_types, *wanted])), scope="identity")
+        else:
+            # A test receiver must not replace another receiver or another channel.
+            subscriptions.create(agent_identity_id=identity_id, url=url, event_types=wanted)
+
+    try:
+        apply([*missing, *([TRANSCRIPTION_FINISHED] if finished else [])])
+    except Exception as exc:
+        if not finished or not transcription_subscription_unsupported(exc):
+            raise
+        if missing:
+            apply(missing)  # Older APIs without transcription keep Slack delivery unchanged.
+
+
+def _release_finished(subscriptions: Any, rows: list) -> None:
+    for sub in rows:
+        if sub.status != "active" or TRANSCRIPTION_FINISHED not in sub.event_types:
+            continue
+        remaining = [event for event in sub.event_types if event != TRANSCRIPTION_FINISHED]
+        if remaining:
+            subscriptions.update(sub.id, event_types=remaining, scope="identity")
+            continue
+        try:
+            subscriptions.delete(sub.id)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise
+
+
+def transcription_subscription_unsupported(exc: Exception) -> bool:
+    """An API that predates transcription rejects only that event name."""
+    if isinstance(exc, ValueError):
+        return str(exc).startswith("Identity-wide webhook subscriptions are not supported by this server yet.")
+    errors = getattr(exc, "detail", None)
+    if getattr(exc, "status_code", None) != 422 or not isinstance(errors, list) or not errors:
+        return False
+    # The API reports one enum error per channel when none recognize the event.
+    return all(
+        isinstance(error, dict)
+        and error.get("type") == "enum"
+        and isinstance(error.get("loc"), list)
+        and error["loc"][:2] == ["body", "event_types"]
+        and len(error["loc"]) > 2
+        and type(error["loc"][2]) is int
+        and error.get("input") == TRANSCRIPTION_FINISHED
+        for error in errors
     )
 
 

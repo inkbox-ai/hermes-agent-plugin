@@ -130,6 +130,12 @@ def test_unknown_transcription_event_requires_an_event_enum_rejection():
     issue = {"type": "enum", "loc": ["body", "event_types", 0, "MailWebhookEventType"],
              "input": "message.transcription_finished"}
     assert adapter_mod._transcription_subscription_unsupported(InkboxAPIError(422, [issue]))
+    assert adapter_mod._transcription_subscription_unsupported(
+        InkboxAPIError(422, [{**issue, "loc": ["body", "event_types", 6]}])
+    )
+    assert not adapter_mod._transcription_subscription_unsupported(
+        InkboxAPIError(422, [{**issue, "loc": ["body", "event_types"]}])
+    )
     assert not adapter_mod._transcription_subscription_unsupported(
         InkboxAPIError(422, [issue, {"loc": ["body", "url"], "type": "url_scheme"}])
     )

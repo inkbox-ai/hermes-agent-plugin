@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.41 (unreleased)
+
+- Wait for Slack voice-note transcripts, including Companion turns, the same way as MMS, iMessage, and WhatsApp, and register Slack transcription completions on the Slack subscription.
+
 ## 0.2.40 (unreleased)
 
 - Add `INKBOX_DELIVERY_MODE=local`: open no tunnel, register no webhook URL, listen on `127.0.0.1` only, and accept event bodies up to 2 MiB with unchanged signature verification.

@@ -10,15 +10,44 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
-RECEIVED = {"text.received": "text", "imessage.received": "imessage", "whatsapp.received": "whatsapp"}
-FINISHED = "message.transcription_finished"
+from .slack import SLACK_INCOMING_EVENTS, TRANSCRIPTION_FINISHED
+
+RECEIVED = {"text.received": "text", "imessage.received": "imessage", "whatsapp.received": "whatsapp",
+            **{event: "slack" for event in SLACK_INCOMING_EVENTS}}
+FINISHED = TRANSCRIPTION_FINISHED
 
 
 def message_of(envelope: dict[str, Any], channel: str) -> dict[str, Any]:
     """Read the original channel-specific message wrapper."""
     data = envelope.get("data") or {}
+    if not isinstance(data, dict):
+        return {}
+    if channel == "slack":
+        return slack_message(data)
     value = data.get("text_message" if channel == "text" else "message")
     return value if isinstance(value, dict) else {}
+
+
+def slack_message(data: dict[str, Any]) -> dict[str, Any]:
+    """Present a Slack event's retained message ID and files as the shared message shape."""
+    event = data.get("event")
+    files = event.get("files") if isinstance(event, dict) else None
+    text = event.get("text") if isinstance(event, dict) else None
+    return {"id": data.get("message_id"), "connection_id": data.get("connection_id"),
+            "conversation_id": data.get("conversation_id"), "text": text if isinstance(text, str) else "",
+            "media": files if isinstance(files, list) else []}
+
+
+def with_message(envelope: dict[str, Any], channel: str, message: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the envelope carrying the resolved message; Slack files keep their native place."""
+    data = dict(envelope.get("data") or {})
+    if channel == "slack":
+        event = data.get("event")
+        if isinstance(event, dict) and isinstance(event.get("files"), list):
+            data["event"] = {**event, "files": message.get("media") or []}
+    else:
+        data["text_message" if channel == "text" else "message"] = message
+    return {**envelope, "data": data}
 
 
 def completion_channel(envelope: dict[str, Any]) -> str | None:
@@ -43,7 +72,7 @@ def merge_results(original: dict[str, Any], current: dict[str, Any]) -> dict[str
     """Refresh only attachment results; never replace sender text or routing."""
     if not original.get("id") or str(current.get("id")) != str(original["id"]):
         return original
-    for name in ("conversation_id", "agent_identity_id", "direction"):
+    for name in ("conversation_id", "connection_id", "agent_identity_id", "direction"):
         if original.get(name) is not None and current.get(name) is not None and str(original[name]) != str(current[name]):
             return original
     result = copy.deepcopy(original)
@@ -184,6 +213,8 @@ async def poll_message(adapter: Any, channel: str, message: dict[str, Any]) -> d
     from urllib.parse import quote
 
     message_id = quote(str(message["id"]), safe="")
+    if channel == "slack":
+        return await poll_slack_message(adapter, message)
     if channel == "text":
         identity = getattr(adapter, "_reply_identity", None)
         phone = getattr(identity, "phone_number", None)
@@ -196,6 +227,24 @@ async def poll_message(adapter: Any, channel: str, message: dict[str, Any]) -> d
         path = f"/{channel}/messages/{message_id}"
         params = {"agent_identity_id": str(adapter._identity_id)}
     return await asyncio.to_thread(adapter._inkbox._api_http.get, path, params=params, timeout=8)
+
+
+async def poll_slack_message(adapter: Any, message: dict[str, Any]) -> dict[str, Any]:
+    """Read one retained Slack message by its ID; its files carry the current results."""
+    from urllib.parse import quote
+
+    connection_id = quote(str(message["connection_id"]), safe="")
+    result = await asyncio.to_thread(
+        adapter._inkbox._api_http.get, f"/slack/connections/{connection_id}/archive/messages",
+        params={"message_id": str(message["id"])}, timeout=8,
+    )
+    rows = result.get("messages") if isinstance(result, dict) else None
+    current = next((row for row in rows or [] if isinstance(row, dict) and str(row.get("id")) == str(message["id"])), None)
+    if current is None:
+        raise LookupError("Slack message is no longer retained")
+    files = current.get("files")
+    return {"id": current["id"], "connection_id": current.get("connection_id"),
+            "conversation_id": current.get("conversation_id"), "media": files if isinstance(files, list) else []}
 
 
 def receiver_starting(detail):

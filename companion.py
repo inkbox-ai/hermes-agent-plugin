@@ -106,6 +106,14 @@ def message(envelope: dict) -> dict:
     return data.get("text_message" if str(envelope.get("event_type")).startswith("text.") else "message") or {}
 
 
+def voice_message(envelope: dict, channel: str) -> dict:
+    """Slack keeps per-file results on the native event under its retained message ID."""
+    if channel == "slack":
+        from .transcription import message_of
+        return message_of(envelope, "slack")
+    return message(envelope)
+
+
 def sender(envelope: dict) -> str:
     item = message(envelope)
     return str(next((item.get(key) for key in (
@@ -674,13 +682,16 @@ class CompanionReceiver:
 
     async def _resolve_voice_note(self, row: dict, turn: dict) -> None:
         """Resolve audio inside the checkpoint owner, never inside webhook acceptance."""
-        channel = {"phone": "text", "imessage": "imessage", "whatsapp": "whatsapp"}.get(row["meta"]["channel"])
+        channel = {"phone": "text", "imessage": "imessage", "whatsapp": "whatsapp", "slack": "slack"}.get(row["meta"]["channel"])
         envelope = turn.get("envelope")
-        item = message(envelope) if envelope else {}
-        if not channel or not any(isinstance(media, dict) and isinstance(media.get("transcription"), dict)
-                                  for media in item.get("media") or []):
+        item = voice_message(envelope, channel) if envelope and channel else {}
+        if not item.get("id") or not any(isinstance(media, dict) and isinstance(media.get("transcription"), dict)
+                                         for media in item.get("media") or []):
             return
-        from .transcription import merge_results, pending, poll_message, voice_note_context
+        # Slack waits only when the transcription message is the verified archive source.
+        if channel == "slack" and str(item["id"]) != str(message(envelope).get("id")):
+            return
+        from .transcription import merge_results, pending, poll_message, voice_note_context, with_message
         gate = self.adapter._voice_note_receiver()
         state = turn.get("voice_note_resolution")
         if state is None:
@@ -688,7 +699,8 @@ class CompanionReceiver:
             self._save(row)
         original = row.get("trigger_envelope")
         state.setdefault("was_pending", pending(item) or bool(
-            original and str(message(original).get("id")) == str(item.get("id")) and pending(message(original))
+            original and str(voice_message(original, channel).get("id")) == str(item.get("id"))
+            and pending(voice_message(original, channel))
         ))
         if "result" not in state:
             # The ordinary completion inbox can retain a callback that preceded this receipt or a restart.
@@ -707,10 +719,15 @@ class CompanionReceiver:
             state["result"] = merge_results(item, resolved)
             self._save(row)
         resolved = merge_results(item, state["result"])
-        turn["envelope"]["data"]["text_message" if channel == "text" else "message"] = resolved
+        if channel == "slack":
+            turn["envelope"]["data"] = with_message(turn["envelope"], channel, resolved)["data"]
+        else:
+            turn["envelope"]["data"]["text_message" if channel == "text" else "message"] = resolved
         if turn["phase"] == "initialization" and state["was_pending"] and not state.get("snapshot_refreshed"):
             snapshot = await self._snapshot(row)
-            if snapshot["reply_context"] != turn["reply_context"]:
+            # A Slack initializer replies in the trigger's own thread, not the snapshot's default scope.
+            scope = row.get("reply_context") if channel == "slack" else turn["reply_context"]
+            if snapshot["reply_context"] != scope:
                 raise ValueError("Companion reply scope changed while resolving the voice note")
             for key in ("text", "entries", "notices"):
                 turn[key] = snapshot.get(key, [] if key != "text" else "")
@@ -792,9 +809,9 @@ class CompanionReceiver:
             "sender_access": item.get("sender_access"),
             "attachments": item.get("attachments") or item.get("media") or item.get("media_urls") or [],
         }, ensure_ascii=False)
-        if meta["channel"] in {"phone", "imessage", "whatsapp"}:
+        if meta["channel"] in {"phone", "imessage", "whatsapp", "slack"}:
             from .transcription import voice_note_context
-            context = voice_note_context(item)
+            context = voice_note_context(voice_message(envelope, "slack") if meta["channel"] == "slack" else item)
             if context:
                 turn["text"] += "\n" + context
         quote = await self._whatsapp_reply_presentation(row, turn)
