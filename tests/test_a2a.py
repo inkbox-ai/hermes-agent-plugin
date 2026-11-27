@@ -763,6 +763,10 @@ def test_a2a_running_and_turn_failure_are_durable(tmp_path):
     assert entry["state"] == "running"
     assert "running" in entry["phases"]
 
+    def unavailable(*_args, **_kwargs):
+        raise ConnectionError("synthetic outage")
+
+    adapter._inkbox = types.SimpleNamespace(get_identity=unavailable)
     asyncio.run(adapter.on_processing_complete(
         event,
         types.SimpleNamespace(value="failure"),
@@ -773,6 +777,65 @@ def test_a2a_running_and_turn_failure_are_durable(tmp_path):
     assert entry["state"] == "turn_failed"
     assert entry["last_error"]["phase"] == "execution"
     assert entry["last_error"]["code"] == "turn_failed"
+    assert adapter._a2a_tasks_by_chat["a2a:identity-1:context-1"] == ["task-1"]
+
+
+def test_failed_a2a_turn_fails_task_with_generic_reason(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+    asyncio.run(adapter.on_processing_start(event))
+    receipts = len(adapter._a2a_receipts)
+
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+
+    assert adapter._a2a_receipts[receipts:] == [(
+        "task-1",
+        {"intent": "fail", "text": "The agent could not complete this task."},
+    )]
+    assert adapter._a2a_tasks_by_chat["a2a:identity-1:context-1"] == []
+    entry = json.loads(adapter._a2a_registry_path.read_text())["task-1:message-1"]
+    assert entry["state"] == "finalized"
+    assert entry["outcome"] == "failed"
+
+    result = asyncio.run(adapter._send_a2a_reply(
+        "a2a:identity-1:context-1",
+        "Sorry, I encountered an error (RuntimeError).",
+    ))
+    assert result.message_id == "a2a-no-reply"
+    assert len(adapter._a2a_receipts) == receipts + 1
+
+
+def test_failed_a2a_turn_keeps_explicit_or_canceled_outcome(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+    asyncio.run(adapter.on_processing_start(event))
+    receipts = len(adapter._a2a_receipts)
+    chat_id = "a2a:identity-1:context-1"
+    adapter._a2a_session_by_chat[chat_id] = "session-1"
+    write_a2a_turn_context("session-1", {
+        "task_id": "task-1",
+        "message_id": "message-1",
+        "reply_intent_committed": True,
+        "reply_intent": "complete",
+    })
+
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="cancelled"),
+    ))
+
+    assert len(adapter._a2a_receipts) == receipts
+    assert adapter._a2a_tasks_by_chat[chat_id] == ["task-1"]
 
 
 def test_a2a_progress_summary_uses_auxiliary_task_and_safe_tool_names():

@@ -652,7 +652,7 @@ These features use the existing Hermes platform, session store, authorization, a
 |---|---|---|
 | `INKBOX_SLACK_ENABLED` / platform `slack_enabled` | `false` | Expose Slack tools and accept signed Slack events. Explicit platform config takes precedence over the environment, including YAML loaded after tool registration. |
 | `INKBOX_IMESSAGE_THREADED_REPLIES` | `false` | Environment-only opt-in for source-anchored native replies and durable, noninterrupting iMessage follow-ups. |
-| `INKBOX_HERMES_VAULT_KEY` | unset | Local process secret used only when decrypting Vault credentials or generating TOTP. Never pass it in chat or tool arguments. |
+| `INKBOX_HERMES_VAULT_KEY` | unset | Process secret used only when decrypting Vault credentials or generating TOTP. For an agent hosted by Inkbox, save it as a Secret in the identity's Env vars tab. Never pass it in chat or tool arguments. |
 
 The SDK floor is **0.7.41**. It includes Slack file upload and operation APIs and dedicated WhatsApp support. Native iMessage replies require the **0.7.13** reply/thread APIs; Slack Companion requires the **0.7.14** Companion schema. Enabling an unavailable capability produces an explicit upgrade error rather than sending an unthreaded fallback. Disabled optional features do not require their newer interfaces.
 
@@ -663,7 +663,7 @@ The SDK floor is **0.7.41**. It includes Slack file upload and operation APIs an
 | SMS | Active number with SMS ready | Text reads remain available while that number exists, including during sending restrictions |
 | Slack | Local Slack opt-in and a connected workspace | Retained connections keep history/recovery; connection listing stays available when Slack is opted in |
 | WhatsApp | Configured and enabled channel | Configured channels keep history/recovery; readiness lookup stays available |
-| Vault | Existing Vault and a locally configured `INKBOX_HERMES_VAULT_KEY` | Metadata listing stays available without unlocking |
+| Vault | Existing Vault and a configured `INKBOX_HERMES_VAULT_KEY` | Metadata listing stays available without unlocking |
 
 Discovery uses one shared 60-second cache, separated by profile, API key, API origin, identity, and Slack configuration. Failed remote checks are reported as unknown and do not remove potentially usable tools; known missing prerequisites still hide their dependent tools. Invocation always rechecks access through the API. No secret payloads are read or decrypted during discovery. Hermes also caches tool definitions, so use explicit refresh to update an existing catalog after capabilities change.
 
@@ -727,7 +727,7 @@ Native delivery-failure callbacks are durable status, not new instructions. Call
 
 `inkbox_list_vault_secrets` lists accessible metadata without requiring the plugin key. `inkbox_get_vault_secret` decrypts a chosen secret; login payloads omit the TOTP seed and report `has_totp`. `inkbox_get_totp_code` returns only the current code and validity window. Secret IDs must come from accessible metadata. Metadata is filtered to the configured identity, including with an administrative API key. Each plaintext/code operation rechecks that identity’s access rules and uses a fresh per-secret read; expired/revoked access is not served from an old credential cache.
 
-Set **only `INKBOX_HERMES_VAULT_KEY` for this plugin** through the host's local secret mechanism. Migrate any old global `INKBOX_VAULT_KEY` or SDK-wide saved vault key out of this gateway process: the SDK itself auto-unlocks global configuration when constructing clients, which can fail unrelated operations or fetch secrets before metadata reads. The plugin does not mutate global environment/config to override that SDK behavior, and decryption always verifies the plugin-specific key. A bad plugin key does not affect ordinary channel clients or metadata listing. Never write keys, plaintext credentials, or TOTP seeds into conversation memory or logs.
+Set **only `INKBOX_HERMES_VAULT_KEY` for this plugin** through the host's local secret mechanism. On an agent hosted by Inkbox, save it as a Secret in the identity's **Env vars** tab in the Inkbox Console instead; a key exported in a terminal never reaches the hosted agent, which picks up the Secret once the change is applied. Migrate any old global `INKBOX_VAULT_KEY` or SDK-wide saved vault key out of this gateway process: the SDK itself auto-unlocks global configuration when constructing clients, which can fail unrelated operations or fetch secrets before metadata reads. The plugin does not mutate global environment/config to override that SDK behavior, and decryption always verifies the plugin-specific key. A bad plugin key does not affect ordinary channel clients or metadata listing. Never write keys, plaintext credentials, or TOTP seeds into conversation memory or logs.
 
 ### Durable recovery
 

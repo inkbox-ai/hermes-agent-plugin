@@ -19,7 +19,7 @@ Use this skill when an Inkbox tool fails, the user asks why Inkbox is not workin
 | `sender_sms_pending` | The Inkbox phone number is still propagating to carriers. Retry later and verify `smsStatus`. |
 | `recipient_not_opted_in` | Ask the recipient to text `START` to the agent's Inkbox number, then retry. |
 | `recipient_opted_out` | The recipient texted `STOP`; they must text `START` again before SMS can be sent. |
-| `Vault is locked` | Set `INKBOX_HERMES_VAULT_KEY` through the local gateway secret mechanism and restart; never paste it in chat. |
+| `Vault is locked` | `INKBOX_HERMES_VAULT_KEY` missing: direct the user to set it through the local gateway secret mechanism and restart (hosted by Inkbox: a Secret in the identity's Env vars tab). Never paste it in chat. |
 
 ## Vault unlock pattern
 
