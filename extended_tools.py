@@ -63,7 +63,7 @@ def dispatch(name, args, *, session_id="", **_kwargs):
             if name == "inkbox_list_vault_secrets" and args.get("secret_type") not in {None, "login", "api_key", "key_pair", "ssh_key", "other"}:
                 raise ValueError("Invalid secret_type")
             if name != "inkbox_list_vault_secrets" and not os.getenv("INKBOX_HERMES_VAULT_KEY"):
-                raise ValueError("Vault is locked. Set INKBOX_HERMES_VAULT_KEY in the host environment, reload that environment, then run /inkbox refresh; never send the key in chat.")
+                raise ValueError("Vault is locked. Set INKBOX_HERMES_VAULT_KEY in the host environment (hosted by Inkbox: a Secret in the identity's Env vars tab), reload that environment, then run /inkbox refresh; never send the key in chat.")
             client = Inkbox(**inkbox_client_kwargs(cfg.api_key, cfg.base_url))
             identity = client.get_identity(cfg.identity)
         else:
