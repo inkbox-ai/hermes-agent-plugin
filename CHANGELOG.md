@@ -2,7 +2,7 @@
 
 ## 0.2.42 (unreleased)
 
-- Fail an inbound A2A task with a generic reason when its Hermes turn fails without an explicit outcome, instead of leaving it working. Explicit outcomes and cancellations are unchanged; if the failure cannot be reported, the task keeps its failed-turn receipt.
+- Fail an inbound A2A task with a generic reason when its Hermes turn fails without an explicit outcome, instead of leaving it working. Explicit outcomes, cancellations, and tasks the server already shows as settled are unchanged. Reporting the failure is tried up to 3 times; if it still cannot be reported, the task keeps its failed-turn receipt. A failed task-registry write no longer stops the next queued A2A task in the same conversation.
 - Explain that an agent hosted by Inkbox reads `INKBOX_HERMES_VAULT_KEY` from a Secret in the identity's Env vars tab, not from a terminal export.
 
 ## 0.2.41 (unreleased)

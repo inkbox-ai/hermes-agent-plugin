@@ -735,6 +735,7 @@ _DESIRED_A2A_EVENTS: tuple[str, ...] = (
 _A2A_RECEIPT_TEMPLATE = "Task {task_id} received. Work is queued and starting."
 _A2A_PROGRESS_INTERVAL_SECONDS = 180.0
 _A2A_TURN_FAILED_REASON = "The agent could not complete this task."
+_A2A_TURN_FAIL_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0)
 _A2A_SETTLED_SERVER_STATES = frozenset({
     "completed",
     "failed",
@@ -6434,13 +6435,15 @@ class InkboxAdapter(BasePlatformAdapter):
         if outcome_value != "success":
             message_id = str(data.get("message_id") or event.message_id or "")
             if task_id and message_id:
-                self._write_a2a_registry(
-                    f"{task_id}:{message_id}",
-                    data,
-                    "turn_failed",
-                    error_phase="execution",
-                    error_code="turn_failed",
-                )
+                # Already logged; a registry error must not stall queued tasks.
+                with suppress(Exception):
+                    self._write_a2a_registry(
+                        f"{task_id}:{message_id}",
+                        data,
+                        "turn_failed",
+                        error_phase="execution",
+                        error_code="turn_failed",
+                    )
             if outcome_value == "failure" and task_id:
                 await self._fail_a2a_turn(chat_id, task_id)
         queue = self._a2a_events_by_chat.get(chat_id, [])
@@ -6471,26 +6474,38 @@ class InkboxAdapter(BasePlatformAdapter):
             and context.get("reply_intent_committed") is True
         ):
             return
-        try:
-            identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
-                self._inkbox.get_identity, self._identity_handle
-            )
-            await asyncio.to_thread(
-                identity.a2a_reply,
-                task_id,
-                intent="fail",
-                text=_A2A_TURN_FAILED_REASON,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[Inkbox] Could not fail A2A task %s after a failed turn (%s)",
-                task_id,
-                type(exc).__name__,
-            )
+        outcome = ""
+        for delay in (0.0, *_A2A_TURN_FAIL_RETRY_DELAYS):
+            await asyncio.sleep(delay)
+            try:
+                identity = getattr(self, "_reply_identity", None) or await asyncio.to_thread(
+                    self._inkbox.get_identity, self._identity_handle
+                )
+                authoritative = await asyncio.to_thread(identity.a2a_task, task_id)
+                state = str(getattr(authoritative.state, "value", authoritative.state))
+                if state in _A2A_SETTLED_SERVER_STATES:
+                    outcome = state
+                    break
+                await asyncio.to_thread(
+                    identity.a2a_reply,
+                    task_id,
+                    intent="fail",
+                    text=_A2A_TURN_FAILED_REASON,
+                )
+                outcome = "failed"
+                break
+            except Exception as exc:
+                logger.warning(
+                    "[Inkbox] Could not fail A2A task %s after a failed turn (%s)",
+                    task_id,
+                    type(exc).__name__,
+                )
+        if not outcome:
             return
         with suppress(ValueError):
             queue.remove(task_id)
-        self._finalize_a2a_task_registry(task_id, outcome="failed")
+        with suppress(Exception):
+            self._finalize_a2a_task_registry(task_id, outcome=outcome)
 
     async def _catch_up_a2a_tasks(self) -> None:
         """Drain every submitted task through the same durable ingestion path."""

@@ -751,7 +751,8 @@ def test_same_context_a2a_events_are_dispatched_one_at_a_time(tmp_path):
     assert [event.message_id for event in handed_off] == ["message-2"]
 
 
-def test_a2a_running_and_turn_failure_are_durable(tmp_path):
+def test_a2a_running_and_turn_failure_are_durable(monkeypatch, tmp_path):
+    monkeypatch.setattr(adapter_mod, "_A2A_TURN_FAIL_RETRY_DELAYS", (0, 0))
     adapter = _adapter(tmp_path)
     asyncio.run(adapter._on_a2a_event(_event()))
     event = adapter._enqueued[0]
@@ -807,6 +808,82 @@ def test_failed_a2a_turn_fails_task_with_generic_reason(tmp_path):
     ))
     assert result.message_id == "a2a-no-reply"
     assert len(adapter._a2a_receipts) == receipts + 1
+
+
+def test_failed_a2a_turn_respects_settled_server_state(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+    asyncio.run(adapter.on_processing_start(event))
+    receipts = len(adapter._a2a_receipts)
+    adapter._a2a_authoritative_task.state = "input_required"
+
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+
+    assert len(adapter._a2a_receipts) == receipts
+    assert adapter._a2a_tasks_by_chat["a2a:identity-1:context-1"] == []
+    entry = json.loads(adapter._a2a_registry_path.read_text())["task-1:message-1"]
+    assert entry["state"] == "finalized"
+    assert entry["outcome"] == "input_required"
+
+
+def test_failed_a2a_turn_retries_fail(monkeypatch, tmp_path):
+    monkeypatch.setattr(adapter_mod, "_A2A_TURN_FAIL_RETRY_DELAYS", (0, 0))
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+    asyncio.run(adapter.on_processing_start(event))
+    receipts = len(adapter._a2a_receipts)
+    get_identity = adapter._inkbox.get_identity
+    calls = []
+
+    def flaky(handle):
+        calls.append(handle)
+        if len(calls) == 1:
+            raise ConnectionError("synthetic outage")
+        return get_identity(handle)
+
+    adapter._inkbox = types.SimpleNamespace(get_identity=flaky)
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+
+    assert len(calls) == 2
+    assert adapter._a2a_receipts[receipts:] == [(
+        "task-1",
+        {"intent": "fail", "text": "The agent could not complete this task."},
+    )]
+    assert adapter._a2a_tasks_by_chat["a2a:identity-1:context-1"] == []
+
+
+def test_failed_a2a_turn_registry_error_still_feeds_next_event(tmp_path):
+    adapter = _adapter(tmp_path)
+    asyncio.run(adapter._on_a2a_event(_event()))
+    event = adapter._enqueued[0]
+    chat_id = "a2a:identity-1:context-1"
+    queued = types.SimpleNamespace(message_id="message-2")
+    adapter._a2a_events_by_chat[chat_id].append(queued)
+    handed_off = []
+
+    async def handle_message(next_event):
+        handed_off.append(next_event)
+
+    def broken_registry(*_args, **_kwargs):
+        raise OSError("synthetic disk error")
+
+    adapter.handle_message = handle_message
+    adapter._write_a2a_registry = broken_registry
+    asyncio.run(adapter.on_processing_complete(
+        event,
+        types.SimpleNamespace(value="failure"),
+    ))
+
+    assert handed_off == [queued]
+    assert adapter._a2a_receipts[-1][1]["intent"] == "fail"
 
 
 def test_failed_a2a_turn_keeps_explicit_or_canceled_outcome(monkeypatch, tmp_path):
